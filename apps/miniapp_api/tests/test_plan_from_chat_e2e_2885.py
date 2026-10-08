@@ -40,6 +40,7 @@ pytestmark = pytest.mark.django_db
 #: Свой аккаунт: лимит запросов чата считается по человеку, и общий с
 #: соседним набором аккаунт выбирал бы его лимит.
 PERSON = "2885100"
+FREE_ASKER = "2885106"
 
 
 @pytest.fixture(autouse=True)
@@ -162,3 +163,36 @@ def test_e5_removing_a_step_through_the_real_turn_and_saving_what_is_left(
     assert [s["capability_ref"] for s in command["decision"]["steps"]] == ["cap.evening_walk"]
     # Подтверждение опознаётся ревизией показа НОВОЙ карточки; вердикт — своей.
     assert command["evaluated_at_revision"] > command["confirmation"]["state_revision"]
+
+
+def test_e6_a_free_request_composes_with_the_triple_of_the_real_turn(
+    client: Client, tenant, wire, catalog: FakeCatalog, _concierge, settings
+) -> None:
+    """Настоящий вход: модель выбрала инструмент — сборка берёт тройку с
+    разговора, который ход передал консьержу. Аккаунт вне отладочного списка.
+
+    Консьерж подменён на месте выбора инструмента; всё до него (ворота,
+    ревизия хода, источник тройки на разговоре) — настоящее.
+    """
+    from apps.orchestrator.discovery import DiscoveryReply
+
+    settings.SYNTHETIC_TEST_TRIGGER_ACCOUNTS = ()
+
+    def _model_picked_the_tool(text: str, *, bot_user: Any, conversation: Any, **kw: Any) -> Any:
+        result = card.compose_for_request(
+            bot_user=bot_user, conversation=conversation, trace_id="t"
+        )
+        assert result is not None
+        return DiscoveryReply(text=result.reply_text, action_data=result.action_data)
+
+    _concierge.side_effect = _model_picked_the_tool
+    # Свой человек: у ручки чата лимит вопросов на человека в минуту.
+    _person_shell(tenant, FREE_ASKER)
+
+    answer = _ask(client, "помоги составить план", as_user=FREE_ASKER)
+
+    assert answer.status_code == 200, answer.content[:300]
+    assert answer.json()["answer"].startswith("• Режим сна")
+    assert len(catalog.composed) == 1
+    assert catalog.composed[0]["safety_state"] == "NORMAL"
+    assert isinstance(catalog.composed[0]["evaluated_at_revision"], int)
