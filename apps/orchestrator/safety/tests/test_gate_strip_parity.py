@@ -2,10 +2,11 @@
 
 Голосовое идёт в тот же гейт, что печатный текст, но через копию без знаков
 (``strip_for_gate``, K19-Б): OpenAI ставит запятые всегда, а «Умираю, хочу
-кофе» с запятой поднимало ложную тревогу. Отрицательная половина этой пробы
-давно есть (гипербола не тревожит). Здесь — положительная: **ни один
-настоящий шаблон гейта не должен переставать срабатывать** оттого, что из
-текста убрали знаки.
+кофе» с запятой поднимало ложную тревогу. С DRF-2684 само правило «умираю»
+знаков не замечает (его проба — ``test_umirayu_hyperbole_2684.py``), но копия
+остаётся: остальные шаблоны ждут между словами пробел. Здесь — положительная
+половина: **ни один настоящий шаблон гейта не должен переставать
+срабатывать** оттого, что из текста убрали знаки.
 
 Три утверждения, каждое красит красным своё:
 
@@ -144,9 +145,9 @@ _STOPS = {SafetyVerdict.HANDOFF, SafetyVerdict.MEDICAL, SafetyVerdict.BLOCK}
 def test_strip_never_turns_a_stop_into_a_pass() -> None:
     # Направление, ради которого копия и введена: убрать знаки может только
     # снять ложную тревогу, но не пропустить настоящую. Сравнивается «бот
-    # остановился / пропустил», а не порядок вердиктов: «умираю, от боли в
-    # груди» с запятой — HANDOFF (голое «умираю»), без запятой — MEDICAL
-    # (103 / 112), и второе точнее, а не слабее.
+    # остановился / пропустил», а не порядок вердиктов: «Умираю. От боли в
+    # груди.» с точкой — HANDOFF (голое «умираю»), без знаков — MEDICAL
+    # (103 / 112); оба — остановка.
     passed_through = []
     for phrase in CORPUS:
         for variant in spoken_variants(phrase):
@@ -158,15 +159,34 @@ def test_strip_never_turns_a_stop_into_a_pass() -> None:
     assert passed_through == []
 
 
-def test_hyperbole_is_the_only_thing_strip_relaxes() -> None:
-    # Отрицательная половина — для полноты рядом с положительной.
+def test_hyperbole_reads_the_same_with_and_without_marks() -> None:
+    # До DRF-2684 печатный текст с запятой давал тревогу, копия — нет: это была
+    # единственная вещь, которую копия ослабляла. Теперь вердикт один.
     for text in (
         "Умираю, хочу кофе.",
         "Умираю, как хочу этот маникюр!",
         "Умираю, как хочу на массаж.",
     ):
-        assert pre_check(text).verdict == SafetyVerdict.HANDOFF  # печатный с запятой — тревога
+        assert pre_check(text).verdict == SafetyVerdict.ALLOW
         assert pre_check(strip_for_gate(text)).verdict == SafetyVerdict.ALLOW
+
+
+def test_the_copy_is_still_stricter_than_the_raw_transcript() -> None:
+    # Почему VOICE_GATE_STRIP_PUNCT остаётся включённым и после DRF-2684.
+    # Распознавание ставит знак и внутри кризисной фразы, а многословные шаблоны
+    # ждут между словами пробел: сырой текст такую фразу пропускает, копия без
+    # знаков — ловит. На корпусе этой пробы так ведут себя 131 озвученный
+    # вариант из 817 (замер DRF-2684).
+    raw_passes = []
+    for phrase in CORPUS:
+        for variant in spoken_variants(phrase):
+            raw = pre_check(variant).verdict
+            copy = pre_check(strip_for_gate(variant)).verdict
+            if raw not in _STOPS and copy in _STOPS:
+                raw_passes.append(variant)
+    assert pre_check("Не хочу, жить.").verdict == SafetyVerdict.ALLOW
+    assert pre_check(strip_for_gate("Не хочу, жить.")).verdict == SafetyVerdict.HANDOFF
+    assert len(raw_passes) > 100
 
 
 def test_corpus_exercises_every_default_pattern() -> None:

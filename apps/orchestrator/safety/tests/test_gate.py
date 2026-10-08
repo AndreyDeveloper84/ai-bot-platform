@@ -42,27 +42,38 @@ class TestCrisisHandoff:
 
 
 class TestUmirayuNarrowing:
-    """`умираю` hyperbole vs real emergency (#1081 FP narrowing)."""
+    """`умираю` hyperbole vs real emergency (#1081 FP narrowing).
+
+    The full corpus of the rule lives in ``test_umirayu_hyperbole_2684.py``.
+    """
 
     @pytest.mark.parametrize(
         "text",
-        ["умираю как хочу этот маникюр", "умираю хочу кофе", "умираю как хочу на массаж"],
+        [
+            "умираю как хочу этот маникюр",
+            "умираю хочу кофе",
+            "умираю как хочу на массаж",
+            # DRF-2684: a comma no longer raises the crisis reply.
+            "Умираю, хочу кофе.",
+            "Умираю как, хочу этот маникюр.",
+        ],
     )
     def test_hyperbole_not_crisis(self, text):
         assert evaluate_inbound(text).allowed is True
 
     @pytest.mark.parametrize(
         "text",
-        ["помогите, умираю", "кажется, умираю"],
+        ["помогите, умираю", "кажется, умираю", "умираю, помогите", "умираю, всё"],
     )
     def test_real_emergency_still_caught(self, text):
         # Guard: narrowing must NOT drop a genuine bare «умираю» — crisis bucket.
         assert evaluate_inbound(text).allowed is False
         assert evaluate_inbound(text).verdict == "handoff"
 
-    def test_dying_of_pain_is_the_medical_emergency(self):
+    @pytest.mark.parametrize("text", ["умираю от боли в груди", "умираю, от боли в груди"])
+    def test_dying_of_pain_is_the_medical_emergency(self, text):
         # DRF-2000 (S-2): «умираю от боли» is a body, not despair — 103 / 112.
-        outcome = evaluate_inbound("умираю от боли в груди")
+        outcome = evaluate_inbound(text)
         assert outcome.allowed is False
         assert outcome.verdict == "medical"
 
