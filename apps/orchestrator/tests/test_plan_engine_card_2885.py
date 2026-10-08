@@ -241,7 +241,8 @@ class TestComposing:
         result = _turn(card.TRIGGER, conversation)
 
         assert result.reply_text == f"{outcome} · тест"
-        assert result.action_data is None
+        # Кнопки сохранения нет — только выход в меню (§72).
+        assert [b["label"] for b in result.action_data["buttons"]] == ["Меню"]
         assert card.STATE_KEY not in conversation.skill_state  # сохранять больше нечего
 
     def test_s4_a_step_without_a_label_is_neither_shown_nor_saveable(

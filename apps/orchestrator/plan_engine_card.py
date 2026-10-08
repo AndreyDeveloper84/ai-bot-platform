@@ -177,12 +177,17 @@ def pending_restrictions(conversation: Any, pending: dict[str, Any]) -> list[dic
 
 
 def _named(outcome: str) -> SkillResult:
-    """Исход по имени с пометкой — без объяснения, которого владелец не давал."""
+    """Исход по имени с пометкой — без объяснения, которого владелец не давал.
+
+    Под ответом — «Меню» (§72: ответ не оставляет человека без следующего шага).
+    """
+    from apps.orchestrator.next_steps import menu_button, next_step_action_data
+
     kind = "plan_engine_outcome"
     return SkillResult(
         reply_text=f"{outcome} · {TEST_MARK}",
         action_type=kind,
-        action_data=None,
+        action_data=next_step_action_data(menu_button()),
         meta={"reply_kind": kind, "plan_outcome": outcome},
     )
 
