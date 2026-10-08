@@ -17,6 +17,10 @@ import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { primeDisplayName } from "../components/CustomerAvatarEntry";
 
+vi.mock("../lib/plan-engine", () => ({
+  // DRF-2876 — сохранённого плана нового механизма нет: экран идёт прежним путём.
+  getSavedPlan: async () => null,
+}));
 vi.mock("../lib/plan-lite", async (importOriginal) => {
   const original = await importOriginal<typeof import("../lib/plan-lite")>();
   return {

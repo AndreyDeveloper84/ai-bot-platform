@@ -676,6 +676,19 @@ CUSTOMER_ROUTES: dict[str, Entry] = {
             "For every outcome other than PLAN the answer is the outcome name alone"
         ),
     ),
+    # --- Plan Engine saved plan (DRF-2876, own) -------------------------
+    "customer_plan_current": own(
+        "plan.plan_id",
+        "plan.steps[].step_id / label",
+        via="apps.miniapp_api.views_plan_engine:saved_plan_payload",
+        note=(
+            "the caller's own saved plan, read from the catalog under their "
+            "external_user_id: the plan id and, per step, its id and the curated "
+            "client label of the step's capability (catalog vocabulary, one text for "
+            "everyone). No capability keys, no goal text, no name, phone or health "
+            "answers; `plan` is null when nothing is saved"
+        ),
+    ),
     # --- Plan Lite proposal (DRF-2123, План-A, own) ---------------------
     "customer_plan_lite_proposal": own(
         "proposal.goal_key",

@@ -48,6 +48,7 @@ import { useScreenBack } from "../hooks/useScreenBack";
 import { ApiError } from "../lib/api";
 import { fetchDecisionContext } from "../lib/customer-goals";
 import { fetchDiaryConsentGate } from "../lib/food-scanner";
+import { getSavedPlan, type SavedPlan } from "../lib/plan-engine";
 import {
   closePlanLite,
   createPlanLite,
@@ -181,6 +182,8 @@ type Status =
   | { kind: "proposal"; proposal: PlanLiteProposal }
   | { kind: "need_goal" }
   | { kind: "card"; plan: PlanLite }
+  /** DRF-2876 — сохранённый план нового механизма: он основной (п.9 владельца). */
+  | { kind: "saved"; plan: SavedPlan }
   | { kind: "unavailable" }
   | { kind: "error" };
 
@@ -243,6 +246,22 @@ export function PlanLiteScreen() {
   const load = useCallback(async () => {
     setStatus({ kind: "loading" });
     setNotice(null);
+    // DRF-2876 — сначала сохранённый план нового механизма: раздел один, и
+    // сохранённый новый план в нём основной. Нет его (или механизм выключен
+    // на сервере) — прежний путь ниже, без изменений. Не прочитался — честное
+    // «не получилось»: прежний план вместо него был бы неправдой.
+    try {
+      const saved = await getSavedPlan();
+      if (!alive.current) return;
+      if (saved) {
+        setStatus({ kind: "saved", plan: saved });
+        return;
+      }
+    } catch {
+      if (!alive.current) return;
+      setStatus({ kind: "error" });
+      return;
+    }
     let plan: PlanLite | null;
     try {
       plan = await getPlanLite();
@@ -599,6 +618,22 @@ export function PlanLiteScreen() {
                 {busy ? PLAN_LITE_COPY.composing : PLAN_LITE_COPY.compose}
               </button>
             </div>
+          </section>
+        )}
+
+        {status.kind === "saved" && (
+          <section data-testid="plan-saved-card" aria-label={PLAN_LITE_COPY.title}>
+            <h2 className="food-scanner-diary__caption">{goalLabel || PLAN_LITE_COPY.title}</h2>
+            {/* Только подписи каталога: без номеров, счётчиков и шкал. */}
+            <ul className="food-scanner-diary__list">
+              {status.plan.steps.map((step) => (
+                <li key={step.step_id} className="food-scanner-diary__entry">
+                  <div className="food-scanner-diary__entry-main">
+                    <span className="food-scanner-diary__entry-dish">{step.label}</span>
+                  </div>
+                </li>
+              ))}
+            </ul>
           </section>
         )}
 

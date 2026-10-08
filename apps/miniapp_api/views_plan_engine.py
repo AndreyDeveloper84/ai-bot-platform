@@ -1,6 +1,7 @@
-"""Plan Engine — прокси Mini App к сборке плана в каталоге (DRF-2879, WP7 часть 1).
+"""Plan Engine — прокси Mini App к плану в каталоге (DRF-2879, DRF-2876).
 
     POST /customer/plan/decision  → собрать эфемерный план по действующей цели
+    GET  /customer/plan/current   → сохранённый план (см. :func:`customer_plan_current`)
 
 Каталог собирает план, но не вычисляет два входа — их приносит бот:
 
@@ -158,6 +159,85 @@ def customer_plan_decision(request: HttpRequest) -> HttpResponse:
     return JsonResponse(plan_decision_payload(document))
 
 
+def saved_plan_payload(plan: dict[str, Any], labels: dict[str, str]) -> dict[str, Any] | None:
+    """Сохранённый план → JSON экрана: идентификаторы и ПОДПИСИ шагов.
+
+    Ключ способности экрану не уходит — человеку его показывать нельзя, а
+    экрану он для показа не нужен. ``None`` — план показать нельзя: шагов нет
+    или у какого-то шага нет подтверждённой подписи. Частичный список не
+    отдаётся: план без одного шага выглядел бы целым планом.
+    """
+    raw_revision = plan.get("revision")
+    revision: dict[str, Any] = raw_revision if isinstance(raw_revision, dict) else {}
+    steps = [s for s in revision.get("steps") or [] if isinstance(s, dict)]
+    out: list[dict[str, str]] = []
+    for step in steps:
+        label = labels.get(str(step.get("capability_ref") or ""))
+        step_id = step.get("step_id")
+        if not label or not isinstance(step_id, str) or not step_id:
+            return None
+        out.append({"step_id": step_id, "label": label})
+    if not out:
+        return None
+    return {"plan_id": str(plan.get("plan_id") or ""), "steps": out}
+
+
+@require_http_methods(["GET"])
+@require_init_data
+def customer_plan_current(request: HttpRequest) -> HttpResponse:
+    """GET — сохранённый план нового механизма подписями каталога.
+
+    Решение владельца (лист 07.10, п.9): раздел «Мой план» один; сохранённый
+    новый план — основной. Экран спрашивает эту ручку первой и показывает
+    прежний план, только когда здесь ``plan: null``.
+
+    Просмотр вердикта безопасности не требует и ограничениями не закрыт.
+
+    * флаг выключен → 404 ``plan_engine_disabled`` до каталога (экран
+      показывает прежний план, как сегодня);
+    * плана нет → 200 ``{"plan": null}``;
+    * у шага нет подтверждённой подписи → 502 ``plan_step_unlabelled``: это
+      пробел данных куратора, громко в лог; экран не подставляет прежний
+      план вместо сохранённого нового.
+    """
+    from apps.integrations.ayla import external_user_id_for
+
+    if not plan_engine_enabled():
+        return _error("plan_engine_disabled", "plan engine is not enabled", 404)
+
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    external_user_id = external_user_id_for(bot_user)
+    try:
+        client = PlanEngineHttpClient()
+        plan = client.get_plan(external_user_id=external_user_id)
+        if plan is None:
+            return JsonResponse({"plan": None})
+        raw_revision = plan.get("revision")
+        steps = raw_revision.get("steps") if isinstance(raw_revision, dict) else None
+        keys = [
+            str(s.get("capability_ref") or "")
+            for s in (steps if isinstance(steps, list) else [])
+            if isinstance(s, dict)
+        ]
+        labels = (
+            client.capability_labels(external_user_id=external_user_id, keys=keys) if keys else {}
+        )
+    except Exception as exc:  # noqa: BLE001 — каждый класс назван в _refusal
+        return _refusal(exc)
+
+    payload = saved_plan_payload(plan, labels)
+    if payload is None:
+        logger.error(
+            "customer_plan_current.unlabelled bot_user=%s steps=%d labelled=%d",
+            bot_user.pk,
+            len(keys),
+            len(labels),
+        )
+        return _error("plan_step_unlabelled", "a plan step has no confirmed label", 502)
+    logger.info("customer_plan_current.done bot_user=%s steps=%d", bot_user.pk, len(keys))
+    return JsonResponse({"plan": payload})
+
+
 def _refusal(exc: Exception) -> JsonResponse:
     if isinstance(exc, PlanEngineDisabledError):
         return _error("plan_engine_disabled", "plan engine is not enabled", 404)
@@ -179,8 +259,10 @@ def _refusal(exc: Exception) -> JsonResponse:
 __all__ = [
     "SAFETY_POLICY_NOT_EVALUATED",
     "SAFETY_STATE_NOT_EVALUATED",
+    "customer_plan_current",
     "customer_plan_decision",
     "plan_decision_payload",
     "plan_engine_enabled",
     "plan_safety_input",
+    "saved_plan_payload",
 ]
