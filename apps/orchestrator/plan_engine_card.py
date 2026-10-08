@@ -23,12 +23,20 @@
 свой каталог не умеет — здесь этого нет. Частичное принятие — то же самое:
 убрал лишнее и сохранил оставшееся.
 
-### Два замка, и они разные
+### Входы
 
-* **Видимость входа** — :func:`trigger_visible`: включённый
-  ``PLAN_ENGINE_ENABLED`` и аккаунт мессенджера в серверном списке
-  ``SYNTHETIC_TEST_TRIGGER_ACCOUNTS`` (пуст по умолчанию — входа нет ни у
-  кого). Это не разрешение, а «кому команда вообще отвечает»;
+* **настоящий** (решение владельца 08.10): кнопка «Составить план»
+  (:data:`CB_COMPOSE`) и свободная просьба, которую опознаёт модель
+  (:func:`compose_for_request`). Достаточно включённого
+  ``PLAN_ENGINE_ENABLED``;
+* **отладочный** — команда :data:`TRIGGER`: дополнительно нужен аккаунт
+  мессенджера в серверном списке ``SYNTHETIC_TEST_TRIGGER_ACCOUNTS`` (пуст
+  по умолчанию). Для итоговой приёмки не годится.
+
+### Замки
+
+* **механизм** — :func:`engine_enabled`: без него не отвечает ничего;
+* **отладочная команда** — :func:`trigger_visible`, см. выше;
 * **допуск** решает каталог. Набранная руками команда без допуска каталога
   ничего не включает.
 
@@ -60,6 +68,10 @@ logger = logging.getLogger(__name__)
 
 #: Временная команда входа — только для сквозной проверки.
 TRIGGER = "/plan_test"
+
+#: «Составить план» — настоящий вход кнопкой (решение владельца 08.10).
+CB_COMPOSE = "cb:plan:compose"
+BUTTON_COMPOSE = "Составить план"
 
 CB_SAVE_PREFIX = "cb:plan:save:"
 SAVE_CALLBACK_RE = re.compile(r"^cb:plan:save:([0-9a-f]{8})$")
@@ -113,11 +125,21 @@ def _trigger_accounts() -> frozenset[str]:
     return frozenset(str(item).strip() for item in raw if str(item).strip())
 
 
-def trigger_visible(bot_user: Any) -> bool:
-    """Отвечает ли этому аккаунту временный вход. Пустой список — никому."""
+def engine_enabled() -> bool:
+    """Включён ли новый механизм плана. От него зависит ВСЁ в этом модуле."""
     from django.conf import settings
 
-    if not getattr(settings, "PLAN_ENGINE_ENABLED", False):
+    return bool(getattr(settings, "PLAN_ENGINE_ENABLED", False))
+
+
+def trigger_visible(bot_user: Any) -> bool:
+    """Отвечает ли этому аккаунту ОТЛАДОЧНАЯ команда. Пустой список — никому.
+
+    Только про команду :data:`TRIGGER`. Настоящий вход (кнопка «Составить
+    план», свободная просьба), кнопки карточки и показ сохранённого плана от
+    списка не зависят — им достаточно включённого механизма.
+    """
+    if not engine_enabled():
         return False
     account = f"{getattr(bot_user, 'channel', '')}:{getattr(bot_user, 'channel_user_id', '')}"
     return account in _trigger_accounts()
@@ -199,9 +221,16 @@ def try_handle_plan_trigger(
     trace_id: str,
     turn_safety: TurnSafetyProvider | None,
 ) -> SkillResult | None:
-    """Временная команда сборки плана; ``None`` — не наше (другой текст / нет входа)."""
+    """Вход сборки плана: кнопка «Составить план» или отладочная команда.
 
-    if (text or "").strip() != TRIGGER or not trigger_visible(bot_user):
+    ``None`` — не наше (другой текст / механизм выключен / команда не этому
+    аккаунту).
+    """
+
+    stripped = (text or "").strip()
+    by_command = stripped == TRIGGER and trigger_visible(bot_user)
+    by_button = stripped == CB_COMPOSE and engine_enabled()
+    if not (by_command or by_button):
         return None
     return _compose(
         bot_user=bot_user,
@@ -297,6 +326,30 @@ def _compose(
     return _proposal([labels_by_key[key] for key in keys], _token(decision))
 
 
+def compose_for_request(*, bot_user: Any, conversation: Any, trace_id: str) -> SkillResult | None:
+    """Свободная просьба составить план — её опознала модель (инструмент).
+
+    Решение владельца 08.10: «свободная просьба в чате … не требовать точной
+    кодовой фразы». Модель только ВЫБИРАЕТ инструмент; план собирает каталог
+    с тройкой этого хода, а ответ — та же карточка, что у кнопки.
+
+    ``None`` — механизм выключен: инструмент в этом случае модели и не
+    предлагается, а ветка здесь — второй рубеж.
+    """
+    if not engine_enabled():
+        return None
+    from apps.orchestrator.safety.plan_turn import turn_safety_of
+
+    return _compose(
+        bot_user=bot_user,
+        conversation=conversation,
+        trace_id=trace_id,
+        turn_safety=lambda: turn_safety_of(conversation),
+        excluded=[],
+        keep_previous_on_no_plan=False,
+    )
+
+
 # ─── вход: «Изменить» ────────────────────────────────────────────────────
 
 
@@ -332,7 +385,7 @@ def try_handle_plan_edit(
     stripped = (text or "").strip()
     edit = EDIT_CALLBACK_RE.match(stripped)
     drop = DROP_CALLBACK_RE.match(stripped)
-    if (edit is None and drop is None) or not trigger_visible(bot_user):
+    if (edit is None and drop is None) or not engine_enabled():
         return None
 
     token = (edit or drop).group(1)  # type: ignore[union-attr]
@@ -384,7 +437,7 @@ def try_handle_saved_plan(*, text: str, bot_user: Any, trace_id: str) -> SkillRe
     """
     from apps.orchestrator.plan_lite_card import looks_like_my_plan_request
 
-    if not trigger_visible(bot_user) or not looks_like_my_plan_request(text):
+    if not engine_enabled() or not looks_like_my_plan_request(text):
         return None
 
     from apps.integrations.ayla import external_user_id_for
@@ -472,7 +525,7 @@ def try_handle_plan_save(
     """Тап «Сохранить»; ``None`` — не наше (форма / нет входа)."""
 
     match = SAVE_CALLBACK_RE.match((text or "").strip())
-    if match is None or not trigger_visible(bot_user):
+    if match is None or not engine_enabled():
         return None
 
     from apps.integrations.ayla import external_user_id_for
@@ -537,10 +590,14 @@ def try_handle_plan_save(
 
 
 __all__ = [
+    "BUTTON_COMPOSE",
     "BUTTON_EDIT",
+    "CB_COMPOSE",
     "BUTTON_SAVE",
     "QUESTION_SAVE",
     "TRIGGER",
+    "compose_for_request",
+    "engine_enabled",
     "is_edit_callback",
     "is_save_callback",
     "save_command",

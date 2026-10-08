@@ -1008,12 +1008,30 @@ def try_handle_structured_nutrition_turn(
         # там же («кнопка не действует»); неверная форма — ``None``, и ход
         # идёт дальше, как у остальных семейств (fallback канала).
         from apps.orchestrator.plan_engine_card import (
+            CB_COMPOSE,
             is_edit_callback,
             is_save_callback,
             try_handle_plan_edit,
             try_handle_plan_save,
+            try_handle_plan_trigger,
         )
         from apps.orchestrator.plan_lite_card import try_handle_plan_callback
+
+        if text.strip() == CB_COMPOSE:
+            # DRF-2885 — кнопка «Составить план»: настоящий вход.
+            try:
+                return try_handle_plan_trigger(
+                    text=text,
+                    bot_user=bot_user,
+                    conversation=conversation,
+                    trace_id=trace_id,
+                    turn_safety=plan_turn_safety,
+                )
+            except Exception:  # noqa: BLE001 — план не должен ломать глобальный ход
+                logger.exception(
+                    "orchestrator.nutrition_global.plan_engine_compose_failed trace=%s", trace_id
+                )
+                return None
 
         if is_save_callback(text):
             # DRF-2885 — «Сохранить» под предложением нового механизма.

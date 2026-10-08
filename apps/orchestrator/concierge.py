@@ -681,6 +681,23 @@ START_BOOKING_ACTION = START_BOOKING_TOOL_SPEC["name"]
 #: Nutrition specs stay LAST and in their own order: that order is
 #: load-bearing (``apps.orchestrator.nutrition_global`` — screening is read
 #: first by the model).
+#: DRF-2885 — свободная просьба составить план (решение владельца 08.10:
+#: «не требовать точной кодовой фразы»). Модель только выбирает инструмент;
+#: план собирает каталог, изменить или сохранить его ответ модели не может.
+#: Предлагается модели лишь при включённом ``PLAN_ENGINE_ENABLED``.
+COMPOSE_PLAN_TOOL = "compose_plan"
+COMPOSE_PLAN_TOOL_SPEC: dict[str, Any] = {
+    "name": COMPOSE_PLAN_TOOL,
+    "description": (
+        "Пользователь просит составить для него план, программу или набор "
+        "шагов к своей цели («помоги составить план», «хочу программу на "
+        "месяц», «с чего мне начать»). Запускает сборку плана по его "
+        "действующей цели. Не для вопроса о конкретной услуге или записи и "
+        "не для просьбы показать уже сохранённый план."
+    ),
+    "parameters": {"type": "object", "properties": {}, "required": []},
+}
+
 CONCIERGE_TOOL_SPECS: list[dict[str, Any]] = [
     SHOW_MASTERS_TOOL_SPEC,
     START_BOOKING_TOOL_SPEC,
@@ -690,6 +707,7 @@ CONCIERGE_TOOL_SPECS: list[dict[str, Any]] = [
     CONFIRM_SAID_FACT_TOOL_SPEC,
     *NUTRITION_TOOL_SPECS,
     SHOW_MY_RECORDS_TOOL_SPEC,
+    COMPOSE_PLAN_TOOL_SPEC,
 ]
 
 
@@ -746,6 +764,12 @@ def _tools_offered(message_text: str, conversation: Any) -> list[dict[str, Any]]
     # выбора исполнителя (C05), не в DISCOVERY.
     if not (_has_said_facts(conversation) and execution_stage_turn(message_text, conversation)):
         withheld.add(CONFIRM_SAID_FACT_TOOL)
+    # DRF-2885 — при выключенном механизме плана инструмента у модели нет:
+    # подсказка живого консьержа остаётся прежней.
+    from apps.orchestrator.plan_engine_card import engine_enabled as _plan_engine_enabled
+
+    if not _plan_engine_enabled():
+        withheld.add(COMPOSE_PLAN_TOOL)
     if not withheld:
         return list(CONCIERGE_TOOL_SPECS)
     return [spec for spec in CONCIERGE_TOOL_SPECS if spec["name"] not in withheld]
@@ -762,6 +786,7 @@ _KNOWN_TOOLS = frozenset(
         START_BOOKING_TOOL_SPEC["name"],
         ASK_CLARIFICATION_TOOL_SPEC["name"],
         CONFIRM_SAID_FACT_TOOL,
+        COMPOSE_PLAN_TOOL,
     }
     | NUTRITION_TOOL_ACTIONS
     | CATALOG_TOOL_ACTIONS
@@ -967,6 +992,10 @@ def _dispatch_tool(tool_call: Any, context: Any) -> ToolResult:
     if name == CONFIRM_SAID_FACT_TOOL:
         # DRF-1878 — selection only: reading the fact and rendering the
         # question are I/O and run in the wrapper's sync scope.
+        return ToolResult(action_type=name, action_data={"arguments": args})
+    if name == COMPOSE_PLAN_TOOL:
+        # DRF-2885 — selection only: сборка плана — вызов каталога, он идёт
+        # в синхронной части обёртки.
         return ToolResult(action_type=name, action_data={"arguments": args})
     if name == START_BOOKING_ACTION:
         # DRF-1354 — selection only, like every carve-out above. The name
@@ -2406,6 +2435,26 @@ def _concierge_turn(
         pending_args = args
         pending_more_offset = more_offset
         current_text = _build_tool_result_message(message_text, cards, args, missing=missing)
+
+    if dto.action_type == COMPOSE_PLAN_TOOL:
+        # DRF-2885 — свободная просьба составить план. Ответ — карточка
+        # каталога, без второго прохода модели: пересказ плана моделью был
+        # бы планом, которого каталог не собирал.
+        from apps.orchestrator.plan_engine_card import compose_for_request
+
+        plan_result = compose_for_request(
+            bot_user=bot_user, conversation=conversation, trace_id=trace_id or ""
+        )
+        if plan_result is not None and plan_result.reply_text:
+            return _reply(
+                text=plan_result.reply_text[:_MAX_REPLY_CHARS],
+                action_data=plan_result.action_data,
+                persisted=True,
+            )
+        text = (dto.content or "").strip()
+        if text:
+            return _reply(text=text[:_MAX_REPLY_CHARS], persisted=True)
+        return _reply(text=get_not_parsed("ru"), persisted=True)
 
     if dto.action_type in NUTRITION_TOOL_ACTIONS:
         # DRF-1268 — a nutrition skill selected by the model as a tool.

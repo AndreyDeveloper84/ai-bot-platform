@@ -360,7 +360,27 @@ class TestSaving:
         assert catalog.saved == []
         assert result.reply_text == "PLAN_PROPOSAL_EXPIRED · тест"
 
-    def test_c3_another_account_is_not_answered(self, catalog: FakeCatalog) -> None:
+    def test_c3_the_engine_switched_off_is_not_answered(
+        self, catalog: FakeCatalog, settings
+    ) -> None:
+        """Кнопки карточки зависят от механизма, а не от списка отладочных
+        аккаунтов: предложение мог получить любой человек настоящим входом."""
+        conversation = _conversation()
+        _proposed(conversation)
+        settings.PLAN_ENGINE_ENABLED = False
+
+        result = card.try_handle_plan_save(
+            text=SAVE,
+            bot_user=_bot_user(),
+            conversation=conversation,
+            trace_id="t",
+            turn_safety=_safety,
+        )
+
+        assert result is None
+        assert catalog.saved == []
+
+    def test_c3_an_account_outside_the_debug_list_can_save(self, catalog: FakeCatalog) -> None:
         conversation = _conversation()
         _proposed(conversation)
 
@@ -372,8 +392,7 @@ class TestSaving:
             turn_safety=_safety,
         )
 
-        assert result is None
-        assert catalog.saved == []
+        assert result is not None and result.reply_text == "PLAN_SAVED · тест"
 
     def test_c4_a_second_tap_in_a_later_turn_is_the_same_confirmation(
         self, catalog: FakeCatalog
@@ -567,13 +586,16 @@ class TestEditingIsRemovingAStepAndComposingAgain:
         assert len(catalog.composed) == 1
 
     @pytest.mark.parametrize("tap", [EDIT, f"cb:plan:drop:{TOKEN}:0"])
-    def test_i8_another_account_is_not_answered(self, catalog: FakeCatalog, tap: str) -> None:
+    def test_i8_the_engine_switched_off_is_not_answered(
+        self, catalog: FakeCatalog, tap: str, settings
+    ) -> None:
         conversation = _conversation()
         _proposed(conversation)
+        settings.PLAN_ENGINE_ENABLED = False
 
         result = card.try_handle_plan_edit(
             text=tap,
-            bot_user=_bot_user("max:999"),
+            bot_user=_bot_user(),
             conversation=conversation,
             trace_id="t",
             turn_safety=_safety,
@@ -633,17 +655,22 @@ class TestMyPlanShowsTheSavedPlan:
         assert result is None
         assert catalog.read == 1  # каталог спросили — плана нет
 
-    def test_m3_another_account_does_not_ask_the_catalog(self, catalog: FakeCatalog) -> None:
+    def test_m3_the_engine_switched_off_does_not_ask_the_catalog(
+        self, catalog: FakeCatalog, settings
+    ) -> None:
         catalog.saved_plan = _saved_plan()
+        settings.PLAN_ENGINE_ENABLED = False
 
-        result = card.try_handle_saved_plan(
-            text="мой план", bot_user=_bot_user("max:999"), trace_id="t"
-        )
+        result = card.try_handle_saved_plan(text="мой план", bot_user=_bot_user(), trace_id="t")
 
         assert result is None
         assert catalog.read == 0
-        # Положительная пара: своему аккаунту тот же план показан.
-        mine = card.try_handle_saved_plan(text="мой план", bot_user=_bot_user(), trace_id="t")
+        # Положительная пара: с включённым механизмом тот же план показан —
+        # и аккаунту вне отладочного списка тоже.
+        settings.PLAN_ENGINE_ENABLED = True
+        mine = card.try_handle_saved_plan(
+            text="мой план", bot_user=_bot_user("max:999"), trace_id="t"
+        )
         assert mine is not None
 
     def test_m4_another_phrase_does_not_ask_the_catalog(self, catalog: FakeCatalog) -> None:
@@ -660,3 +687,91 @@ class TestMyPlanShowsTheSavedPlan:
 
         assert result is not None
         assert result.reply_text == "PLAN_STEP_UNLABELLED · тест"
+
+
+# ─── настоящий вход: кнопка и свободная просьба ──────────────────────────
+
+
+class TestTheRealEntry:
+    """Решение владельца 08.10: кнопка «Составить план» и свободная просьба
+    без кодовой фразы. Отладочная команда — не для итоговой приёмки."""
+
+    def test_n1_the_button_composes_for_an_account_outside_the_debug_list(
+        self, catalog: FakeCatalog
+    ) -> None:
+        result = _turn(card.CB_COMPOSE, _conversation(), bot_user=_bot_user("max:999"))
+
+        assert result.action_type == "plan_engine_proposal"
+        assert catalog.composed[0]["safety_state"] == "NORMAL"
+
+    def test_n1_the_debug_command_still_needs_the_list(self, catalog: FakeCatalog) -> None:
+        result = card.try_handle_plan_trigger(
+            text=card.TRIGGER,
+            bot_user=_bot_user("max:999"),
+            conversation=_conversation(),
+            trace_id="t",
+            turn_safety=_safety,
+        )
+
+        assert result is None
+        assert catalog.composed == []
+
+    def test_n2_the_button_is_silent_with_the_engine_off(
+        self, catalog: FakeCatalog, settings
+    ) -> None:
+        settings.PLAN_ENGINE_ENABLED = False
+
+        result = card.try_handle_plan_trigger(
+            text=card.CB_COMPOSE,
+            bot_user=_bot_user(),
+            conversation=_conversation(),
+            trace_id="t",
+            turn_safety=_safety,
+        )
+
+        assert result is None
+        assert catalog.composed == []
+
+    def test_n3_the_free_request_composes_with_the_turns_own_triple(
+        self, catalog: FakeCatalog
+    ) -> None:
+        """Инструмент модели: тройка берётся с объекта разговора этого хода."""
+        from apps.orchestrator.safety.plan_turn import attach_turn_safety
+
+        conversation = _conversation()
+        attach_turn_safety(conversation, lambda: _safety("NORMAL", 5))
+
+        result = card.compose_for_request(
+            bot_user=_bot_user("max:999"), conversation=conversation, trace_id="t"
+        )
+
+        assert result is not None and result.action_type == "plan_engine_proposal"
+        assert conversation.skill_state[card.STATE_KEY]["shown_at_revision"] == 5
+
+    def test_n4_the_free_request_without_a_triple_does_not_ask_the_catalog(
+        self, catalog: FakeCatalog
+    ) -> None:
+        result = card.compose_for_request(
+            bot_user=_bot_user(), conversation=_conversation(), trace_id="t"
+        )
+
+        assert result is not None and result.reply_text == "SAFETY_INPUT_UNAVAILABLE · тест"
+        assert catalog.composed == []
+
+    def test_n5_the_free_request_is_nothing_with_the_engine_off(
+        self, catalog: FakeCatalog, settings
+    ) -> None:
+        settings.PLAN_ENGINE_ENABLED = False
+
+        result = card.compose_for_request(
+            bot_user=_bot_user(), conversation=_conversation(), trace_id="t"
+        )
+
+        assert result is None
+        assert catalog.composed == []
+
+    def test_n6_the_buttons_history_text_is_the_owners_words(self) -> None:
+        from apps.orchestrator.plan_lite_card import is_plan_callback, tap_history_text
+
+        assert is_plan_callback(card.CB_COMPOSE) is True
+        assert tap_history_text(card.CB_COMPOSE) == "Составить план"

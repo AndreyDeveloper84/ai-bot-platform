@@ -114,4 +114,38 @@ def plan_turn_safety(
         return None
 
 
-__all__ = ["PlanTurnSafety", "plan_turn_safety"]
+#: Имя атрибута на объекте разговора ЭТОГО хода.
+_ATTR = "_plan_turn_safety_provider"
+
+
+def attach_turn_safety(conversation: Any, provider: Any) -> None:
+    """Положить ленивый источник тройки на объект разговора этого хода.
+
+    Путь плана начинается в двух местах — в структурном ходе и в инструменте
+    модели, — и до второго источник через аргументы не дотянуть, не меняя
+    подписи консьержа. Объект разговора создаётся на ход и доезжает до обоих,
+    поэтому источник живёт на нём: вместе с ходом он и исчезает. Глобальной
+    переменной здесь нет намеренно — она пережила бы ход в потоке работника
+    и отдала бы следующему человеку чужой вердикт.
+    """
+    if conversation is None:
+        return
+    try:
+        setattr(conversation, _ATTR, provider)
+    except Exception:  # noqa: BLE001 — нет источника → нет действия с планом
+        logger.warning("orchestrator.plan_turn_safety.attach_failed", exc_info=True)
+
+
+def turn_safety_of(conversation: Any) -> PlanTurnSafety | None:
+    """Тройка этого хода по объекту разговора — или ``None``. Не бросает."""
+    provider = getattr(conversation, _ATTR, None)
+    if provider is None:
+        return None
+    try:
+        return provider()
+    except Exception:  # noqa: BLE001
+        logger.warning("orchestrator.plan_turn_safety.provider_failed", exc_info=True)
+        return None
+
+
+__all__ = ["PlanTurnSafety", "attach_turn_safety", "plan_turn_safety", "turn_safety_of"]
