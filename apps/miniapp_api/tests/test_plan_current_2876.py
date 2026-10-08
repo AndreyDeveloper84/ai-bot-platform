@@ -50,8 +50,10 @@ def _plan(*refs: str) -> dict[str, Any]:
 
 
 def _get(client: Client, *, auth: bool = True):
-    extra = {"HTTP_AUTHORIZATION": _auth()} if auth else {}
-    return client.get(reverse("miniapp_api:customer_plan_current"), **extra)
+    url = reverse("miniapp_api:customer_plan_current")
+    if not auth:
+        return client.get(url)
+    return client.get(url, HTTP_AUTHORIZATION=_auth())
 
 
 def _catalog(mocked, plan: dict[str, Any] | None, labels: dict[str, str] | None = None) -> Any:
