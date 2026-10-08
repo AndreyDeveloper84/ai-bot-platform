@@ -72,7 +72,10 @@ def test_e1_the_command_in_the_miniapp_chat_composes_with_this_turns_verdict(
     assert answer.status_code == 200, answer.content[:300]
     body: dict[str, Any] = answer.json()
     assert body["answer"].endswith(card.QUESTION_SAVE)
-    assert body["buttons"] == [{"label": "Сохранить", "payload": f"cb:plan:save:{TOKEN}"}]
+    assert body["buttons"] == [
+        {"label": "Сохранить", "payload": f"cb:plan:save:{TOKEN}"},
+        {"label": "Изменить", "payload": f"cb:plan:edit:{TOKEN}"},
+    ]
     assert catalog.composed[0]["safety_state"] == "NORMAL"
     assert catalog.composed[0]["safety_policy_version"].startswith("pre_check-")
 
@@ -132,3 +135,30 @@ def test_e4_a_second_tap_through_the_real_turn_keeps_the_confirmation(
     assert one["decision_id"] == two["decision_id"]
     # Ходы разные — и это видно по ревизии вердикта, а не подтверждения.
     assert two["evaluated_at_revision"] > one["evaluated_at_revision"]
+
+
+def test_e5_removing_a_step_through_the_real_turn_and_saving_what_is_left(
+    client: Client, tenant, wire, catalog: FakeCatalog
+) -> None:
+    """Шаг 3: тап по шагу → новая карточка → «Сохранить» — сквозь настоящий ход:
+    пересборка и сохранение идут каждая с тройкой своего хода.
+
+    Три запроса, не четыре: у ручки чата лимит на человека в минуту; меню
+    «Изменить» держат узлы карточки.
+    """
+    _person_shell(tenant, PERSON)
+    _ask(client, card.TRIGGER, as_user=PERSON)
+
+    changed = _ask(client, f"cb:plan:drop:{TOKEN}:0", as_user=PERSON)
+    assert changed.status_code == 200, changed.content[:300]
+    body = changed.json()
+    assert body["answer"].startswith("• Вечерняя прогулка")
+    assert catalog.composed[1]["excluded_capability_refs"] == ["cap.sleep_routine"]
+
+    saved = _ask(client, body["buttons"][0]["payload"], as_user=PERSON)
+    assert saved.status_code == 200, saved.content[:300]
+    assert saved.json()["answer"] == "PLAN_SAVED · тест"
+    command = catalog.saved[0]
+    assert [s["capability_ref"] for s in command["decision"]["steps"]] == ["cap.evening_walk"]
+    # Подтверждение опознаётся ревизией показа НОВОЙ карточки; вердикт — своей.
+    assert command["evaluated_at_revision"] > command["confirmation"]["state_revision"]
