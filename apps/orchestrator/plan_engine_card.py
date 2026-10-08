@@ -80,10 +80,23 @@ EDIT_CALLBACK_RE = re.compile(r"^cb:plan:edit:([0-9a-f]{8})$")
 CB_DROP_PREFIX = "cb:plan:drop:"
 DROP_CALLBACK_RE = re.compile(r"^cb:plan:drop:([0-9a-f]{8}):([0-9]{1,2})$")
 
+CB_DISCUSS_PREFIX = "cb:plan:discuss:"
+#: ``saved`` — обсуждают сохранённый план; восемь знаков — предложение.
+DISCUSS_SAVED = "saved"
+DISCUSS_CALLBACK_RE = re.compile(r"^cb:plan:discuss:(saved|[0-9a-f]{8})$")
+
 #: Слова владельца — лист решений 07.10, п.15.
 QUESTION_SAVE = "Сохранить выбранные шаги в мой план?"
 BUTTON_SAVE = "Сохранить"
 BUTTON_EDIT = "Изменить"
+#: Слова владельца — задание §9 и решение 08.10: кнопка и первая реплика.
+BUTTON_DISCUSS = "Обсудить"
+DISCUSS_OPENING = "Давай обсудим твой план. Что хочешь изменить или уточнить?"
+
+#: Открытое обсуждение — свой ключ в ``Conversation.skill_state``.
+DISCUSSION_KEY = "plan_engine_discussion"
+SUBJECT_PROPOSAL = "proposal"
+SUBJECT_SAVED = "saved"
 
 #: Пометка всего, что не утверждённый текст.
 TEST_MARK = "тест"
@@ -149,6 +162,10 @@ def is_save_callback(text: str) -> bool:
     return bool(SAVE_CALLBACK_RE.match((text or "").strip()))
 
 
+def is_discuss_callback(text: str) -> bool:
+    return bool(DISCUSS_CALLBACK_RE.match((text or "").strip()))
+
+
 def is_edit_callback(text: str) -> bool:
     stripped = (text or "").strip()
     return bool(EDIT_CALLBACK_RE.match(stripped) or DROP_CALLBACK_RE.match(stripped))
@@ -204,6 +221,7 @@ def _proposal(labels: list[str], token: str) -> SkillResult:
             [
                 {"label": BUTTON_SAVE, "callback": f"{CB_SAVE_PREFIX}{token}"},
                 {"label": BUTTON_EDIT, "callback": f"{CB_EDIT_PREFIX}{token}"},
+                {"label": BUTTON_DISCUSS, "callback": f"{CB_DISCUSS_PREFIX}{token}"},
             ]
         ),
         meta={"reply_kind": kind, "plan_outcome": OUTCOME_PLAN},
@@ -232,6 +250,7 @@ def try_handle_plan_trigger(
     by_button = stripped == CB_COMPOSE and engine_enabled()
     if not (by_command or by_button):
         return None
+    _write_discussion(conversation, None)
     return _compose(
         bot_user=bot_user,
         conversation=conversation,
@@ -286,8 +305,8 @@ def _compose(
         outcome = str(document["outcome"])
         decision = document.get("decision")
         if outcome != OUTCOME_PLAN or not isinstance(decision, dict):
-            # Штатные исходы без плана — в том числе ``CLARIFY_PENDING`` и
-            # ``PLAN_NOT_JUSTIFIED`` после исключения шага.
+            # Штатные исходы без плана — в том числе ``PLAN_NOT_JUSTIFIED``
+            # после исключения шага.
             if not keep_previous_on_no_plan:
                 _write_pending(conversation, None)
             return _named(outcome)
@@ -340,6 +359,7 @@ def compose_for_request(*, bot_user: Any, conversation: Any, trace_id: str) -> S
         return None
     from apps.orchestrator.safety.plan_turn import turn_safety_of
 
+    _write_discussion(conversation, None)
     return _compose(
         bot_user=bot_user,
         conversation=conversation,
@@ -426,6 +446,218 @@ def try_handle_plan_edit(
     )
 
 
+# ─── «Обсудить» ──────────────────────────────────────────────────────────
+#
+# Решение владельца 08.10: кнопка «Обсудить» на плане; первая реплика —
+# дословно; в контекст модели — план и его шаги; «ответ модели сам по себе
+# план не меняет: изменение проходит серверную проверку и подтверждение».
+#
+# Что знает модель: подписи шагов (слова каталога) под номерами и вид плана
+# (предложение или сохранённый). Чего ей НЕ даётся, потому что этого нет:
+# текста цели (у решения — только её идентификатор), обоснований шагов
+# (в решении — коды утверждений, прозы нет), ограничений (таблица причин
+# каталога пуста) и предпочтений. Ключи способностей и идентификаторы в
+# подсказку не идут.
+
+
+def _read_discussion(conversation: Any) -> dict[str, Any] | None:
+    state = getattr(conversation, "skill_state", None)
+    row = state.get(DISCUSSION_KEY) if isinstance(state, dict) else None
+    return row if isinstance(row, dict) else None
+
+
+def _write_discussion(conversation: Any, value: dict[str, Any] | None) -> None:
+    from apps.orchestrator.open_question import write_conversation_state
+
+    if value is None and _read_discussion(conversation) is None:
+        return
+    write_conversation_state(conversation, DISCUSSION_KEY, value)
+
+
+def _proposal_labels(conversation: Any) -> list[str] | None:
+    """Подписи шагов текущего предложения по порядку — или ``None``."""
+    pending = _read_pending(conversation)
+    if pending is None:
+        return None
+    keys = _step_keys(pending)
+    raw = pending.get("labels")
+    labels: dict[str, Any] = raw if isinstance(raw, dict) else {}
+    if not keys or any(not isinstance(labels.get(key), str) for key in keys):
+        return None
+    return [str(labels[key]) for key in keys]
+
+
+def discussed_plan(conversation: Any) -> tuple[str, list[str]] | None:
+    """Что сейчас обсуждают: вид плана и подписи шагов — или ``None``.
+
+    Предложение читается из того, что ждёт подтверждения, а не из снимка:
+    убрали шаг — обсуждается уже новое предложение. Сохранённый план — снимок
+    подписей на момент нажатия «Обсудить».
+    """
+    if not engine_enabled():
+        return None
+    row = _read_discussion(conversation)
+    if row is None:
+        return None
+    if row.get("subject") == SUBJECT_PROPOSAL:
+        labels = _proposal_labels(conversation)
+        return (SUBJECT_PROPOSAL, labels) if labels else None
+    if row.get("subject") == SUBJECT_SAVED:
+        raw = row.get("labels")
+        saved = [x for x in raw if isinstance(x, str) and x] if isinstance(raw, list) else []
+        return (SUBJECT_SAVED, saved) if saved else None
+    return None
+
+
+def discussion_allows_removal(conversation: Any) -> bool:
+    """Можно ли в этом обсуждении убрать шаг: только у предложения.
+
+    Изменение сохранённого плана идёт через предложение и подтверждение
+    замены — этого пути у каталога пока нет.
+    """
+    found = discussed_plan(conversation)
+    return found is not None and found[0] == SUBJECT_PROPOSAL
+
+
+def render_plan_discussion_block(conversation: Any) -> str:
+    """Абзац подсказки консьержа, пока план обсуждают; иначе пустая строка."""
+    found = discussed_plan(conversation)
+    if found is None:
+        return ""
+    subject, labels = found
+    steps = "\n".join(f"{n}. {label}" for n, label in enumerate(labels, start=1))
+    if subject == SUBJECT_PROPOSAL:
+        kind = "Это ПРЕДЛОЖЕНИЕ плана: оно ещё не сохранено."
+        change = (
+            "Если клиент хочет убрать шаг — вызови инструмент plan_remove_step "
+            "с номером шага: платформа пересоберёт план и сама покажет новый "
+            "вариант. Сохраняет план только кнопка «Сохранить» под ним — "
+            "сам ты его не сохраняешь и не говори, что сохранил."
+        )
+    else:
+        kind = "Это СОХРАНЁННЫЙ план клиента."
+        change = (
+            "Изменить сохранённый план в этом разговоре пока нельзя — если "
+            "клиент просит, честно скажи, что такой возможности пока нет."
+        )
+    return (
+        "Клиент обсуждает свой план. " + kind + " Шаги плана (названия — слова "
+        "платформы, приводи их дословно):\n" + steps + "\n"
+        "Правила обсуждения плана:\n"
+        "- План составляет и меняет только платформа. Не добавляй, не заменяй "
+        "и не придумывай шаги; не предлагай своих вариантов плана.\n"
+        "- О шаге говори только то, что следует из его названия. Почему именно "
+        "этот шаг попал в план, тебе не сообщено — не сочиняй причину; если "
+        "спрашивают «почему», скажи, что объяснения пока нет.\n"
+        "- Не обещай результат и не давай медицинских советов.\n"
+        "- Добавить свой шаг или заменить один шаг другим пока нельзя — скажи "
+        "об этом прямо.\n"
+        "- " + change
+    )
+
+
+def try_handle_plan_discuss(
+    *, text: str, bot_user: Any, conversation: Any, trace_id: str
+) -> SkillResult | None:
+    """Тап «Обсудить»; ``None`` — не наше (форма / механизм выключен).
+
+    Открывает обсуждение и отвечает первой репликой владельца — дословно.
+    Ничего не собирает и не меняет; вердикта не требует.
+    """
+    match = DISCUSS_CALLBACK_RE.match((text or "").strip())
+    if match is None or not engine_enabled():
+        return None
+
+    from apps.orchestrator.next_steps import menu_button, next_step_action_data
+
+    token = match.group(1)
+    if token == DISCUSS_SAVED:
+        labels = _saved_plan_labels(bot_user, trace_id)
+        if labels is None:
+            return _named(PLAN_ENGINE_UNAVAILABLE)
+        if not labels:
+            return _named(PLAN_PROPOSAL_EXPIRED)
+        _write_discussion(conversation, {"subject": SUBJECT_SAVED, "labels": labels})
+    else:
+        if _pending_for(conversation, token) is None or not _proposal_labels(conversation):
+            return _named(PLAN_PROPOSAL_EXPIRED)
+        _write_discussion(conversation, {"subject": SUBJECT_PROPOSAL})
+
+    kind = "plan_engine_discuss"
+    return SkillResult(
+        reply_text=DISCUSS_OPENING,
+        action_type=kind,
+        action_data=next_step_action_data(menu_button()),
+        meta={"reply_kind": kind, "plan_outcome": "PLAN_DISCUSS"},
+    )
+
+
+def _saved_plan_labels(bot_user: Any, trace_id: str) -> list[str] | None:
+    """Подписи шагов сохранённого плана; ``[]`` — показать нечего; ``None`` — сбой."""
+    from apps.integrations.ayla import external_user_id_for
+    from apps.integrations.ayla.plan_engine_client import PlanEngineError, PlanEngineHttpClient
+
+    client = PlanEngineHttpClient()
+    external_user_id = external_user_id_for(bot_user)
+    try:
+        plan = client.get_plan(external_user_id=external_user_id)
+        if plan is None:
+            return []
+        raw_revision = plan.get("revision")
+        revision: dict[str, Any] = raw_revision if isinstance(raw_revision, dict) else {}
+        steps = [s for s in revision.get("steps") or [] if isinstance(s, dict)]
+        keys = [str(s.get("capability_ref") or "") for s in steps]
+        labels = (
+            client.capability_labels(external_user_id=external_user_id, keys=keys) if keys else {}
+        )
+    except PlanEngineError as exc:
+        logger.warning(
+            "orchestrator.plan_engine_card.discuss_read_failed trace=%s class=%s",
+            trace_id,
+            type(exc).__name__,
+        )
+        return None
+    if not keys or any(key not in labels for key in keys):
+        return []
+    return [labels[key] for key in keys]
+
+
+def remove_step_for_request(
+    *, bot_user: Any, conversation: Any, trace_id: str, step_number: Any
+) -> SkillResult | None:
+    """Убрать шаг по просьбе в обсуждении — его номер назвала модель.
+
+    Тот же путь, что у тапа по шагу: исключение и пересборка в каталоге с
+    тройкой этого хода, новое предложение с «Сохранить». Ответ модели план
+    не меняет — меняет серверная сборка, а сохраняет нажатие человека.
+
+    ``None`` — убирать нечего или номер не из этого плана: вызывающий отвечает
+    сам. Номер вне плана не «поправляется» до ближайшего.
+    """
+    if not discussion_allows_removal(conversation):
+        return None
+    pending = _read_pending(conversation)
+    if pending is None:
+        return None
+    keys = _step_keys(pending)
+    if isinstance(step_number, bool) or not isinstance(step_number, int):
+        return None
+    if step_number < 1 or step_number > len(keys):
+        return None
+
+    from apps.orchestrator.safety.plan_turn import turn_safety_of
+
+    already = [str(k) for k in pending.get("excluded") or []]
+    return _compose(
+        bot_user=bot_user,
+        conversation=conversation,
+        trace_id=trace_id,
+        turn_safety=lambda: turn_safety_of(conversation),
+        excluded=[*already, keys[step_number - 1]],
+        keep_previous_on_no_plan=True,
+    )
+
+
 # ─── вход: «мой план» ────────────────────────────────────────────────────
 
 
@@ -472,7 +704,10 @@ def try_handle_saved_plan(*, text: str, bot_user: Any, trace_id: str) -> SkillRe
     return SkillResult(
         reply_text="\n".join([*lines, "", f"{PLAN_CURRENT} · {TEST_MARK}"]),
         action_type=kind,
-        action_data=next_step_action_data(menu_button()),
+        action_data=next_step_action_data(
+            {"label": BUTTON_DISCUSS, "callback": f"{CB_DISCUSS_PREFIX}{DISCUSS_SAVED}"},
+            menu_button(),
+        ),
         meta={"reply_kind": kind, "plan_outcome": PLAN_CURRENT},
     )
 
@@ -586,17 +821,27 @@ def try_handle_plan_save(
 
     # Предложение оставляем: повторное нажатие шлёт ТУ ЖЕ команду, и каталог
     # узнаёт её сам — второго плана не будет. Уходит оно со следующей сборкой.
+    # Обсуждение закрыто: обсуждали предложение, а оно стало планом.
+    _write_discussion(conversation, None)
     return _named(PLAN_SAVED)
 
 
 __all__ = [
     "BUTTON_COMPOSE",
+    "BUTTON_DISCUSS",
+    "DISCUSS_OPENING",
     "BUTTON_EDIT",
     "CB_COMPOSE",
     "BUTTON_SAVE",
     "QUESTION_SAVE",
     "TRIGGER",
     "compose_for_request",
+    "discussed_plan",
+    "discussion_allows_removal",
+    "is_discuss_callback",
+    "remove_step_for_request",
+    "render_plan_discussion_block",
+    "try_handle_plan_discuss",
     "engine_enabled",
     "is_edit_callback",
     "is_save_callback",

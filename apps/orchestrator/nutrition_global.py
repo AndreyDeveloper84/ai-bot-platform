@@ -1009,8 +1009,10 @@ def try_handle_structured_nutrition_turn(
         # идёт дальше, как у остальных семейств (fallback канала).
         from apps.orchestrator.plan_engine_card import (
             CB_COMPOSE,
+            is_discuss_callback,
             is_edit_callback,
             is_save_callback,
+            try_handle_plan_discuss,
             try_handle_plan_edit,
             try_handle_plan_save,
             try_handle_plan_trigger,
@@ -1046,6 +1048,18 @@ def try_handle_structured_nutrition_turn(
             except Exception:  # noqa: BLE001 — план не должен ломать глобальный ход
                 logger.exception(
                     "orchestrator.nutrition_global.plan_engine_save_failed trace=%s", trace_id
+                )
+                return None
+
+        if is_discuss_callback(text):
+            # DRF-2885 — «Обсудить»: первая реплика владельца, дальше — модель.
+            try:
+                return try_handle_plan_discuss(
+                    text=text, bot_user=bot_user, conversation=conversation, trace_id=trace_id
+                )
+            except Exception:  # noqa: BLE001 — план не должен ломать глобальный ход
+                logger.exception(
+                    "orchestrator.nutrition_global.plan_engine_discuss_failed trace=%s", trace_id
                 )
                 return None
 

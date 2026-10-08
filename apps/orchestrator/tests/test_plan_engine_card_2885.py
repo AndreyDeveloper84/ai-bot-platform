@@ -254,6 +254,7 @@ class TestComposing:
         assert buttons == [
             {"label": "Сохранить", "callback": SAVE},
             {"label": "Изменить", "callback": f"cb:plan:edit:{TOKEN}"},
+            {"label": "Обсудить", "callback": f"cb:plan:discuss:{TOKEN}"},
         ]
 
     def test_s2_no_triple_no_request(self, catalog: FakeCatalog) -> None:
@@ -263,7 +264,7 @@ class TestComposing:
         assert result.reply_text == "SAFETY_INPUT_UNAVAILABLE · тест"
 
     @pytest.mark.parametrize(
-        "outcome", ["SAFETY_BLOCKED", "NO_GOAL", "NO_CURATED_DECOMPOSITION", "CLARIFY_PENDING"]
+        "outcome", ["SAFETY_BLOCKED", "NO_GOAL", "NO_CURATED_DECOMPOSITION", "PLAN_NOT_JUSTIFIED"]
     )
     def test_s3_an_outcome_without_a_plan_is_shown_by_name(
         self, catalog: FakeCatalog, outcome: str
@@ -775,3 +776,199 @@ class TestTheRealEntry:
 
         assert is_plan_callback(card.CB_COMPOSE) is True
         assert tap_history_text(card.CB_COMPOSE) == "Составить план"
+
+
+# ─── «Обсудить» ──────────────────────────────────────────────────────────
+
+DISCUSS = f"cb:plan:discuss:{TOKEN}"
+DISCUSS_SAVED = "cb:plan:discuss:saved"
+
+
+def _discuss(text: str, conversation: Any, *, bot_user: Any = None):
+    return card.try_handle_plan_discuss(
+        text=text, bot_user=bot_user or _bot_user(), conversation=conversation, trace_id="t"
+    )
+
+
+class TestDiscussingThePlan:
+    """Решение владельца 08.10: «Обсудить» на плане; первая реплика дословно;
+    в контекст модели — шаги плана; ответ модели план не меняет."""
+
+    def test_d1_the_tap_answers_with_the_owners_words_verbatim(self, catalog: FakeCatalog) -> None:
+        conversation = _conversation()
+        _proposed(conversation)
+
+        result = _discuss(DISCUSS, conversation)
+
+        assert result is not None
+        assert result.reply_text == "Давай обсудим твой план. Что хочешь изменить или уточнить?"
+        assert result.action_data["buttons"]  # §72: под ответом есть следующий шаг
+        assert len(catalog.composed) == 1  # обсуждение ничего не собирает
+
+    def test_d2_the_model_sees_the_steps_in_the_catalogs_words(self, catalog: FakeCatalog) -> None:
+        conversation = _conversation()
+        _proposed(conversation)
+        assert card.render_plan_discussion_block(conversation) == ""  # до нажатия блока нет
+
+        _discuss(DISCUSS, conversation)
+        block = card.render_plan_discussion_block(conversation)
+
+        assert "1. Режим сна" in block
+        assert "2. Вечерняя прогулка" in block
+        assert "ПРЕДЛОЖЕНИЕ" in block
+        assert "plan_remove_step" in block
+
+    def test_d3_no_keys_or_ids_go_into_the_prompt(self, catalog: FakeCatalog) -> None:
+        conversation = _conversation()
+        _proposed(conversation)
+        _discuss(DISCUSS, conversation)
+
+        block = card.render_plan_discussion_block(conversation)
+
+        assert "Режим сна" in block  # положительный контроль: блок с планом
+        assert "cap." not in block
+        assert DECISION_ID not in block
+        assert TOKEN not in block
+
+    def test_d4_a_stale_card_does_not_open_a_discussion(self, catalog: FakeCatalog) -> None:
+        conversation = _conversation()
+        _proposed(conversation)
+
+        result = _discuss("cb:plan:discuss:ffffffff", conversation)
+
+        assert result is not None and result.reply_text == "PLAN_PROPOSAL_EXPIRED · тест"
+        assert card.render_plan_discussion_block(conversation) == ""
+
+    def test_d5_the_engine_switched_off_is_silent(self, catalog: FakeCatalog, settings) -> None:
+        conversation = _conversation()
+        _proposed(conversation)
+        _discuss(DISCUSS, conversation)
+        assert card.render_plan_discussion_block(conversation) != ""
+        settings.PLAN_ENGINE_ENABLED = False
+
+        assert _discuss(DISCUSS, conversation) is None
+        assert card.render_plan_discussion_block(conversation) == ""
+        assert card.discussion_allows_removal(conversation) is False
+
+    def test_d6_removing_a_step_recomposes_and_shows_the_change_before_saving(
+        self, catalog: FakeCatalog
+    ) -> None:
+        from apps.orchestrator.safety.plan_turn import attach_turn_safety
+
+        conversation = _conversation()
+        _proposed(conversation)
+        _discuss(DISCUSS, conversation)
+        attach_turn_safety(conversation, lambda: _safety("NORMAL", 9))
+
+        result = card.remove_step_for_request(
+            bot_user=_bot_user(), conversation=conversation, trace_id="t", step_number=1
+        )
+
+        assert result is not None and result.action_type == "plan_engine_proposal"
+        assert result.reply_text.startswith("• Вечерняя прогулка")
+        assert catalog.composed[1]["excluded_capability_refs"] == ["cap.sleep_routine"]
+        assert catalog.saved == []  # показано, не сохранено
+        # Обсуждается уже новое предложение.
+        block = card.render_plan_discussion_block(conversation)
+        assert "1. Вечерняя прогулка" in block
+        assert "Режим сна" not in block
+
+    @pytest.mark.parametrize("number", [0, 3, -1, "1", None, True, 1.0])
+    def test_d7_a_number_outside_the_plan_removes_nothing(
+        self, catalog: FakeCatalog, number: Any
+    ) -> None:
+        from apps.orchestrator.safety.plan_turn import attach_turn_safety
+
+        conversation = _conversation()
+        _proposed(conversation)
+        _discuss(DISCUSS, conversation)
+        attach_turn_safety(conversation, lambda: _safety("NORMAL", 9))
+
+        result = card.remove_step_for_request(
+            bot_user=_bot_user(), conversation=conversation, trace_id="t", step_number=number
+        )
+
+        assert result is None
+        assert len(catalog.composed) == 1
+
+    def test_d8_without_an_open_discussion_nothing_is_removed(self, catalog: FakeCatalog) -> None:
+        from apps.orchestrator.safety.plan_turn import attach_turn_safety
+
+        conversation = _conversation()
+        _proposed(conversation)
+        attach_turn_safety(conversation, lambda: _safety("NORMAL", 9))
+
+        result = card.remove_step_for_request(
+            bot_user=_bot_user(), conversation=conversation, trace_id="t", step_number=1
+        )
+
+        assert result is None
+        assert len(catalog.composed) == 1
+
+    def test_d9_saving_closes_the_discussion(self, catalog: FakeCatalog) -> None:
+        conversation = _conversation()
+        _proposed(conversation)
+        _discuss(DISCUSS, conversation)
+        assert card.render_plan_discussion_block(conversation) != ""
+
+        saved = _turn(SAVE, conversation)
+
+        assert saved.reply_text == "PLAN_SAVED · тест"
+        assert card.render_plan_discussion_block(conversation) == ""
+
+    def test_d10_a_new_plan_does_not_inherit_the_old_discussion(self, catalog: FakeCatalog) -> None:
+        conversation = _conversation()
+        _proposed(conversation)
+        _discuss(DISCUSS, conversation)
+        assert card.render_plan_discussion_block(conversation) != ""
+
+        _turn(card.CB_COMPOSE, conversation)
+
+        assert card.render_plan_discussion_block(conversation) == ""
+
+    def test_d11_the_saved_plan_is_discussed_but_not_changed_here(
+        self, catalog: FakeCatalog
+    ) -> None:
+        catalog.saved_plan = _saved_plan()
+        conversation = _conversation()
+
+        result = _discuss(DISCUSS_SAVED, conversation)
+        block = card.render_plan_discussion_block(conversation)
+
+        assert result is not None
+        assert result.reply_text == "Давай обсудим твой план. Что хочешь изменить или уточнить?"
+        assert "СОХРАНЁННЫЙ" in block
+        assert "1. Режим сна" in block
+        assert card.discussion_allows_removal(conversation) is False
+        assert "plan_remove_step" not in block
+
+    def test_d12_no_saved_plan_opens_no_discussion(self, catalog: FakeCatalog) -> None:
+        conversation = _conversation()
+
+        result = _discuss(DISCUSS_SAVED, conversation)
+
+        assert result is not None and result.reply_text == "PLAN_PROPOSAL_EXPIRED · тест"
+        assert card.render_plan_discussion_block(conversation) == ""
+
+    def test_d13_the_saved_plan_card_offers_the_discussion(self, catalog: FakeCatalog) -> None:
+        catalog.saved_plan = _saved_plan()
+
+        shown = card.try_handle_saved_plan(text="мой план", bot_user=_bot_user(), trace_id="t")
+
+        assert shown is not None
+        assert shown.action_data["buttons"][0] == {"label": "Обсудить", "callback": DISCUSS_SAVED}
+
+    def test_d14_the_tap_goes_through_the_turn_and_into_history_as_the_buttons_words(
+        self, catalog: FakeCatalog
+    ) -> None:
+        from apps.orchestrator.plan_lite_card import is_plan_callback, tap_history_text
+
+        conversation = _conversation()
+        _proposed(conversation)
+
+        result = _turn(DISCUSS, conversation)
+
+        assert result.action_type == "plan_engine_discuss"
+        assert is_plan_callback(DISCUSS) is True
+        assert is_plan_callback(DISCUSS_SAVED) is True
+        assert tap_history_text(DISCUSS) == "Обсудить"

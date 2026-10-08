@@ -211,8 +211,10 @@ class TestRosterIsTheRealOne:
         from apps.orchestrator import concierge
         from apps.orchestrator.concierge import _tools_offered
 
-        # DRF-2885: ``compose_plan`` отнимается, пока механизм плана выключен.
+        # DRF-2885: ``compose_plan`` отнимается, пока механизм плана выключен,
+        # ``plan_remove_step`` — пока не обсуждают предложение плана.
         settings.PLAN_ENGINE_ENABLED = True
+        monkeypatch.setattr(concierge, "_plan_step_removable", lambda _conversation: True)
         monkeypatch.setattr(concierge, "_has_said_facts", lambda _conversation: True)
         # DRF-1923: и ход C05 — иначе confirm_said_fact отнимается по стадии.
         monkeypatch.setattr(concierge, "execution_stage_turn", lambda _text, _conversation: True)
@@ -231,7 +233,13 @@ class TestRosterIsTheRealOne:
         withheld = sorted(_roster() - {str(spec["name"]) for spec in offered})
         # DRF-2885: третий — ``compose_plan``: механизм плана по умолчанию
         # выключен, и исполнитель такой вызов отверг бы.
-        assert withheld == ["compose_plan", "confirm_said_fact", "health_screening"], withheld
+        # DRF-2885: четвёртый — ``plan_remove_step``: обсуждение плана не открыто.
+        assert withheld == [
+            "compose_plan",
+            "confirm_said_fact",
+            "health_screening",
+            "plan_remove_step",
+        ], withheld
 
     def test_compose_plan_is_offered_only_with_the_plan_engine(self, settings) -> None:
         """DRF-2885 — подсказка живого консьержа не меняется, пока флаг выключен."""

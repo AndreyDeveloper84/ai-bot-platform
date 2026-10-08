@@ -698,6 +698,30 @@ COMPOSE_PLAN_TOOL_SPEC: dict[str, Any] = {
     "parameters": {"type": "object", "properties": {}, "required": []},
 }
 
+#: DRF-2885 — «убрать шаг» в обсуждении плана. Модель называет номер шага
+#: из показанного ей списка; убирает и пересобирает каталог, сохраняет
+#: нажатие человека. Предлагается только пока обсуждают ПРЕДЛОЖЕНИЕ плана.
+PLAN_REMOVE_STEP_TOOL = "plan_remove_step"
+PLAN_REMOVE_STEP_TOOL_SPEC: dict[str, Any] = {
+    "name": PLAN_REMOVE_STEP_TOOL,
+    "description": (
+        "Клиент в обсуждении плана просит убрать один шаг из предложенного "
+        "плана («убери прогулку», «второй шаг не нужен»). Передай номер шага "
+        "из списка шагов плана. Платформа пересоберёт план и покажет новый "
+        "вариант. Не для добавления или замены шага."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "step": {
+                "type": "integer",
+                "description": "Номер шага в списке шагов плана, начиная с 1.",
+            },
+        },
+        "required": ["step"],
+    },
+}
+
 CONCIERGE_TOOL_SPECS: list[dict[str, Any]] = [
     SHOW_MASTERS_TOOL_SPEC,
     START_BOOKING_TOOL_SPEC,
@@ -708,6 +732,7 @@ CONCIERGE_TOOL_SPECS: list[dict[str, Any]] = [
     *NUTRITION_TOOL_SPECS,
     SHOW_MY_RECORDS_TOOL_SPEC,
     COMPOSE_PLAN_TOOL_SPEC,
+    PLAN_REMOVE_STEP_TOOL_SPEC,
 ]
 
 
@@ -720,6 +745,31 @@ def _has_said_facts(conversation: Any) -> bool:
     try:
         return bool(said_facts(bot_user))
     except Exception:  # noqa: BLE001 — без чтения фактов инструмент не предлагается
+        return False
+
+
+def _plan_discussion_block(conversation: Any) -> str:
+    """Абзац о плане, который сейчас обсуждают (DRF-2885); пусто — не обсуждают."""
+    if conversation is None:
+        return ""
+    try:
+        from apps.orchestrator.plan_engine_card import render_plan_discussion_block
+
+        return render_plan_discussion_block(conversation)
+    except Exception:  # noqa: BLE001 — без чтения состояния блока нет, ход не падает
+        logger.warning("orchestrator.concierge.plan_discussion_block_failed", exc_info=True)
+        return ""
+
+
+def _plan_step_removable(conversation: Any) -> bool:
+    """Идёт ли обсуждение предложения плана, где шаг можно убрать (DRF-2885)."""
+    if conversation is None:
+        return False
+    try:
+        from apps.orchestrator.plan_engine_card import discussion_allows_removal
+
+        return discussion_allows_removal(conversation)
+    except Exception:  # noqa: BLE001 — без чтения состояния инструмент не предлагается
         return False
 
 
@@ -770,6 +820,10 @@ def _tools_offered(message_text: str, conversation: Any) -> list[dict[str, Any]]
 
     if not _plan_engine_enabled():
         withheld.add(COMPOSE_PLAN_TOOL)
+    # DRF-2885 — убрать шаг можно только в открытом обсуждении предложения:
+    # вне его исполнитель откажет наверняка.
+    if not _plan_step_removable(conversation):
+        withheld.add(PLAN_REMOVE_STEP_TOOL)
     if not withheld:
         return list(CONCIERGE_TOOL_SPECS)
     return [spec for spec in CONCIERGE_TOOL_SPECS if spec["name"] not in withheld]
@@ -787,6 +841,7 @@ _KNOWN_TOOLS = frozenset(
         ASK_CLARIFICATION_TOOL_SPEC["name"],
         CONFIRM_SAID_FACT_TOOL,
         COMPOSE_PLAN_TOOL,
+        PLAN_REMOVE_STEP_TOOL,
     }
     | NUTRITION_TOOL_ACTIONS
     | CATALOG_TOOL_ACTIONS
@@ -993,7 +1048,7 @@ def _dispatch_tool(tool_call: Any, context: Any) -> ToolResult:
         # DRF-1878 — selection only: reading the fact and rendering the
         # question are I/O and run in the wrapper's sync scope.
         return ToolResult(action_type=name, action_data={"arguments": args})
-    if name == COMPOSE_PLAN_TOOL:
+    if name in (COMPOSE_PLAN_TOOL, PLAN_REMOVE_STEP_TOOL):
         # DRF-2885 — selection only: сборка плана — вызов каталога, он идёт
         # в синхронной части обёртки.
         return ToolResult(action_type=name, action_data={"arguments": args})
@@ -2066,8 +2121,11 @@ def _concierge_turn(
     said_block = render_said_block(
         bot_user, offer_confirm=execution_stage_turn(message_text, conversation)
     )
+    # DRF-2885 — пока план обсуждают, модель видит его шаги и правила
+    # обсуждения. Вне обсуждения (и при выключенном механизме) блока нет.
+    plan_block = _plan_discussion_block(conversation)
     turn_extra_system = "\n\n".join(
-        part for part in (extra_system, refusal_block, answer_block, said_block) if part
+        part for part in (extra_system, refusal_block, answer_block, said_block, plan_block) if part
     )
 
     def _renderer(_ctx: Any) -> str:
@@ -2449,6 +2507,31 @@ def _concierge_turn(
             return _reply(
                 text=plan_result.reply_text[:_MAX_REPLY_CHARS],
                 action_data=plan_result.action_data,
+                persisted=True,
+            )
+        text = (dto.content or "").strip()
+        if text:
+            return _reply(text=text[:_MAX_REPLY_CHARS], persisted=True)
+        return _reply(text=get_not_parsed("ru"), persisted=True)
+
+    if dto.action_type == PLAN_REMOVE_STEP_TOOL:
+        # DRF-2885 — «убери шаг» в обсуждении. Ответ — новое предложение
+        # каталога с «Сохранить»: изменение показано до сохранения, и
+        # сохраняет его нажатие человека, а не ответ модели.
+        from apps.orchestrator.plan_engine_card import remove_step_for_request
+
+        raw_args = (dto.action_data or {}).get("arguments", {})
+        step_number = raw_args.get("step") if isinstance(raw_args, dict) else None
+        removed = remove_step_for_request(
+            bot_user=bot_user,
+            conversation=conversation,
+            trace_id=trace_id or "",
+            step_number=step_number,
+        )
+        if removed is not None and removed.reply_text:
+            return _reply(
+                text=removed.reply_text[:_MAX_REPLY_CHARS],
+                action_data=removed.action_data,
                 persisted=True,
             )
         text = (dto.content or "").strip()
