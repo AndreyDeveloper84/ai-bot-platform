@@ -947,6 +947,7 @@ def _catalog_profile_required(
     return wrapper
 
 
+@csrf_exempt
 @require_http_methods(["PATCH"])
 @require_master_init_data
 @_catalog_profile_required
@@ -2687,6 +2688,7 @@ def payout_preview(request: HttpRequest) -> HttpResponse:
     return _billing_proxy_response(payout_preview_for_master(master))
 
 
+@csrf_exempt
 @require_http_methods(["POST"])
 @require_master_init_data
 def billing_pay_debt(request: HttpRequest) -> HttpResponse:
@@ -2728,6 +2730,7 @@ def billing_pay_debt(request: HttpRequest) -> HttpResponse:
     return _billing_proxy_response(pay_debt_for_master(master, return_url=return_url))
 
 
+@csrf_exempt
 @require_http_methods(["POST"])
 @require_master_init_data
 def billing_card_setup(request: HttpRequest) -> HttpResponse:
