@@ -240,10 +240,11 @@ class TestRosterIsTheRealOne:
         def names() -> set[str]:
             return {str(spec["name"]) for spec in _tools_offered("привет", conversation=None)}
 
-        settings.PLAN_ENGINE_ENABLED = False
-        assert "compose_plan" not in names()
+        # Сначала присутствие — иначе «нет» прошло бы и при пустом списке.
         settings.PLAN_ENGINE_ENABLED = True
         assert "compose_plan" in names()
+        settings.PLAN_ENGINE_ENABLED = False
+        assert "compose_plan" not in names()
 
     def test_subtraction_reads_the_constant_not_a_copy(self) -> None:
         """Source-level: the helper's body names CONCIERGE_TOOL_SPECS and no
