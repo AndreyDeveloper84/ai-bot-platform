@@ -272,7 +272,7 @@ def test_e9_a_turn_under_an_operator_is_recorded_before_the_turn_ends(
 
 
 def test_e10_discussing_through_the_real_turn_gives_the_model_the_plan(
-    client: Client, tenant, wire, catalog: FakeCatalog, _concierge
+    client: Client, tenant, wire, catalog: FakeCatalog, _concierge, settings
 ) -> None:
     """«Обсудить» → дословная реплика; следующий свободный ход идёт модели, и
     разговор этого хода несёт открытое обсуждение с шагами плана."""
@@ -288,10 +288,7 @@ def test_e10_discussing_through_the_real_turn_gives_the_model_the_plan(
         return DiscoveryReply(text="ок")
 
     _concierge.side_effect = _model
-    settings_accounts = (f"max:{person}",)
-    from django.conf import settings as dj_settings
-
-    dj_settings.SYNTHETIC_TEST_TRIGGER_ACCOUNTS = settings_accounts
+    settings.SYNTHETIC_TEST_TRIGGER_ACCOUNTS = (f"max:{person}",)
     _ask(client, card.TRIGGER, as_user=person)
 
     opened = _ask(client, f"cb:plan:discuss:{TOKEN}", as_user=person)
