@@ -19,6 +19,7 @@ import httpx
 import pytest
 
 from apps.integrations.ayla.plan_engine_client import (
+    PlanCapabilityNotConfirmedError,
     PlanEngineContractError,
     PlanEngineDisabledError,
     PlanEngineHttpClient,
@@ -83,6 +84,7 @@ class TestSave:
         [
             (_refused(409, "PLAN_SAVE_SAFETY_BLOCKED"), PlanSaveSafetyBlockedError),
             (_refused(409, "PLAN_IDEMPOTENCY_CONFLICT"), PlanIdempotencyConflictError),
+            (_refused(409, "PLAN_CAPABILITY_NOT_CONFIRMED"), PlanCapabilityNotConfirmedError),
             (_refused(404, "NOT_FOUND", "goal_not_found"), PlanGoalNotFoundError),
             (_refused(404, "PLAN_ENGINE_DISABLED"), PlanEngineDisabledError),
             (
@@ -136,3 +138,37 @@ class TestLabels:
     def test_k4_an_answer_without_labels_is_unavailable(self) -> None:
         with pytest.raises(PlanEngineUnavailableError):
             _client(lambda r: _ok({})).capability_labels(external_user_id="bot:max:1", keys=["x"])
+
+
+class TestRead:
+    """Шаг 3: сохранённый план по «мой план»."""
+
+    def test_r1_the_plan_document_comes_back(self) -> None:
+        seen: dict[str, Any] = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen["method"] = request.method
+            seen["url"] = str(request.url)
+            seen["subject"] = request.headers["X-External-User-ID"]
+            return _ok({"plan": {"plan_id": "p-1", "revision": {"steps": []}}})
+
+        plan = _client(handler).get_plan(external_user_id="bot:max:1")
+
+        assert (seen["method"], seen["subject"]) == ("GET", "bot:max:1")
+        assert seen["url"] == "https://catalog.example/api/v1/internal/me/plan/"
+        assert plan == {"plan_id": "p-1", "revision": {"steps": []}}
+
+    def test_r2_no_plan_is_none_not_an_error(self) -> None:
+        assert _client(lambda r: _ok({"plan": None})).get_plan(external_user_id="bot:max:1") is None
+
+    @pytest.mark.parametrize("data", [{}, {"plan": "мусор"}, {"plan": []}])
+    def test_r3_an_answer_without_the_plan_key_is_not_no_plan(self, data: Any) -> None:
+        with pytest.raises(PlanEngineUnavailableError):
+            _client(lambda r: _ok(data)).get_plan(external_user_id="bot:max:1")
+
+    @pytest.mark.parametrize("status", [404, 409, 500, 503])
+    def test_r3_a_refusal_is_not_no_plan(self, status: int) -> None:
+        with pytest.raises(PlanEngineUnavailableError):
+            _client(lambda r: httpx.Response(status, json={})).get_plan(
+                external_user_id="bot:max:1"
+            )

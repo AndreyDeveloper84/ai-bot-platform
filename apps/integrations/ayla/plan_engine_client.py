@@ -67,6 +67,10 @@ class PlanGoalNotFoundError(PlanEngineError):
     """404 ``NOT_FOUND`` / ``goal_not_found`` — цели, к которой собран план, уже нет."""
 
 
+class PlanCapabilityNotConfirmedError(PlanEngineError):
+    """409 ``PLAN_CAPABILITY_NOT_CONFIRMED`` — способность шага больше не в знании."""
+
+
 class PlanEngineContractError(PlanEngineError):
     """Каталог отверг запрос как неконформный (400 ``PLAN_CONTRACT_VIOLATION``).
 
@@ -170,6 +174,49 @@ class PlanEngineHttpClient:
             raise PlanEngineUnavailableError("plan_missing")
         return data
 
+    def get_plan(self, *, external_user_id: str) -> dict[str, Any] | None:
+        """``GET internal/me/plan/`` — сохранённый план действующей цели или ``None``.
+
+        ``None`` — штатный ответ каталога «плана нет» (в том числе при
+        выключенном механизме), не ошибка.
+        """
+        try:
+            url = AylaUrlBuilder(self._base_url).build(_PLAN_PATH)
+        except AylaUrlError as exc:
+            raise PlanEngineConfigError(f"invalid AYLA_BASE_URL: {exc}") from exc
+        if not self._token:
+            raise PlanEngineConfigError("AYLA_INTERNAL_API_TOKEN not configured")
+        try:
+            response = self._client().get(
+                url,
+                headers=with_request_id(
+                    {
+                        "Authorization": f"Bearer {self._token}",
+                        "X-External-User-ID": external_user_id,
+                        "Accept": "application/json",
+                    }
+                ),
+                timeout=self._timeout,
+            )
+        except httpx.HTTPError as exc:
+            logger.warning("plan_engine.read.network_failure exc=%s", type(exc).__name__)
+            raise PlanEngineUnavailableError(f"network: {type(exc).__name__}") from exc
+        if response.status_code in (401, 403):
+            raise PlanEngineAuthError(f"plan engine auth failed: HTTP {response.status_code}")
+        if response.status_code != 200:
+            raise PlanEngineUnavailableError(f"read: HTTP {response.status_code}")
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise PlanEngineUnavailableError("malformed_json") from exc
+        data = payload.get("data") if isinstance(payload, dict) else None
+        if not isinstance(data, dict) or "plan" not in data:
+            raise PlanEngineUnavailableError("plan_key_missing")
+        plan = data["plan"]
+        if plan is not None and not isinstance(plan, dict):
+            raise PlanEngineUnavailableError("plan_malformed")
+        return plan
+
     def capability_labels(self, *, external_user_id: str, keys: list[str]) -> dict[str, str]:
         """``POST …/capability-labels/`` → ``{ключ: подпись}`` только для подписанных.
 
@@ -251,6 +298,8 @@ def _refusal(response: httpx.Response) -> PlanEngineError:
         return PlanSaveSafetyBlockedError("plan_save_safety_blocked")
     if response.status_code == 409 and code == "PLAN_IDEMPOTENCY_CONFLICT":
         return PlanIdempotencyConflictError("plan_idempotency_conflict")
+    if response.status_code == 409 and code == "PLAN_CAPABILITY_NOT_CONFIRMED":
+        return PlanCapabilityNotConfirmedError("plan_capability_not_confirmed")
     if response.status_code == 404 and reason == "goal_not_found":
         return PlanGoalNotFoundError("goal_not_found")
     return PlanEngineUnavailableError(f"unexpected 4xx: HTTP {response.status_code} {code}")
@@ -271,6 +320,7 @@ def _error_code_and_reason(response: httpx.Response) -> tuple[str, str]:
 
 
 __all__ = [
+    "PlanCapabilityNotConfirmedError",
     "PlanEngineAuthError",
     "PlanEngineConfigError",
     "PlanEngineContractError",

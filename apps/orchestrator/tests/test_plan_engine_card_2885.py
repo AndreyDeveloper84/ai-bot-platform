@@ -26,13 +26,19 @@
   идемпотентности каталога не меняется, меняется только ревизия вердикта;
 * c5 — отказы каталога названы по имени.
 
-Граница, которую каталог проверить не может
-* g1 — вопрос «уточнить» открыт в слоте — уходит в ``restrictions`` при
-  вердикте «норма» у хода с кнопкой;
-* g2 — слот истёк, но пометка рядом с предложением осталась — уходит так же;
-* g3 — вопроса нет — ``restrictions`` в команде нет;
-* g4 — вердикт «уточнить» без вопроса — не шлём: «уточнить» без названного
-  вопроса не держится.
+Вердикт «уточнить»
+* g1 — тройка с «уточнить» уходит как есть: решает каталог;
+* g2 — ограничений карточка не шлёт (универсального вопроса нет).
+
+«Изменить» (шаг 3)
+* i1–i9 — «Изменить» показывает шаги кнопками и ничего не меняет; тап по шагу
+  пересобирает план без него; убранное остаётся убранным; частичное принятие
+  сохраняет оставшееся; кнопки старой карточки устаревают; без этого шага
+  плана нет — прежнее предложение остаётся в силе.
+
+«Мой план»
+* m1–m5 — сохранённый план показан подписями каталога, без вердикта и без
+  сборки; нет плана — фраза идёт дальше.
 """
 
 from __future__ import annotations
@@ -80,10 +86,34 @@ class FakeCatalog:
         self.outcome: dict[str, Any] = {"outcome": "PLAN", "decision": _decision()}
         self.labels: dict[str, str] = dict(LABELS)
         self.save_error: Exception | None = None
+        self.min_steps = 1
+        self.read = 0
+        self.saved_plan: dict[str, Any] | None = None
 
     def compose_decision(self, **kwargs: Any) -> dict[str, Any]:
         self.composed.append(kwargs)
-        return self.outcome
+        excluded = set(kwargs.get("excluded_capability_refs") or [])
+        decision = self.outcome.get("decision")
+        if not excluded or not isinstance(decision, dict):
+            return self.outcome
+        # Как каталог: убранные способности в план не входят, сборка новая —
+        # новый ``decision_id`` и новые ``step_id``.
+        left = [s for s in decision["steps"] if s["capability_ref"] not in excluded]
+        if len(left) < self.min_steps:
+            return {"outcome": "PLAN_NOT_JUSTIFIED", "decision": None, "details": {}}
+        n = len(self.composed)
+        return {
+            "outcome": "PLAN",
+            "decision": {
+                **decision,
+                "decision_id": f"{n:08x}-1111-4222-8333-444455556666",
+                "steps": [{**s, "step_id": f"{s['step_id']}-r{n}"} for s in left],
+            },
+        }
+
+    def get_plan(self, *, external_user_id: str) -> dict[str, Any] | None:
+        self.read += 1
+        return self.saved_plan
 
     def capability_labels(self, *, external_user_id: str, keys: list[str]) -> dict[str, str]:
         return {k: v for k, v in self.labels.items() if k in keys}
@@ -221,7 +251,10 @@ class TestComposing:
             "• Режим сна\n• Вечерняя прогулка\n\nСохранить выбранные шаги в мой план?"
         )
         buttons = result.action_data["attachments"][0]["payload"]["buttons"]
-        assert buttons == [{"label": "Сохранить", "callback": SAVE}]
+        assert buttons == [
+            {"label": "Сохранить", "callback": SAVE},
+            {"label": "Изменить", "callback": f"cb:plan:edit:{TOKEN}"},
+        ]
 
     def test_s2_no_triple_no_request(self, catalog: FakeCatalog) -> None:
         result = _turn(card.TRIGGER, _conversation(), safety=None)
@@ -390,49 +423,24 @@ class TestSaving:
         assert result.reply_text == f"{name} · тест"
 
 
-# ─── граница, которую каталог не видит ───────────────────────────────────
-
-RESTRICTION = [{"scope": "PLAN", "cause": "SAFETY_CLARIFY", "question_id": "plan.safety_clarify"}]
+# ─── вердикт «уточнить» при сохранении ───────────────────────────────────
 
 
-def _open_clarify_slot(conversation: Any) -> None:
-    from django.utils import timezone
+class TestTheCatalogDecidesWhatClarifyMeans:
+    """Решение владельца 08.10: универсального вопроса «уточнить» нет. Своей
+    блокировки при этом вердикте карточка не держит и ограничений не шлёт —
+    тройка уходит как есть, решает каталог."""
 
-    conversation.skill_state[open_question.STATE_KEY] = {
-        "question_id": card.CLARIFY_QUESTION_ID,
-        "asked_text": "вопрос",
-        "at": timezone.now().isoformat(),
-        "binding": True,
-    }
-
-
-class TestAQuestionRaisedWhileTheProposalWaitedIsSavedAsARestriction:
-    def test_g1_an_open_slot_goes_into_restrictions_under_a_normal_verdict(
-        self, catalog: FakeCatalog
-    ) -> None:
+    def test_g1_a_clarify_verdict_is_sent_as_it_is(self, catalog: FakeCatalog) -> None:
         conversation = _conversation()
         _proposed(conversation)
-        _open_clarify_slot(conversation)
-        assert open_question.pending_question(conversation) is not None  # слот действительно открыт
 
-        _turn(SAVE, conversation, safety=_safety("NORMAL", 9))
+        result = _turn(SAVE, conversation, safety=_safety("CLARIFY", 9))
 
-        assert catalog.saved[0]["restrictions"] == RESTRICTION
-        assert catalog.saved[0]["safety_state"] == "NORMAL"
+        assert result.reply_text == "PLAN_SAVED · тест"
+        assert catalog.saved[0]["safety_state"] == "CLARIFY"
 
-    def test_g2_the_mark_beside_the_proposal_outlives_the_slot(self, catalog: FakeCatalog) -> None:
-        conversation = _conversation()
-        _proposed(conversation)
-        card.note_clarify_opened(conversation)
-        assert (
-            open_question.pending_question(conversation) is None
-        )  # слота нет: истёк или не открывался
-
-        _turn(SAVE, conversation, safety=_safety("NORMAL", 9))
-
-        assert catalog.saved[0]["restrictions"] == RESTRICTION
-
-    def test_g3_no_question_no_restrictions_key(self, catalog: FakeCatalog) -> None:
+    def test_g2_no_restrictions_are_sent(self, catalog: FakeCatalog) -> None:
         conversation = _conversation()
         _proposed(conversation)
 
@@ -441,25 +449,214 @@ class TestAQuestionRaisedWhileTheProposalWaitedIsSavedAsARestriction:
         assert len(catalog.saved) == 1  # команда ушла — и в ней ограничений нет
         assert "restrictions" not in catalog.saved[0]
 
-    def test_g4_clarify_without_a_named_question_is_not_sent(self, catalog: FakeCatalog) -> None:
+
+# ─── «Изменить»: убрать шаг и пересобрать ────────────────────────────────
+
+EDIT = f"cb:plan:edit:{TOKEN}"
+
+
+def _buttons(result: Any) -> list[dict[str, str]]:
+    return result.action_data["attachments"][0]["payload"]["buttons"]
+
+
+class TestEditingIsRemovingAStepAndComposingAgain:
+    def test_i1_edit_shows_the_steps_as_buttons_and_changes_nothing(
+        self, catalog: FakeCatalog
+    ) -> None:
+        conversation = _conversation()
+        _proposed(conversation)
+        before = dict(conversation.skill_state[card.STATE_KEY])
+
+        result = _turn(EDIT, conversation)
+
+        assert result.reply_text == "PLAN_EDIT · тест"
+        assert _buttons(result) == [
+            {"label": "Режим сна", "callback": f"cb:plan:drop:{TOKEN}:0"},
+            {"label": "Вечерняя прогулка", "callback": f"cb:plan:drop:{TOKEN}:1"},
+        ]
+        assert len(catalog.composed) == 1  # каталог заново не спрашивали
+        assert conversation.skill_state[card.STATE_KEY] == before
+
+    def test_i2_a_tap_on_a_step_composes_again_without_it(self, catalog: FakeCatalog) -> None:
         conversation = _conversation()
         _proposed(conversation)
 
-        result = _turn(SAVE, conversation, safety=_safety("CLARIFY", 9))
+        result = _turn(f"cb:plan:drop:{TOKEN}:0", conversation, safety=_safety("NORMAL", 8))
 
+        assert catalog.composed[1]["excluded_capability_refs"] == ["cap.sleep_routine"]
+        assert result.reply_text == "• Вечерняя прогулка\n\nСохранить выбранные шаги в мой план?"
+        pending = conversation.skill_state[card.STATE_KEY]
+        assert pending["excluded"] == ["cap.sleep_routine"]
+        assert pending["shown_at_revision"] == 8  # новое предложение — новый показ
+        new_token = card._token(pending["decision"])
+        assert new_token != TOKEN
+        assert _buttons(result)[0] == {
+            "label": "Сохранить",
+            "callback": f"cb:plan:save:{new_token}",
+        }
+
+    def test_i3_what_was_removed_stays_removed_on_the_next_removal(
+        self, catalog: FakeCatalog
+    ) -> None:
+        catalog.outcome["decision"]["steps"].append(
+            {"step_id": "s-c", "capability_ref": "cap.breathing", "level": "CAPABILITY"}
+        )
+        catalog.outcome["decision"]["validation"]["step_validations"]["s-c"] = "VALID"
+        catalog.labels["cap.breathing"] = "Дыхание"
+        conversation = _conversation()
+        _proposed(conversation)
+
+        _turn(f"cb:plan:drop:{TOKEN}:0", conversation)
+        second_token = card._token(conversation.skill_state[card.STATE_KEY]["decision"])
+        result = _turn(f"cb:plan:drop:{second_token}:0", conversation)
+
+        assert catalog.composed[2]["excluded_capability_refs"] == [
+            "cap.sleep_routine",
+            "cap.evening_walk",
+        ]
+        assert result.reply_text.startswith("• Дыхание")
+
+    def test_i4_partial_acceptance_saves_only_what_is_left(self, catalog: FakeCatalog) -> None:
+        conversation = _conversation()
+        _proposed(conversation)
+        _turn(f"cb:plan:drop:{TOKEN}:0", conversation, safety=_safety("NORMAL", 8))
+        new_token = card._token(conversation.skill_state[card.STATE_KEY]["decision"])
+
+        result = _turn(f"cb:plan:save:{new_token}", conversation, safety=_safety("NORMAL", 9))
+
+        assert result.reply_text == "PLAN_SAVED · тест"
+        command = catalog.saved[0]
+        assert [s["capability_ref"] for s in command["decision"]["steps"]] == ["cap.evening_walk"]
+        assert command["confirmation"]["state_revision"] == 8
+
+    def test_i5_the_old_cards_buttons_are_stale_after_a_change(self, catalog: FakeCatalog) -> None:
+        conversation = _conversation()
+        _proposed(conversation)
+        _turn(f"cb:plan:drop:{TOKEN}:0", conversation)
+
+        save_old = _turn(SAVE, conversation)
+        edit_old = _turn(EDIT, conversation)
+
+        assert save_old.reply_text == "PLAN_PROPOSAL_EXPIRED · тест"
+        assert edit_old.reply_text == "PLAN_PROPOSAL_EXPIRED · тест"
         assert catalog.saved == []
-        assert result.reply_text == "CLARIFY_PENDING · тест"
-        # Положительная пара: с названным вопросом тот же вердикт сохраняется.
-        _open_clarify_slot(conversation)
-        _turn(SAVE, conversation, safety=_safety("CLARIFY", 9))
-        assert catalog.saved[0]["restrictions"] == RESTRICTION
 
-    def test_g2_a_new_proposal_starts_without_the_old_mark(self, catalog: FakeCatalog) -> None:
+    def test_i6_no_plan_without_the_step_keeps_the_previous_proposal(
+        self, catalog: FakeCatalog
+    ) -> None:
+        """«Отказаться и оставить прежнее»: без этого шага плана нет — прежнее
+        предложение остаётся в силе, его «Сохранить» работает."""
+        catalog.min_steps = 2
         conversation = _conversation()
         _proposed(conversation)
-        card.note_clarify_opened(conversation)
-        assert conversation.skill_state[card.STATE_KEY]["clarify_open"] is True
 
-        _proposed(conversation)  # новая сборка — новое предложение
+        result = _turn(f"cb:plan:drop:{TOKEN}:0", conversation)
 
-        assert conversation.skill_state[card.STATE_KEY]["clarify_open"] is False
+        assert result.reply_text == "PLAN_NOT_JUSTIFIED · тест"
+        assert card._token(conversation.skill_state[card.STATE_KEY]["decision"]) == TOKEN
+        assert _turn(SAVE, conversation).reply_text == "PLAN_SAVED · тест"
+        assert len(catalog.saved[0]["decision"]["steps"]) == 2
+
+    def test_i7_no_triple_no_recompose(self, catalog: FakeCatalog) -> None:
+        conversation = _conversation()
+        _proposed(conversation)
+
+        result = _turn(f"cb:plan:drop:{TOKEN}:0", conversation, safety=None)
+
+        assert result.reply_text == "SAFETY_INPUT_UNAVAILABLE · тест"
+        assert len(catalog.composed) == 1
+
+    @pytest.mark.parametrize("tap", [EDIT, f"cb:plan:drop:{TOKEN}:0"])
+    def test_i8_another_account_is_not_answered(self, catalog: FakeCatalog, tap: str) -> None:
+        conversation = _conversation()
+        _proposed(conversation)
+
+        result = card.try_handle_plan_edit(
+            text=tap,
+            bot_user=_bot_user("max:999"),
+            conversation=conversation,
+            trace_id="t",
+            turn_safety=_safety,
+        )
+
+        assert result is None
+        assert len(catalog.composed) == 1
+
+    def test_i9_an_index_outside_the_card_is_stale(self, catalog: FakeCatalog) -> None:
+        conversation = _conversation()
+        _proposed(conversation)
+
+        result = _turn(f"cb:plan:drop:{TOKEN}:7", conversation)
+
+        assert result.reply_text == "PLAN_PROPOSAL_EXPIRED · тест"
+        assert len(catalog.composed) == 1
+
+
+class TestSaveRefusedBecauseTheCapabilityIsGone:
+    def test_c6_the_proposal_is_dropped_so_the_person_composes_again(
+        self, catalog: FakeCatalog
+    ) -> None:
+        conversation = _conversation()
+        _proposed(conversation)
+        catalog.save_error = client_mod.PlanCapabilityNotConfirmedError("x")
+
+        result = _turn(SAVE, conversation)
+
+        assert result.reply_text == "PLAN_CAPABILITY_NOT_CONFIRMED · тест"
+        assert card.STATE_KEY not in conversation.skill_state
+
+
+# ─── «мой план»: сохранённый план нового механизма ───────────────────────
+
+
+def _saved_plan() -> dict[str, Any]:
+    return {"plan_id": "p-1", "status": "active", "revision": {"steps": [STEP_A, STEP_B]}}
+
+
+class TestMyPlanShowsTheSavedPlan:
+    def test_m1_the_saved_plan_is_shown_with_catalog_labels(
+        self, catalog: FakeCatalog, settings
+    ) -> None:
+        settings.PLAN_LITE_ENABLED = False
+        catalog.saved_plan = _saved_plan()
+
+        result = _turn("мой план", _conversation(), safety=None)  # просмотр вердикта не требует
+
+        assert result.action_type == "plan_engine_current"
+        assert result.reply_text == "• Режим сна\n• Вечерняя прогулка\n\nPLAN_CURRENT · тест"
+        assert "cap." not in result.reply_text
+        assert catalog.composed == []  # показ ничего не собирает
+
+    def test_m2_no_saved_plan_the_phrase_goes_on(self, catalog: FakeCatalog) -> None:
+        result = card.try_handle_saved_plan(text="мой план", bot_user=_bot_user(), trace_id="t")
+
+        assert result is None
+        assert catalog.read == 1  # каталог спросили — плана нет
+
+    def test_m3_another_account_does_not_ask_the_catalog(self, catalog: FakeCatalog) -> None:
+        catalog.saved_plan = _saved_plan()
+
+        result = card.try_handle_saved_plan(
+            text="мой план", bot_user=_bot_user("max:999"), trace_id="t"
+        )
+
+        assert result is None
+        assert catalog.read == 0
+        # Положительная пара: своему аккаунту тот же план показан.
+        mine = card.try_handle_saved_plan(text="мой план", bot_user=_bot_user(), trace_id="t")
+        assert mine is not None
+
+    def test_m4_another_phrase_does_not_ask_the_catalog(self, catalog: FakeCatalog) -> None:
+        catalog.saved_plan = _saved_plan()
+
+        assert card.try_handle_saved_plan(text="привет", bot_user=_bot_user(), trace_id="t") is None
+        assert catalog.read == 0
+
+    def test_m5_a_step_without_a_label_is_not_shown_as_a_key(self, catalog: FakeCatalog) -> None:
+        catalog.saved_plan = _saved_plan()
+        catalog.labels = {"cap.sleep_routine": "Режим сна"}
+
+        result = card.try_handle_saved_plan(text="мой план", bot_user=_bot_user(), trace_id="t")
+
+        assert result is not None
+        assert result.reply_text == "PLAN_STEP_UNLABELLED · тест"
