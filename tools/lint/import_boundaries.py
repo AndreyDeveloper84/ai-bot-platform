@@ -687,6 +687,14 @@ CATALOG_CROSS_TENANT_BASELINE: frozenset[BaselineKey] = frozenset(
         # this command exists to prevent. Writes are behind
         # ACCOUNT_RESET_ALLOWLIST (empty on the pilot).
         "apps/identity/services/account_reset.py",
+        # DRF-2894 — the bot half of account deletion is PERSON-level for the
+        # same reason as the reset above: the person has a BotUser per tenant,
+        # and the access that must not outlive the account hangs on master
+        # cards linked to THOSE BotUser ids / their ayla_user_id. A lookup by
+        # the person's own keys, never by tenant, never discovery; `.objects`
+        # would see one tenant and leave the links in the others. Runs from the
+        # catalog's internal call, where no tenant ContextVar is set.
+        "apps/identity/services/account_deletion.py",
         # DRF-1061 — operator command listing and picking a master to invite.
         # Every query is filtered on the --tenant the operator named, and it
         # runs at a terminal with no request and therefore no tenant
