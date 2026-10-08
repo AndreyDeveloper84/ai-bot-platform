@@ -114,6 +114,54 @@ def plan_turn_safety(
         return None
 
 
+def last_turn_safety(conversation_id: Any) -> PlanTurnSafety | None:
+    """Тройка ПОСЛЕДНЕГО хода разговора — для действия с планом вне хода.
+
+    Экран Mini App сохраняет план без реплики в чат (задание владельца, §9),
+    а у нажатия на экране своего вердикта нет. Он несёт вердикт последнего
+    хода этого разговора вместе с его ревизией: «стоп» минуту назад в чате
+    не обходится кнопкой на экране.
+
+    ``None`` — действие слать нельзя:
+
+    * состояния разговора нет или оно истекло (два часа без хода);
+    * последний ход вердикта не записал — запись в состоянии старше его
+      ревизии. Прежний вердикт за нынешний не выдаётся;
+    * вердикт «не оценивалось» или без версии политики.
+
+    Блокирующий вердикт возвращается как есть (``STOP``): отказывает каталог,
+    своим словом. Никогда не бросает.
+    """
+    try:
+        from apps.orchestrator.decision_readiness import state as state_mod
+
+        found = state_mod.load(str(conversation_id))
+        state = found.state
+        if state is None:
+            return None
+        verdict = state.safety
+        revision = verdict.evaluated_at_revision
+        if not isinstance(revision, int) or isinstance(revision, bool) or revision < 0:
+            return None
+        if revision != state.revision:
+            return None
+        version = verdict.policy_version
+        if not version:
+            return None
+        return PlanTurnSafety(
+            safety_state=str(verdict.state.value).upper(),
+            safety_policy_version=str(version),
+            evaluated_at_revision=revision,
+        )
+    except Exception:  # noqa: BLE001 — нет тройки → нет действия
+        logger.warning(
+            "orchestrator.plan_turn_safety.last_turn_unavailable conversation=%s",
+            conversation_id,
+            exc_info=True,
+        )
+        return None
+
+
 #: Имя атрибута на объекте разговора ЭТОГО хода.
 _ATTR = "_plan_turn_safety_provider"
 
@@ -148,4 +196,10 @@ def turn_safety_of(conversation: Any) -> PlanTurnSafety | None:
         return None
 
 
-__all__ = ["PlanTurnSafety", "attach_turn_safety", "plan_turn_safety", "turn_safety_of"]
+__all__ = [
+    "PlanTurnSafety",
+    "attach_turn_safety",
+    "last_turn_safety",
+    "plan_turn_safety",
+    "turn_safety_of",
+]

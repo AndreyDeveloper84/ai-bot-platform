@@ -196,3 +196,53 @@ def test_e6_a_free_request_composes_with_the_triple_of_the_real_turn(
     assert len(catalog.composed) == 1
     assert catalog.composed[0]["safety_state"] == "NORMAL"
     assert catalog.composed[0]["safety_policy_version"].startswith("pre_check-")
+
+
+def _last_turn(person: str) -> Any:
+    from apps.conversations.models import Conversation
+    from apps.orchestrator.safety.plan_turn import last_turn_safety
+
+    conversation = Conversation.all_tenants.filter(bot_user__channel_user_id=person).latest("id")
+    return last_turn_safety(conversation.id)
+
+
+def test_e7_every_turn_leaves_its_verdict_for_the_plan_screen(
+    client: Client, tenant, wire, catalog: FakeCatalog
+) -> None:
+    """Сохранение с экрана несёт вердикт ПОСЛЕДНЕГО хода: обычный ход (не
+    плановый) записан, а оборванный воротами ход после него — «стоп»."""
+    person = "2885107"
+    _person_shell(tenant, person)
+
+    _ask(client, "привет", as_user=person)
+    normal = _last_turn(person)
+    assert normal is not None and normal.safety_state == "NORMAL"
+
+    _ask(client, "я не хочу жить", as_user=person)
+    stopped = _last_turn(person)
+
+    assert stopped is not None and stopped.safety_state == "STOP"
+    assert stopped.evaluated_at_revision > normal.evaluated_at_revision
+
+
+def test_e8_a_blocked_persons_turn_is_recorded_before_the_turn_ends(
+    client: Client, tenant, wire, catalog: FakeCatalog, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ход заблокированного человека кончается раньше обычного пути — и всё
+    равно несёт вердикт: иначе экран прочёл бы вердикт хода ДО блокировки."""
+    from django.utils import timezone
+
+    from apps.channels.max import handler as max_handler
+
+    person = "2885108"
+    _person_shell(tenant, person)
+    _ask(client, "привет", as_user=person)
+    before = _last_turn(person)
+    assert before is not None
+
+    monkeypatch.setattr(max_handler, "blocked_since", lambda **kw: timezone.now())
+    _ask(client, "привет ещё раз", as_user=person)
+    after = _last_turn(person)
+
+    assert after is not None
+    assert after.evaluated_at_revision > before.evaluated_at_revision
