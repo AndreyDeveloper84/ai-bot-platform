@@ -90,7 +90,7 @@ def test_t1_the_chosen_tool_answers_with_the_composed_card_in_one_pass(
     )
 
     assert reply.text == "• Режим сна"
-    assert reply.action_data["buttons"][0]["callback"] == "cb:plan:save:0f3a9c2e"
+    assert (reply.action_data or {})["buttons"][0]["callback"] == "cb:plan:save:0f3a9c2e"
     assert seen["conversation"] is conversation
     assert provider.complete.await_count == 1
 
