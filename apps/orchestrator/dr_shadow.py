@@ -360,12 +360,25 @@ def _open_turn_revision(conversation_id: str) -> Any:
     return state
 
 
+def _plan_engine_reads_the_turn() -> bool:
+    """Читает ли запись хода механизм плана (``PLAN_ENGINE_ENABLED``)."""
+    from django.conf import settings
+
+    return bool(getattr(settings, "PLAN_ENGINE_ENABLED", False))
+
+
 def record_turn_safety(conversation: Any, gate_outcome: Any) -> Any:
     """Открыть ревизию хода и записать в неё вердикт ``pre_check`` (DRF-1885).
 
-    Пишет только при включённом теневом режиме: сегодня это единственный
-    читатель DR-состояния, и запись без читателя — работа на каждом ходу ради
-    ничего. ``record_verdict`` намеренно не глотает сбой записи — перехват здесь,
+    Пишет, когда у записи есть читатель, — иначе это работа на каждом ходу
+    ради ничего. Читателей два: теневой движок (``DRE_SHADOW_ENABLED``) и
+    действия с планом вне хода (``PLAN_ENGINE_ENABLED``, DRF-2885) — экран
+    Mini App сохраняет план без реплики в чат и несёт вердикт ПОСЛЕДНЕГО хода.
+    Поэтому при включённом механизме плана пишется каждый ход, включая
+    оборванный воротами: иначе «стоп» минуту назад не попал бы в запись, и
+    экран прочёл бы прежнее «нормально».
+
+    ``record_verdict`` намеренно не глотает сбой записи — перехват здесь,
     у вызывающего: ход не падает, WARN называет разговор и вердикт.
     Возвращает ``Recorded`` или None.
     """
@@ -374,7 +387,9 @@ def record_turn_safety(conversation: Any, gate_outcome: Any) -> Any:
 
     raw = getattr(gate_outcome, "result", None)
     try:
-        if conversation is None or raw is None or not shadow_flag().value:
+        if conversation is None or raw is None:
+            return None
+        if not (shadow_flag().value or _plan_engine_reads_the_turn()):
             return None
         from apps.orchestrator.safety.record import record_verdict
 

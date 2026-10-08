@@ -1824,6 +1824,17 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
             channel=event.channel,
             channel_user_id=event.channel_user_id,
         )
+    # DRF-1885 — ход открывает новую ревизию DecisionReadiness и пишет в неё
+    # вердикт pre_check. Ответ не меняет. Читатели: теневой движок
+    # (DRE_SHADOW_ENABLED) и действия с планом вне хода (PLAN_ENGINE_ENABLED);
+    # без обоих флагов — ноль работы. Не бросает.
+    #
+    # DRF-2885 — запись стоит ДО первого выхода из хода: ход заблокированного
+    # человека и ход под оператором тоже несут вердикт, и экран плана не
+    # должен прочесть вместо него прежний.
+    from apps.orchestrator.dr_shadow import record_turn_safety
+
+    turn_safety_recorded = record_turn_safety(conversation, safety)
     if blocked_at is not None and not reaches_through_handoff(safety):
         _answer_blocked(
             conversation=conversation,
@@ -1945,14 +1956,8 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
     was_memory_command = False
     memory_command_erased = False
     concierge_turn_ran = False
-    # ``safety`` посчитан выше, до проверки глушения handoff (DRF-2213 Q1).
-    # DRF-1885 — ход открывает новую ревизию DecisionReadiness и пишет в неё
-    # вердикт pre_check. Ответ не меняет: решение ниже принимает прежний
-    # путь; читатель вердикта сегодня — теневой движок (флаг
-    # DRE_SHADOW_ENABLED), без флага — ноль работы. Не бросает.
-    from apps.orchestrator.dr_shadow import record_turn_safety
-
-    turn_safety_recorded = record_turn_safety(conversation, safety)
+    # ``safety`` посчитан выше, до проверки глушения handoff (DRF-2213 Q1);
+    # там же, до первого выхода из хода, он записан (``turn_safety_recorded``).
 
     def _plan_turn_safety() -> Any:
         # DRF-2885 — тройка для действий с планом: вердикт и ревизия ЭТОГО
