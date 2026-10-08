@@ -103,7 +103,7 @@ CB_DIARY = "cb:food:diary"
 #: ``save:<8 hex>`` — «Сохранить» под предложением нового механизма (DRF-2885,
 #: :mod:`apps.orchestrator.plan_engine_card`): то же семейство, свой разборщик.
 PLAN_CALLBACK_RE = re.compile(
-    r"^cb:plan:(accept:[1-9][0-9]{0,5}|later|book"
+    r"^cb:plan:(accept:[1-9][0-9]{0,5}|later|book|compose"
     r"|save:[0-9a-f]{8}|edit:[0-9a-f]{8}|drop:[0-9a-f]{8}:[0-9]{1,2})$"
 )
 
@@ -214,6 +214,10 @@ def tap_history_text(text: str) -> str | None:
         from apps.orchestrator.plan_engine_card import BUTTON_SAVE
 
         return BUTTON_SAVE
+    if stripped == "cb:plan:compose":
+        from apps.orchestrator.plan_engine_card import BUTTON_COMPOSE
+
+        return BUTTON_COMPOSE
     if stripped.startswith("cb:plan:edit:"):
         from apps.orchestrator.plan_engine_card import BUTTON_EDIT
 

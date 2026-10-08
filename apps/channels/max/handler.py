@@ -1962,6 +1962,12 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
 
         return plan_turn_safety(conversation, safety, recorded=turn_safety_recorded)
 
+    # Тот же источник — на объекте разговора: до инструмента модели
+    # «составить план» он доезжает вместе с ним, без новых аргументов.
+    from apps.orchestrator.safety.plan_turn import attach_turn_safety
+
+    attach_turn_safety(conversation, _plan_turn_safety)
+
     if not safety.allowed:
         _emit_safety_shortcircuit(bot_user, safety, is_global=True)
         reply = DiscoveryReply(text=safety.reply_text)
