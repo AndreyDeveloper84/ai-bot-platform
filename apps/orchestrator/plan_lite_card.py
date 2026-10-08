@@ -100,7 +100,9 @@ CB_BOOK = "cb:plan:book"
 CB_DIARY = "cb:food:diary"
 
 #: Строгая форма payload'а (правило C01): набранное руками «cb:plan: …» — не тап.
-PLAN_CALLBACK_RE = re.compile(r"^cb:plan:(accept:[1-9][0-9]{0,5}|later|book)$")
+#: ``save:<8 hex>`` — «Сохранить» под предложением нового механизма (DRF-2885,
+#: :mod:`apps.orchestrator.plan_engine_card`): то же семейство, свой разборщик.
+PLAN_CALLBACK_RE = re.compile(r"^cb:plan:(accept:[1-9][0-9]{0,5}|later|book|save:[0-9a-f]{8})$")
 
 #: Слаг экрана «Мой план» — в ``MINIAPP_ROUTES`` и ``_ROUTE_MAP`` (паритет —
 #: ``test_miniapp_routes``).
@@ -205,6 +207,10 @@ def tap_history_text(text: str) -> str | None:
     stripped = (text or "").strip()
     if stripped.startswith(CB_ACCEPT_PREFIX):
         return PLAN_LITE_COPY.button_accept
+    if stripped.startswith("cb:plan:save:"):
+        from apps.orchestrator.plan_engine_card import BUTTON_SAVE
+
+        return BUTTON_SAVE
     return TAP_LABELS.get(stripped)
 
 

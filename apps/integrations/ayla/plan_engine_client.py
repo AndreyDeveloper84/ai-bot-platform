@@ -30,6 +30,8 @@ from apps.integrations.ayla.url_builder import AylaUrlBuilder, AylaUrlError
 logger = logging.getLogger(__name__)
 
 _DECISION_PATH = "internal/me/plan/decision/"
+_PLAN_PATH = "internal/me/plan/"
+_LABELS_PATH = "internal/me/plan/capability-labels/"
 DEFAULT_TIMEOUT_S = 10.0
 
 
@@ -51,6 +53,18 @@ class PlanEngineUnavailableError(PlanEngineError):
 
 class PlanEngineDisabledError(PlanEngineError):
     """Plan Engine выключен в каталоге (404 ``PLAN_ENGINE_DISABLED``)."""
+
+
+class PlanSaveSafetyBlockedError(PlanEngineError):
+    """409 ``PLAN_SAVE_SAFETY_BLOCKED`` — вердикт хода не даёт сохранить план."""
+
+
+class PlanIdempotencyConflictError(PlanEngineError):
+    """409 ``PLAN_IDEMPOTENCY_CONFLICT`` — это подтверждение уже ушло под другой план."""
+
+
+class PlanGoalNotFoundError(PlanEngineError):
+    """404 ``NOT_FOUND`` / ``goal_not_found`` — цели, к которой собран план, уже нет."""
 
 
 class PlanEngineContractError(PlanEngineError):
@@ -143,6 +157,84 @@ class PlanEngineHttpClient:
             raise PlanEngineUnavailableError("outcome_missing")
         return data
 
+    def save_plan(self, *, external_user_id: str, command: dict[str, Any]) -> dict[str, Any]:
+        """``POST internal/me/plan/`` — сохранить подтверждённое решение (DRF-2885).
+
+        ``command`` — команда каталога целиком: решение из ``decision/`` без
+        правок, подтверждение, тройка хода подтверждения, ограничения. Ответ —
+        ``{"plan": <документ>, "created": bool}``; повтор той же команды каталог
+        узнаёт сам (``created=False``), второго плана не будет.
+        """
+        data = self._post(_PLAN_PATH, external_user_id=external_user_id, body=command, op="save")
+        if not isinstance(data.get("plan"), dict) or not isinstance(data.get("created"), bool):
+            raise PlanEngineUnavailableError("plan_missing")
+        return data
+
+    def capability_labels(self, *, external_user_id: str, keys: list[str]) -> dict[str, str]:
+        """``POST …/capability-labels/`` → ``{ключ: подпись}`` только для подписанных.
+
+        Способность без подтверждённой подписи в ответ не попадает: показывать
+        человеку ключ вместо слов нельзя, а сочинять подпись — тем более.
+        """
+        data = self._post(
+            _LABELS_PATH, external_user_id=external_user_id, body={"keys": list(keys)}, op="labels"
+        )
+        labels = data.get("labels")
+        if not isinstance(labels, dict):
+            raise PlanEngineUnavailableError("labels_missing")
+        out: dict[str, str] = {}
+        for key, item in labels.items():
+            if (
+                isinstance(item, dict)
+                and item.get("state") == "labelled"
+                and isinstance(item.get("label"), str)
+                and item["label"].strip()
+            ):
+                out[str(key)] = item["label"].strip()
+        return out
+
+    def _post(
+        self, path: str, *, external_user_id: str, body: dict[str, Any], op: str
+    ) -> dict[str, Any]:
+        try:
+            url = AylaUrlBuilder(self._base_url).build(path)
+        except AylaUrlError as exc:
+            raise PlanEngineConfigError(f"invalid AYLA_BASE_URL: {exc}") from exc
+        if not self._token:
+            raise PlanEngineConfigError("AYLA_INTERNAL_API_TOKEN not configured")
+        try:
+            response = self._client().post(
+                url,
+                headers=with_request_id(
+                    {
+                        "Authorization": f"Bearer {self._token}",
+                        "X-External-User-ID": external_user_id,
+                        "Accept": "application/json",
+                    }
+                ),
+                json=body,
+                timeout=self._timeout,
+            )
+        except httpx.HTTPError as exc:
+            logger.warning("plan_engine.%s.network_failure exc=%s", op, type(exc).__name__)
+            raise PlanEngineUnavailableError(f"network: {type(exc).__name__}") from exc
+
+        if response.status_code in (401, 403):
+            raise PlanEngineAuthError(f"plan engine auth failed: HTTP {response.status_code}")
+        if response.status_code >= 500:
+            logger.warning("plan_engine.%s.server_error status=%d", op, response.status_code)
+            raise PlanEngineUnavailableError(f"server: HTTP {response.status_code}")
+        if 400 <= response.status_code < 500:
+            raise _refusal(response)
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise PlanEngineUnavailableError("malformed_json") from exc
+        data = payload.get("data") if isinstance(payload, dict) else None
+        if not isinstance(data, dict):
+            raise PlanEngineUnavailableError("data_missing")
+        return data
+
     def _client(self) -> httpx.Client:
         if self._http is None:
             self._http = httpx.Client(timeout=self._timeout)
@@ -155,6 +247,12 @@ def _refusal(response: httpx.Response) -> PlanEngineError:
         return PlanEngineDisabledError("plan_engine_disabled")
     if response.status_code == 400 and code == "PLAN_CONTRACT_VIOLATION":
         return PlanEngineContractError(reason)
+    if response.status_code == 409 and code == "PLAN_SAVE_SAFETY_BLOCKED":
+        return PlanSaveSafetyBlockedError("plan_save_safety_blocked")
+    if response.status_code == 409 and code == "PLAN_IDEMPOTENCY_CONFLICT":
+        return PlanIdempotencyConflictError("plan_idempotency_conflict")
+    if response.status_code == 404 and reason == "goal_not_found":
+        return PlanGoalNotFoundError("goal_not_found")
     return PlanEngineUnavailableError(f"unexpected 4xx: HTTP {response.status_code} {code}")
 
 

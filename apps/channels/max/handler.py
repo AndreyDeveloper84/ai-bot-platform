@@ -1952,7 +1952,16 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
     # DRE_SHADOW_ENABLED), без флага — ноль работы. Не бросает.
     from apps.orchestrator.dr_shadow import record_turn_safety
 
-    record_turn_safety(conversation, safety)
+    turn_safety_recorded = record_turn_safety(conversation, safety)
+
+    def _plan_turn_safety() -> Any:
+        # DRF-2885 — тройка для действий с планом: вердикт и ревизия ЭТОГО
+        # хода. Зовётся лениво и только путём плана — на остальных ходах
+        # ревизия, как и раньше, открывается одним теневым контуром.
+        from apps.orchestrator.safety.plan_turn import plan_turn_safety
+
+        return plan_turn_safety(conversation, safety, recorded=turn_safety_recorded)
+
     if not safety.allowed:
         _emit_safety_shortcircuit(bot_user, safety, is_global=True)
         reply = DiscoveryReply(text=safety.reply_text)
@@ -2530,6 +2539,7 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
                         bot_user=bot_user,
                         conversation=conversation,
                         trace_id=str(trace_id) if trace_id else "",
+                        plan_turn_safety=_plan_turn_safety,
                     )
                 except Exception:  # noqa: BLE001
                     logger.exception(
