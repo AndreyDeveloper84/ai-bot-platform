@@ -498,54 +498,48 @@ describe("H01 · быстрые действия", () => {
 // ---------------------------------------------------------------------------
 
 describe("H01 · продолжить разговор с Ayla", () => {
-  it("с последней темой — «Последняя тема» и текст; обе кнопки уходят в чат", async () => {
-    serve({ lastTopic: { last_topic: { text: "Обсудили план питания и подобрали запись", at: "2026-09-20T08:30:00Z" } } });
-    renderHome();
+  // DRF-2799 (решение владельца 06.10, замещает Д2 §172 / DRF-2266 для этого
+  // блока): «диалог продолжается там, где начат». Обе кнопки ведут в разговор
+  // внутри Mini App (`/customer/ayla`) и приложение НЕ закрывают.
+  it.each(["Продолжить разговор", "Задать новый вопрос"])(
+    "с последней темой — «Последняя тема» и текст; «%s» ведёт в разговор в приложении",
+    async (label) => {
+      serve({
+        lastTopic: {
+          last_topic: { text: "Обсудили план питания и подобрали запись", at: "2026-09-20T08:30:00Z" },
+        },
+      });
+      renderHome();
 
-    const heading = await screen.findByRole("heading", { name: /Продолжить разговор с Ayla/ });
-    const block = heading.closest("section") as HTMLElement;
-    expect(within(block).getByText("Последняя тема")).toBeInTheDocument();
-    expect(within(block).getByText("Обсудили план питания и подобрали запись")).toBeInTheDocument();
+      const heading = await screen.findByRole("heading", { name: /Продолжить разговор с Ayla/ });
+      const block = heading.closest("section") as HTMLElement;
+      expect(within(block).getByText("Последняя тема")).toBeInTheDocument();
+      expect(within(block).getByText("Обсудили план питания и подобрали запись")).toBeInTheDocument();
 
-    fireEvent.click(within(block).getByRole("button", { name: "Продолжить разговор" }));
-    fireEvent.click(within(block).getByRole("button", { name: "Задать новый вопрос" }));
-    expect(mockedClose).toHaveBeenCalledTimes(2);
-  });
+      fireEvent.click(within(block).getByRole("button", { name: label }));
 
-  // ── DRF-2266 — кнопка молча ничего не делала (web.max.ru, 21.09) ──────────
+      expect(await screen.findByTestId("location")).toHaveTextContent("/customer/ayla");
+      expect(mockedClose).not.toHaveBeenCalled();
+    },
+  );
 
-  it("ссылка на чат из last-topic уходит в returnToChat", async () => {
+  // ── DRF-2266 — ссылка на диалог бота по-прежнему запоминается: ею пользуются
+  //    прочие двери в чат (согласие, план). Блок Ayla её больше не открывает.
+
+  it("ссылка на чат из last-topic запоминается, но блок Ayla в чат не уводит", async () => {
+    const { rememberChatLink } = await import("../lib/max-sdk");
     serve({ lastTopic: { last_topic: null, chat_link: "https://max.ru/ayla_client_bot" } });
     renderHome();
     const heading = await screen.findByRole("heading", { name: /Продолжить разговор с Ayla/ });
     const block = heading.closest("section") as HTMLElement;
     await waitFor(() =>
-      expect(within(block).getByRole("button", { name: "Продолжить разговор" })).toBeEnabled(),
+      expect(vi.mocked(rememberChatLink)).toHaveBeenCalledWith("https://max.ru/ayla_client_bot"),
     );
+
     fireEvent.click(within(block).getByRole("button", { name: "Продолжить разговор" }));
-    await waitFor(() =>
-      expect(mockedClose).toHaveBeenCalledWith("https://max.ru/ayla_client_bot"),
-    );
-  });
 
-  it("ни закрыть, ни открыть диалог нечем — подсказка, а не тишина", async () => {
-    mockedClose.mockReturnValue("stuck");
-    serve({ lastTopic: { last_topic: null, chat_link: null } });
-    renderHome();
-    const heading = await screen.findByRole("heading", { name: /Продолжить разговор с Ayla/ });
-    const block = heading.closest("section") as HTMLElement;
-    fireEvent.click(within(block).getByRole("button", { name: "Задать новый вопрос" }));
-    expect(await within(block).findByText(/Вернись в чат с Ayla/)).toBeInTheDocument();
-  });
-
-  it("закрылось — подсказки нет (положительная пара)", async () => {
-    serve({ lastTopic: { last_topic: null, chat_link: null } });
-    renderHome();
-    const heading = await screen.findByRole("heading", { name: /Продолжить разговор с Ayla/ });
-    const block = heading.closest("section") as HTMLElement;
-    fireEvent.click(within(block).getByRole("button", { name: "Задать новый вопрос" }));
-    await waitFor(() => expect(mockedClose).toHaveBeenCalledTimes(1));
-    expect(within(block).queryByText(/Вернись в чат с Ayla/)).toBeNull();
+    expect(await screen.findByTestId("location")).toHaveTextContent("/customer/ayla");
+    expect(mockedClose).not.toHaveBeenCalled();
   });
 
   it("без темы — нейтрально: «Продолжить разговор», подписи «Последняя тема» нет (фриз п.4)", async () => {

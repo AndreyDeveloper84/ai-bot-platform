@@ -133,6 +133,7 @@ def _gate(
     view_func: Callable[..., HttpResponse],
     *,
     allow_reception_read: bool,
+    allow_booking_desk: bool = False,
 ) -> Callable[..., HttpResponse]:
     """Shared body of the admin gates.
 
@@ -237,6 +238,10 @@ def _gate(
             # branch from becoming a write door if the view ever gains
             # one.
             allowed = request.method in _RECEPTION_SAFE_METHODS
+        if not allowed and allow_booking_desk and role_ctx.is_receptionist:
+            # DRF-2826 — the front desk runs the booking cycle: any method,
+            # but only on the views named with ``require_booking_desk``.
+            allowed = True
         if not allowed:
             return _role_refusal(role_ctx, tenant_slug=bot_user.tenant.slug)
 
@@ -247,7 +252,13 @@ def _gate(
         with tenant_scope(bot_user.tenant):
             return view_func(request, *args, **kwargs)
 
-    setattr(wrapper, GUARD_ATTR, "admin_or_reception_read" if allow_reception_read else "admin")
+    if allow_booking_desk:
+        guard = "booking_desk"
+    elif allow_reception_read:
+        guard = "admin_or_reception_read"
+    else:
+        guard = "admin"
+    setattr(wrapper, GUARD_ATTR, guard)
     return wrapper
 
 
@@ -285,8 +296,30 @@ def require_admin_or_reception_read(
     return _gate(view_func, allow_reception_read=True)
 
 
+def require_booking_desk(
+    view_func: Callable[..., HttpResponse],
+) -> Callable[..., HttpResponse]:
+    """Gate a view to Owner / Admin / Receptionist — the booking desk.
+
+    Owner's decision 06.10 (DRF-2826): the receptionist runs the booking
+    cycle of her salon — create, reschedule, cancel, complete, no-show,
+    the canonical version of a booking, slots, customer search, the
+    master to book with. NOT availability (time off, date exceptions,
+    weekly template, closures), roles, invites, settings.
+
+    Named view by view, like :func:`require_admin_or_reception_read`:
+    widening the desk means writing this decorator on one more view on
+    purpose. The catalog checks the same person again server-side
+    (``IsTenantBookingDesk`` on the salon surface) — this gate is the
+    bot's half, not the only one.
+    """
+
+    return _gate(view_func, allow_reception_read=False, allow_booking_desk=True)
+
+
 __all__ = [
     "RoleContext",
     "require_admin_or_reception_read",
     "require_admin_role",
+    "require_booking_desk",
 ]

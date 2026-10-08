@@ -380,8 +380,15 @@ def _last_user_content(
     try:
         from apps.conversations.models import Message
 
+        from apps.conversations.model_history import after_model_cutoff
+
+        # DRF-2700 — реплика до отсечки модели не отдаётся и повтором: сбой
+        # чтения отсечки уходит в ``except`` ниже («повторять нечего»).
         last = (
-            Message.all_tenants.filter(conversation_id=conversation_id, role="user")
+            after_model_cutoff(
+                Message.all_tenants.filter(conversation_id=conversation_id, role="user"),
+                conversation.bot_user,
+            )
             .order_by("-created_at")
             .values_list("id", "content")
             .first()
@@ -435,8 +442,15 @@ def _last_clarification_offer(conversation: Any) -> tuple[str, list[str]]:
     try:
         from apps.conversations.models import Message
 
+        from apps.conversations.model_history import after_model_cutoff
+
+        # DRF-2700 — вопрос, заданный до отсечки, заново не поднимается: сбой
+        # чтения отсечки уходит в ``except`` ниже («вопроса нет»).
         rows = (
-            Message.all_tenants.filter(conversation_id=conversation_id, role="assistant")
+            after_model_cutoff(
+                Message.all_tenants.filter(conversation_id=conversation_id, role="assistant"),
+                conversation.bot_user,
+            )
             .order_by("-created_at")
             .values_list("content", "action_data")[:_CLARIFY_LOOKBACK]
         )
@@ -1929,6 +1943,7 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
     # message the tap came from instead of following it.
     clarify_redraw = False
     was_memory_command = False
+    memory_command_erased = False
     concierge_turn_ran = False
     # ``safety`` посчитан выше, до проверки глушения handoff (DRF-2213 Q1).
     # DRF-1885 — ход открывает новую ревизию DecisionReadiness и пишет в неё
@@ -2390,6 +2405,7 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
         #      знаешь», «забудь {X}», «забудь всё». Best-effort — a failure
         #      degrades to normal discovery, never aborts the turn.
         mem_reply: DiscoveryReply | None = None
+        memory_command_erased = False
         if ayla_user_id is not None:
             try:
                 cmd = handle_memory_command(
@@ -2407,6 +2423,7 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
                     # is the state the owner ruling was opened against.
                     mem_reply = DiscoveryReply(text=cmd.text, action_data=cmd.action_data)
                     assistant_action_type = cmd.action_type
+                    memory_command_erased = cmd.erased
             except Exception:  # noqa: BLE001 — memory commands must never break the turn
                 logger.exception(
                     "channels.max.global.memory_command_failed bot_user=%s", bot_user.id
@@ -2709,6 +2726,17 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
                             bot_user.id,
                         )
                         nutrition_block = ""
+                    # DRF-2808 — цель словами человека на КАЖДОМ ходе, под тем же
+                    # гейтом памяти; кладётся рядом с блоком памяти, кроме хода,
+                    # где блок питания уже несёт ту же строку как рамку чисел.
+                    from apps.orchestrator.goal_context import (
+                        build_goal_block,
+                        merge_goal_into_memory,
+                    )
+
+                    memory_block = merge_goal_into_memory(
+                        memory_block, build_goal_block(bot_user), nutrition_block
+                    )
                     if nutrition_block:
                         # Cost attribution (DRF-1211): the block grows the prompt,
                         # and the growth lands in AIRequestMetric.llm_tokens_input.
@@ -3067,6 +3095,12 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
                 type(exc).__name__,
             )
     short_term.append(conversation.id, role="assistant", content=reply.text)
+    if memory_command_erased:
+        # DRF-2700 — ответ «забыла, что ты …» повторяет стёртое: отсечка ставится
+        # после его записи, окно Redis этого разговора очищается.
+        from apps.conversations.model_history import close_forget_turn
+
+        close_forget_turn(bot_user, conversation)
     if assistant_action_type == "safety_pre_check":
         # Crisis reply — alert loudly on delivery failure (#1082).
         _deliver_crisis_reply(

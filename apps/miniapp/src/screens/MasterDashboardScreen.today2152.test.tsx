@@ -129,6 +129,63 @@ describe("шапка — дата в стиле деталей записи (DRF
   });
 });
 
+describe("«Вам ещё не назначили услуги» — по числу услуг, не по специализации (DRF-2881)", () => {
+  /**
+   * Живой проход владельца 07.10: у solo-мастера две настроенные услуги, а
+   * «Сегодня» говорит «не назначили… напишите в MAX». Фраза выводилась из
+   * пустой `specialization`, которую не заполняет ни один путь синхронизации:
+   * её видел каждый мастер без записей на сегодня.
+   */
+  const NOT_ASSIGNED = /не назначили услуги/;
+  const EMPTY_DAY = "На сегодня записей нет";
+
+  function master(over: Partial<DashboardResponse["master"]>): DashboardResponse["master"] {
+    return { id: "m-1", name: "Архипкин", specialization: "", photo_url: "", ...over };
+  }
+
+  it("услуги есть, специализация пуста — фразы нет, обычный пустой день", async () => {
+    mockedDashboard.mockResolvedValue(doc({ master: master({ services_count: 2 }) }));
+    renderAt();
+
+    expect(await screen.findByText(EMPTY_DAY)).toBeInTheDocument();
+    expect(screen.queryByText(NOT_ASSIGNED)).toBeNull();
+  });
+
+  it("услуг ноль у салонного мастера — фраза есть", async () => {
+    mockedDashboard.mockResolvedValue(doc({ master: master({ services_count: 0 }) }));
+    renderAt();
+
+    expect(await screen.findByText(NOT_ASSIGNED)).toBeInTheDocument();
+    expect(screen.queryByText(EMPTY_DAY)).toBeNull();
+  });
+
+  it("специализация заполнена, а услуг ноль — фраза есть: специализация ничего не решает", async () => {
+    mockedDashboard.mockResolvedValue(
+      doc({ master: master({ specialization: "Массаж", services_count: 0 }) }),
+    );
+    renderAt();
+
+    expect(await screen.findByText(NOT_ASSIGNED)).toBeInTheDocument();
+  });
+
+  it("числа нет в ответе — «услуг нет» не утверждается", async () => {
+    mockedDashboard.mockResolvedValue(doc({ master: master({}) }));
+    renderAt();
+
+    expect(await screen.findByText(EMPTY_DAY)).toBeInTheDocument();
+    expect(screen.queryByText(NOT_ASSIGNED)).toBeNull();
+  });
+
+  it("solo-мастер салонную фразу не видит и при нуле услуг — писать ему некому", async () => {
+    mockedDashboard.mockResolvedValue(doc({ master: master({ services_count: 0 }) }));
+    renderAt("/solo/my-day");
+
+    expect(await screen.findByText(EMPTY_DAY)).toBeInTheDocument();
+    expect(screen.queryByText(NOT_ASSIGNED)).toBeNull();
+    expect(screen.queryByText(/напишите в MAX/)).toBeNull();
+  });
+});
+
 describe("порядок: состояние дня — первым", () => {
   it("блок дня стоит выше карточки настройки и «Спросить Ayla»", async () => {
     mockedDashboard.mockResolvedValue(doc({ next_visit: NEXT }));

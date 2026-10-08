@@ -59,7 +59,9 @@ def penza() -> Tenant:
     return Tenant.objects.create(slug="salon-penza", name="Salon Penza", city="Пенза")
 
 
-def _master(tenant: Tenant, ext: int, name: str, rating: Decimal | None) -> CatalogMaster:
+def _master(
+    tenant: Tenant, ext: int, name: str, rating: Decimal | None, review_count: int = 0
+) -> CatalogMaster:
     """A master who is genuinely ON SALE, differing only in ``rating``.
 
     ``ayla_user_id`` is set for the same reason ``is_active`` and the accepted
@@ -90,6 +92,7 @@ def _master(tenant: Tenant, ext: int, name: str, rating: Decimal | None) -> Cata
         name=name,
         specialization="",
         rating=rating,
+        review_count=review_count,
         is_active=True,
         invite_status=CatalogMaster.InviteStatus.ACCEPTED,
         ayla_user_id=uuid4(),
@@ -108,7 +111,7 @@ _RATED = "Борис"
 def pilot_pair(penza) -> Tenant:
     """The pilot's two shapes side by side: an empty rating and a real one."""
     _master(penza, 1, _UNRATED, Decimal("0.00"))
-    _master(penza, 2, _RATED, Decimal("4.90"))
+    _master(penza, 2, _RATED, Decimal("4.90"), review_count=12)
     return penza
 
 
@@ -159,7 +162,9 @@ class TestZeroRatingIsNotDemoted:
         cards = {card.name: card for card in discover_masters(city="Пенза")}
 
         assert set(cards) == {_UNRATED, _RATED}
-        assert cards[_UNRATED].rating == Decimal("0.00")
+        # DRF-2875 — «нет данных» доезжает до карточки как ``None``, не как 0.00.
+        assert cards[_UNRATED].rating is None
+        assert cards[_RATED].rating == Decimal("4.90")
 
 
 class TestRatingIsNotASortKey:
@@ -229,8 +234,7 @@ class TestRatedMasterStillShowsTheirRating:
     def test_real_rating_is_still_rendered(self, pilot_pair) -> None:
         line = self._lines()[_RATED]
 
-        assert "★" in line
-        assert "4.90" in line
+        assert "★ 4.90 (12 отзывов)" in line
 
     def test_zero_rating_is_still_hidden(self, pilot_pair) -> None:
         lines = self._lines()
@@ -240,6 +244,21 @@ class TestRatedMasterStillShowsTheirRating:
         # and not a renderer that quietly stopped drawing stars.
         assert "★" in lines[_RATED]
         assert "★" not in lines[_UNRATED]
+
+    def test_imported_rating_without_reviews_is_not_shown(self, penza) -> None:
+        """DRF-2875 — решение владельца 07.10, п.20: оценка без отзывов за
+        рейтинг Ayla не выдаётся. Это правило ПОКАЗА: мастер остаётся в
+        выдаче и на своём месте."""
+        _master(penza, 1, _UNRATED, Decimal("4.90"), review_count=0)
+        _master(penza, 2, _RATED, Decimal("4.90"), review_count=12)
+
+        lines = self._lines()
+
+        assert list(lines) == [_UNRATED, _RATED]
+        assert "★ 4.90 (12 отзывов)" in lines[_RATED]
+        assert "★" not in lines[_UNRATED]
+        assert "4.90" not in lines[_UNRATED]
+        assert "Пока нет отзывов" in lines[_UNRATED]
 
     def test_the_unrated_master_is_rendered_too(self, pilot_pair) -> None:
         """Un-starred, not unlisted — and still ahead of the rated one."""

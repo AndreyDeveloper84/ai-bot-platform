@@ -58,6 +58,9 @@ export const MANUAL_COPY = {
   portionNamed: (g: number) => `Порция — ${g} г, по твоим словам.`,
   macros: (kcal: number, rest: string) => `Примерно ${kcal} ккал${rest} — оценка по справочнику блюд.`,
   confirmQuestion: "Записать в дневник?",
+  // DRF-2822 — те же слова, что в чате (решение владельца 06.10).
+  unpricedUnavailable: "Сейчас не удалось рассчитать калорийность. Записать без расчёта?",
+  unpricedDisabled: "ИИ-оценка калорийности выключена. Записать без расчёта?",
   toDiary: "В дневник",
   fixGrams: "Поправить граммы",
   gramsField: "Сколько граммов?",
@@ -119,6 +122,20 @@ export function renderEstimateLines(estimate: FoodTextEstimate): string[] {
     if (ai != null) lines.push(`${aiKcalPhrase(ai)}.`);
   }
   return lines;
+}
+
+/**
+ * DRF-2822 — вопрос под карточкой. Причина названа, только когда числа нет
+ * ни от справочника, ни от ИИ, а каталог сказал «сбой» или «выключена»;
+ * любой другой статус и ответ без поля — прежний вопрос.
+ */
+export function confirmQuestionFor(estimate: FoodTextEstimate): string {
+  const priced =
+    estimate.kcal != null ||
+    aiCaloriesOf({ calories: null, ai_calories: estimate.kcal_ai_estimate }) != null;
+  if (!priced && estimate.kcal_ai_status === "unavailable") return MANUAL_COPY.unpricedUnavailable;
+  if (!priced && estimate.kcal_ai_status === "disabled") return MANUAL_COPY.unpricedDisabled;
+  return MANUAL_COPY.confirmQuestion;
 }
 
 function refusal(e: unknown): { slug: string; status: number } | null {
@@ -340,7 +357,7 @@ export function FoodScannerManualScreen() {
               </div>
             ) : (
               <>
-                <p className="food-text-card__line">{MANUAL_COPY.confirmQuestion}</p>
+                <p className="food-text-card__line">{confirmQuestionFor(card.estimate)}</p>
                 <div className="food-scanner-screen__cta-stack">
                   <button type="button" className="btn-primary" disabled={busy !== "idle"} onClick={() => void save()}>
                     {busy === "saving" ? MANUAL_COPY.saving : MANUAL_COPY.toDiary}

@@ -11,8 +11,10 @@ from apps.miniapp_api import (
     master_media,
     views,
     views_diary_days,
+    views_customer_assistant,
     views_last_topic,
     views_memory,
+    views_plan_engine,
     views_plan_lite,
     views_saved_meals,
 )
@@ -114,6 +116,18 @@ urlpatterns = [
         "me/consents/marketing/",
         views.customer_marketing_consent,
         name="customer_marketing_consent",
+    ),
+    # DRF-2779 — умная память Ф4: добровольное согласие на предположения.
+    path(
+        "me/consents/preference-inference/",
+        views.customer_preference_inference_consent,
+        name="customer_preference_inference_consent",
+    ),
+    # DRF-2867 — согласие на ИИ-оценку еды: выдача и отзыв с экрана Mini App.
+    path(
+        "me/consents/ai-food-estimation/",
+        views.customer_ai_food_estimation_consent,
+        name="customer_ai_food_estimation_consent",
     ),
     # Только DELETE: выдаёт согласие человек своим действием в приветственном
     # потоке, эта ручка умеет ровно отзывать.
@@ -225,6 +239,14 @@ urlpatterns = [
         views_plan_lite.customer_plan_lite_proposal,
         name="customer_plan_lite_proposal",
     ),
+    # DRF-2879 (Plan WP7 ч.1) — сборка эфемерного плана в каталоге; бот
+    # приносит реестр правил и состояние безопасности. Ничего не сохраняет;
+    # под флагом PLAN_ENGINE_ENABLED.
+    path(
+        "plan/decision",
+        views_plan_engine.customer_plan_decision,
+        name="customer_plan_decision",
+    ),
     # DRF-2099 — дневник за неделю: строка на день и записи одного дня;
     # границы суток считает каталог по поясу человека.
     path(
@@ -281,8 +303,31 @@ urlpatterns = [
         views_memory.customer_memory_entry,
         name="customer_memory_entry",
     ),
+    # DRF-2781 — умная память Ф4: ответ на предложение Ayla.
+    path(
+        "memory/<uuid:entry_id>/confirm/",
+        views_memory.customer_memory_confirm,
+        name="customer_memory_confirm",
+    ),
+    path(
+        "memory/<uuid:entry_id>/correct/",
+        views_memory.customer_memory_correct,
+        name="customer_memory_correct",
+    ),
     # DRF-2144 (H01) — «Продолжить разговор с Ayla»: последняя тема — первые
     # 80 знаков последнего хода ассистента, без safety-строк и служебных
     # строк памяти; нет темы — null, экран говорит нейтрально.
     path("last-topic/", views_last_topic.customer_last_topic, name="customer_last_topic"),
+    # DRF-2799 — разговор с Ayla внутри Mini App: тот же глобальный ход бота,
+    # ответ приходит телом, а не в чат MAX.
+    path(
+        "assistant/history",
+        views_customer_assistant.customer_assistant_history,
+        name="customer_assistant_history",
+    ),
+    path(
+        "assistant/ask",
+        views_customer_assistant.customer_assistant_ask,
+        name="customer_assistant_ask",
+    ),
 ]
