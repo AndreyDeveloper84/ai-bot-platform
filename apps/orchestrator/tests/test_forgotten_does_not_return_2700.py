@@ -50,7 +50,10 @@ from apps.identity.services import model_history_cutoff as memory_cutoff
 from apps.identity.services.memory_deleter import soft_delete_green_entries
 from apps.identity.services.memory_reader import read_green_entries
 from apps.identity.services.red_zone_reader import RedZoneReader
-from apps.integrations.ayla.personal_context_client import DeclaredContext
+from apps.integrations.ayla.personal_context_client import (
+    DeclaredContext,
+    PersonalContextClientError,
+)
 from apps.orchestrator import concierge, memory_block
 from apps.orchestrator.concierge import GlobalConversationStore
 from apps.orchestrator.memory.personal_context import record_explicit_green_facts
@@ -470,10 +473,15 @@ class TestThroughTheChannelHandler:
 
 
 class _Profile:
-    """Анкета Ayla в памяти: PATCH применяется, GET отдаёт текущее. Цену очистить нельзя."""
+    """Анкета Ayla в памяти: PATCH применяется, GET отдаёт текущее.
 
-    def __init__(self) -> None:
+    ``accepts_null`` — каталог после DRF-2886: ``value: null`` очищает поле.
+    По умолчанию ``False`` — каталог до выкладки: на ``null`` отказ, как в бою.
+    """
+
+    def __init__(self, *, accepts_null: bool = False) -> None:
         self.fields: dict[str, Any] = {}
+        self.accepts_null = accepts_null
 
     def get_context(self, *, ayla_user_id: str, external_user_id: str) -> DeclaredContext:
         return DeclaredContext(ayla_user_id=ayla_user_id, context=dict(self.fields))
@@ -481,8 +489,10 @@ class _Profile:
     def patch_context(
         self, *, ayla_user_id: str, external_user_id: str, updates: list[dict[str, Any]]
     ) -> DeclaredContext:
+        if not self.accepts_null and any(update["value"] is None for update in updates):
+            raise PersonalContextClientError("400 value: null is not accepted")
         for update in updates:
-            if update["value"] in ("", []):
+            if update["value"] in ("", [], None):
                 self.fields.pop(update["field"], None)
             else:
                 self.fields[update["field"]] = update["value"]
@@ -670,3 +680,54 @@ class TestTheRedisWindowItself:
 
         assert _window(chat) == ""
         assert _selection_state_exists(chat) is False
+
+
+# ─── k8: каталог после DRF-2886 очищает цену по-настоящему ───────────────────
+
+
+@pytest.mark.django_db(transaction=True)
+class TestTheCatalogClearsThePrice:
+    def test_k8_when_the_catalog_accepts_null_the_price_is_really_gone(
+        self, budget_person: tuple[BotUser, _Profile]
+    ) -> None:
+        person, profile = budget_person
+        profile.accepts_null = True
+        assert sorted(profile.fields) == ["price_range_max", "price_range_min"]
+
+        handle_memory_command(user_id=_uid(person), text="забудь про мой бюджет", bot_user=person)
+
+        assert profile.fields == {}  # empty-assert-ok: строкой выше оба поля цены были
+        upc = UserPersonalContext.objects.get(user_id=_uid(person))
+        assert (
+            upc.declared_fields_withheld == []
+        )  # empty-assert-ok: отметка не нужна — поле очищено
+
+    def test_k8_a_mark_left_by_an_older_catalog_is_lifted_by_a_real_clear(
+        self, budget_person: tuple[BotUser, _Profile]
+    ) -> None:
+        from apps.orchestrator.memory.ayla_bridge import clear_declared_fields
+
+        person, profile = budget_person
+        handle_memory_command(user_id=_uid(person), text="забудь про мой бюджет", bot_user=person)
+        upc = UserPersonalContext.objects.get(user_id=_uid(person))
+        assert upc.declared_fields_withheld == ["price_range_max", "price_range_min"]
+
+        profile.accepts_null = True
+        assert clear_declared_fields(person, ["price_range"]) == 2
+
+        upc.refresh_from_db()
+        assert upc.declared_fields_withheld == []  # empty-assert-ok: выше отметка стояла
+        assert profile.fields == {}  # empty-assert-ok: до очистки поля цены лежали в анкете
+
+    def test_k8_a_refused_price_clear_does_not_cost_the_diet_clear(
+        self, budget_person: tuple[BotUser, _Profile]
+    ) -> None:
+        from apps.orchestrator.memory.ayla_bridge import clear_declared_fields
+
+        person, profile = budget_person
+        profile.fields["diet_type"] = "vegan"
+
+        cleared = clear_declared_fields(person, ["price_range", "diet"])
+
+        assert cleared == 1
+        assert sorted(profile.fields) == ["price_range_max", "price_range_min"]

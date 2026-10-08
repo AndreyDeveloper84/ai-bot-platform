@@ -153,6 +153,20 @@ def withhold_declared_fields(user_id: Any, fields: list[str]) -> None:
         UserPersonalContext.objects.filter(pk=upc.pk).update(declared_fields_withheld=merged)
 
 
+def unwithhold_declared_fields(user_id: Any, fields: list[str]) -> None:
+    """Снять отметку «не читать»: поле в анкете действительно очищено."""
+    from apps.identity.models import UserPersonalContext
+
+    if not user_id or not fields:
+        return
+    upc = UserPersonalContext.objects.filter(user_id=user_id).first()
+    if upc is None or not upc.declared_fields_withheld:
+        return
+    kept = [name for name in upc.declared_fields_withheld if name not in set(fields)]
+    if kept != list(upc.declared_fields_withheld):
+        UserPersonalContext.objects.filter(pk=upc.pk).update(declared_fields_withheld=kept)
+
+
 def _withheld(user_id: Any) -> set[str]:
     """Имена забытых полей. Сбой чтения — «всё забыто»: анкета не открывается ошибкой."""
     from apps.identity.models import UserPersonalContext
