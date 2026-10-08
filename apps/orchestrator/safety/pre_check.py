@@ -166,7 +166,13 @@ _DEFAULT_PATTERNS: dict[str, list[str]] = {
         # brand named; «принимаю парацетамол, это помешает?» is not. Bare
         # mention is NORMAL, not CAUTION: CAUTION has 0 rules by §126 and
         # giving it its first one is the owner's act, not this patch's.
-        r"(?is)(?=.*\b(подбер\w*|подобра\w*|посовет\w*|порекоменд\w*|назнач\w*"
+        #
+        # ``\A`` (DRF-2921) changes no verdict: both lookaheads read to the
+        # end of the text, so if they hold anywhere they hold at the start.
+        # Without it ``re.search`` retried them from every position — the
+        # cost grew as the square of the length: seconds on a 4 000-character
+        # message, in the one consumer everybody shares.
+        r"(?is)\A(?=.*\b(подбер\w*|подобра\w*|посовет\w*|порекоменд\w*|назнач\w*"
         r"|дай(те)?|выпиш\w*|пропиш\w*|дозир\w*|доз[ауы]"
         r"|сколько\s+(таблет\w*|мг|миллиграм\w*|раз\s+в\s+день)"
         r"|схем\w*\s+(при[её]ма|лечения)|как\s+(принимать|пить|колоть)"
