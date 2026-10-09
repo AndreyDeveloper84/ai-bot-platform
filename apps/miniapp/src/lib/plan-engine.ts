@@ -20,6 +20,12 @@ export interface SavedPlanStep {
    * ссылка не рисуется, текст не сочиняется.
    */
   why?: string | null;
+  /**
+   * Время действующей записи, сделанной от этого шага, — в поясе салона
+   * (часы берутся из строки). `null` или ключа нет — записи нет. Названий
+   * услуги и мастера у записи здесь нет: каталог хранит у шага только время.
+   */
+  booked_at?: string | null;
 }
 
 export interface SavedPlan {
@@ -116,4 +122,60 @@ export async function keepCurrentPlan(proposal: PlanProposal): Promise<void> {
     method: "POST",
     body: JSON.stringify({ plan_id: proposal.plan_id }),
   });
+}
+
+/**
+ * Вариант «услуга × мастер», которым можно выполнить шаг. Все поля — слова
+ * каталога; идентификаторов услуги и мастера экран не получает — выбор и
+ * запись идут по номеру варианта и опознавателю подбора.
+ */
+export interface StepOption {
+  service_name: string;
+  salon_name: string | null;
+  salon_city: string | null;
+  master_name: string;
+  price: string | null;
+  duration_minutes: number | null;
+  /** Адрес только подтверждённого места; `null` — адреса нет, ничего не подставляется. */
+  place_address: string | null;
+  /** Каталог пометил услугу синтетической (тестовой). */
+  synthetic: boolean;
+}
+
+export interface StepOffers {
+  /** Опознаватель подбора — с ним идут выбор услуги и запись. */
+  token: string;
+  options: StepOption[];
+}
+
+export interface StepSlots {
+  token: string;
+  option: StepOption;
+  /** Времена ближайшего дня, где они есть, — в поясе мастера. */
+  slots: string[];
+}
+
+async function stepAction<T>(action: "offers" | "choose" | "book", token: string, index: number): Promise<T> {
+  return request<T>("/plan/step", { method: "POST", body: JSON.stringify({ action, token, index }) });
+}
+
+/**
+ * Услуги для шага сохранённого плана — тот же подбор, что по кнопке шага в
+ * чате. Сервер идёт с оценкой безопасности последнего хода чата; отказы
+ * слагами: `plan_safety_unavailable` (нужен ход в чате), отказы гейта
+ * согласия, причина каталога своим именем (`no_offer` и другие).
+ */
+export async function stepOffers(plan: SavedPlan, stepIndex: number): Promise<StepOffers> {
+  const token = plan.plan_id.replace(/-/g, "").slice(0, 8).toLowerCase();
+  return stepAction<StepOffers>("offers", token, stepIndex);
+}
+
+/** Выбор услуги: сервер фиксирует его в каталоге и отдаёт свободное время. */
+export async function chooseStepOption(token: string, optionIndex: number): Promise<StepSlots> {
+  return stepAction<StepSlots>("choose", token, optionIndex);
+}
+
+/** Запись на время; возвращает время созданной записи. */
+export async function bookStepSlot(token: string, slotIndex: number): Promise<string> {
+  return (await stepAction<{ booked_at: string }>("book", token, slotIndex)).booked_at;
 }

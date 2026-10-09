@@ -107,8 +107,8 @@ def test_c3_the_saved_plan_comes_as_ids_and_labels_in_catalog_order(client, bot_
         "plan": {
             "plan_id": "plan-2876",
             "steps": [
-                {"step_id": "s-0", "label": "Режим сна", "why": None},
-                {"step_id": "s-1", "label": "Вечерняя прогулка", "why": None},
+                {"step_id": "s-0", "label": "Режим сна", "why": None, "booked_at": None},
+                {"step_id": "s-1", "label": "Вечерняя прогулка", "why": None, "booked_at": None},
             ],
         },
         "proposal": None,
@@ -219,7 +219,7 @@ def test_c11_a_proposal_comes_beside_the_plan_in_effect_and_names_what_it_replac
     assert body["proposal"] == {
         "plan_id": PROPOSAL_ID,
         "replaces_plan_id": ACTIVE_ID,
-        "steps": [{"step_id": "s-0", "label": "Вечерняя прогулка", "why": None}],
+        "steps": [{"step_id": "s-0", "label": "Вечерняя прогулка", "why": None, "booked_at": None}],
     }
     # Подписи обоих планов — одним запросом.
     assert fake.capability_details.call_count == 1
