@@ -273,6 +273,13 @@ urlpatterns = [
         views_plan_engine.customer_plan_save,
         name="customer_plan_save",
     ),
+    # DRF-2876 — от шага к услуге, времени и записи с экрана: тот же путь,
+    # что кнопками в чате; под гейтом согласия и с вердиктом последнего хода.
+    path(
+        "plan/step",
+        views_plan_engine.customer_plan_step,
+        name="customer_plan_step",
+    ),
     # DRF-2099 — дневник за неделю: строка на день и записи одного дня;
     # границы суток считает каталог по поясу человека.
     path(

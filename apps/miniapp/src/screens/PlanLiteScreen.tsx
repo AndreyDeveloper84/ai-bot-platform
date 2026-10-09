@@ -48,15 +48,20 @@ import { useScreenBack } from "../hooks/useScreenBack";
 import { ApiError } from "../lib/api";
 import { fetchDecisionContext } from "../lib/customer-goals";
 import { fetchDiaryConsentGate } from "../lib/food-scanner";
+import { formatDayMonthTime, formatDuration, formatMoney } from "../lib/format";
 import {
+  bookStepSlot,
+  chooseStepOption,
   getSavedPlanState,
   keepCurrentPlan,
   replacePlan,
   saveDraft,
+  stepOffers,
   type PlanDraft,
   type PlanProposal,
   type SavedPlan,
   type SavedPlanStep,
+  type StepOption,
 } from "../lib/plan-engine";
 import {
   closePlanLite,
@@ -86,6 +91,14 @@ export const PLAN_LITE_COPY = {
   loading: "Загружаю…",
   /** Слова владельца — лист решений 07.10, п.13. */
   whyThisStep: "Почему этот шаг?",
+  /**
+   * Подпись кнопки у шага. Слова владельца — лист решений 07.10, п.12: там
+   * это СТАТУС шага; кнопкой они взяты временно (решение главного окна
+   * 09.10), других утверждённых слов нет.
+   */
+  chooseService: "Нужно выбрать услугу",
+  /** Пометка синтетической услуги — пример владельца, та же строка, что в чате. */
+  syntheticMark: "Допущено для теста · синтетические данные",
   /** Слова владельца — лист решений 07.10, п.15 («Полная замена»). */
   /** Слова владельца — лист решений 07.10, п.15 («Первый план»). */
   saveQuestion: "Сохранить выбранные шаги в мой план?",
@@ -256,6 +269,10 @@ export function PlanLiteScreen() {
   // что на экране сейчас (прежним планом, сохранённым новым, конструктором):
   // оно ничего не заслоняет, пока человек его не сохранил.
   const [draft, setDraft] = useState<PlanDraft | null>(null);
+  // DRF-2876 — путь «шаг → услуга → время» под одним шагом сохранённого
+  // плана. Состояние пути живёт на сервере (общее с чатом); здесь — только
+  // то, что сервер показал последним ответом.
+  const [stepPath, setStepPath] = useState<StepPath | null>(null);
   const alive = useRef(true);
 
   useEffect(() => {
@@ -363,6 +380,58 @@ export function PlanLiteScreen() {
       if (alive.current && refusal) setNotice(refusal);
     },
     [load],
+  );
+
+  // DRF-2876 — от шага к услуге, времени и записи. Каждое действие — запрос
+  // к серверу: он идёт с оценкой безопасности последнего хода чата и под
+  // гейтом согласия. Отказ — имя с пометкой «тест», как в чате.
+  const runStep = useCallback(async (action: () => Promise<StepPath | null>, reload: boolean) => {
+    setBusy(true);
+    setNotice(null);
+    let refusal: string | null = null;
+    let next: StepPath | null = null;
+    try {
+      next = await action();
+    } catch (e) {
+      refusal = `${(refusalSlug(e) ?? "plan_engine_unavailable").toUpperCase()} · тест`;
+    }
+    if (!alive.current) return;
+    setBusy(false);
+    // После отказа путь закрывается: сервер мог его уже не держать
+    // (устаревшая карточка), и показывать прежние кнопки было бы неправдой.
+    setStepPath(refusal ? null : next);
+    if (reload && !refusal) await load();
+    if (alive.current && refusal) setNotice(refusal);
+  }, [load]);
+
+  const openStep = useCallback(
+    (plan: SavedPlan, stepIndex: number) =>
+      runStep(async () => {
+        const found = await stepOffers(plan, stepIndex);
+        const stepId = plan.steps[stepIndex]?.step_id ?? "";
+        return { stepId, token: found.token, options: found.options, chosen: null, slots: [] };
+      }, false),
+    [runStep],
+  );
+
+  const chooseOption = useCallback(
+    (path: StepPath, optionIndex: number) =>
+      runStep(async () => {
+        const found = await chooseStepOption(path.token, optionIndex);
+        return { ...path, token: found.token, chosen: found.option, slots: found.slots };
+      }, false),
+    [runStep],
+  );
+
+  // Запись создана — путь закрывается, экран перечитывает план: время записи
+  // у шага приходит с сервера, экран его не помнит сам.
+  const bookSlot = useCallback(
+    (path: StepPath, slotIndex: number) =>
+      runStep(async () => {
+        await bookStepSlot(path.token, slotIndex);
+        return null;
+      }, true),
+    [runStep],
   );
 
   useEffect(() => {
@@ -693,8 +762,16 @@ export function PlanLiteScreen() {
             <h2 className="food-scanner-diary__caption">{goalLabel || PLAN_LITE_COPY.title}</h2>
             {/* Только подписи каталога: без номеров, счётчиков и шкал. */}
             <ul className="food-scanner-diary__list">
-              {status.plan.steps.map((step) => (
-                <SavedPlanStepRow key={step.step_id} step={step} />
+              {status.plan.steps.map((step, index) => (
+                <SavedPlanStepRow
+                  key={step.step_id}
+                  step={step}
+                  busy={busy}
+                  path={stepPath?.stepId === step.step_id ? stepPath : null}
+                  onOpen={() => void openStep(status.plan, index)}
+                  onChoose={(path, optionIndex) => void chooseOption(path, optionIndex)}
+                  onBook={(path, slotIndex) => void bookSlot(path, slotIndex)}
+                />
               ))}
             </ul>
           </section>
@@ -815,34 +892,162 @@ export function PlanLiteScreen() {
  * (лист решений 07.10, п.13); у шага без текста ссылки нет — объяснение не
  * придумывается.
  */
-function SavedPlanStepRow({ step }: { step: SavedPlanStep }) {
+function SavedPlanStepRow({
+  step,
+  busy = false,
+  path = null,
+  onOpen,
+  onChoose,
+  onBook,
+}: {
+  step: SavedPlanStep;
+  busy?: boolean;
+  /** Путь «услуга → время», открытый под ЭТИМ шагом; `null` — закрыт. */
+  path?: StepPath | null;
+  /** Нет обработчика — шаг только показывается (предложение, черновик). */
+  onOpen?: () => void;
+  onChoose?: (path: StepPath, optionIndex: number) => void;
+  onBook?: (path: StepPath, slotIndex: number) => void;
+}) {
   const [open, setOpen] = useState(false);
   const why = typeof step.why === "string" ? step.why.trim() : "";
   const whyId = `plan-step-why-${step.step_id}`;
+  const bookedAt = typeof step.booked_at === "string" ? step.booked_at : "";
+  // У шага с действующей записью кнопки нет: показано только её время —
+  // названий услуги и мастера каталог у шага не хранит.
+  const canOpen = Boolean(onOpen) && !bookedAt;
   return (
     <li className="food-scanner-diary__entry">
       <div className="food-scanner-diary__entry-main">
         <span className="food-scanner-diary__entry-dish">{step.label}</span>
+        {bookedAt && (
+          <span className="food-scanner-diary__entry-time" data-testid="plan-step-booked-at">
+            {formatDayMonthTime(bookedAt)}
+          </span>
+        )}
         {why && open && (
           <span id={whyId} className="food-scanner-diary__entry-time">
             {why}
           </span>
         )}
+        {path && onChoose && onBook && (
+          <StepPathPanel label={step.label} path={path} busy={busy} onChoose={onChoose} onBook={onBook} />
+        )}
       </div>
-      {why && (
+      {(why || canOpen) && (
         <div className="food-scanner-diary__entry-actions">
-          <button
-            type="button"
-            className="food-scanner-diary__entry-action"
-            aria-expanded={open}
-            aria-controls={whyId}
-            onClick={() => setOpen((value) => !value)}
-          >
-            {PLAN_LITE_COPY.whyThisStep}
-          </button>
+          {why && (
+            <button
+              type="button"
+              className="food-scanner-diary__entry-action"
+              aria-expanded={open}
+              aria-controls={whyId}
+              onClick={() => setOpen((value) => !value)}
+            >
+              {PLAN_LITE_COPY.whyThisStep}
+            </button>
+          )}
+          {canOpen && (
+            <button
+              type="button"
+              className="food-scanner-diary__entry-action"
+              disabled={busy}
+              aria-label={`${PLAN_LITE_COPY.chooseService}: ${step.label}`}
+              onClick={onOpen}
+            >
+              {PLAN_LITE_COPY.chooseService}
+            </button>
+          )}
         </div>
       )}
     </li>
+  );
+}
+
+/** Путь под шагом: что сервер показал последним ответом. */
+interface StepPath {
+  stepId: string;
+  /** Опознаватель: до подбора — плана, после — подбора. */
+  token: string;
+  options: StepOption[];
+  /** Выбранный вариант; `null` — ещё выбирают услугу. */
+  chosen: StepOption | null;
+  slots: string[];
+}
+
+/** Вариант словами каталога — те же строки и в том же порядке, что в чате. */
+function optionLines(option: StepOption): string[] {
+  const place = [option.salon_name, option.salon_city].filter(Boolean).join(", ");
+  const facts = [
+    option.master_name,
+    option.price ? formatMoney(option.price) : "",
+    formatDuration(option.duration_minutes),
+  ];
+  return [
+    [option.service_name, place].filter(Boolean).join(" — "),
+    facts.filter(Boolean).join(" · "),
+    option.place_address ?? "",
+    option.synthetic ? PLAN_LITE_COPY.syntheticMark : "",
+  ].filter(Boolean);
+}
+
+/**
+ * Услуги для шага, а после выбора — свободное время. Ничего не выбирается за
+ * человека: кнопка — на каждой паре «услуга × мастер» и на каждом времени.
+ * Слов владельца для этого места нет — показаны только слова каталога.
+ */
+function StepPathPanel({
+  label,
+  path,
+  busy,
+  onChoose,
+  onBook,
+}: {
+  label: string;
+  path: StepPath;
+  busy: boolean;
+  onChoose: (path: StepPath, optionIndex: number) => void;
+  onBook: (path: StepPath, slotIndex: number) => void;
+}) {
+  if (path.chosen) {
+    return (
+      <div role="group" aria-label={label} data-testid="plan-step-slots">
+        {optionLines(path.chosen).map((line) => (
+          <span key={line} className="food-scanner-diary__entry-time">
+            {line}
+          </span>
+        ))}
+        <div className="food-scanner-screen__cta-stack">
+          {path.slots.map((iso, index) => (
+            <button
+              key={iso}
+              type="button"
+              className="btn-secondary"
+              disabled={busy}
+              onClick={() => onBook(path, index)}
+            >
+              {formatDayMonthTime(iso)}
+            </button>
+          ))}
+        </div>
+      </div>
+    );
+  }
+  return (
+    <div role="group" aria-label={label} data-testid="plan-step-offers">
+      {path.options.map((option, index) => (
+        <div key={`${path.token}-${index}`} className="food-scanner-screen__cta-stack">
+          {optionLines(option).map((line) => (
+            <span key={line} className="food-scanner-diary__entry-time">
+              {line}
+            </span>
+          ))}
+          <button type="button" className="btn-secondary" disabled={busy} onClick={() => onChoose(path, index)}>
+            {`${option.service_name} · ${option.master_name}`}
+          </button>
+        </div>
+      ))}
+    </div>
   );
 }
 

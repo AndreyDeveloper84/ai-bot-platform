@@ -53,6 +53,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
+from dataclasses import dataclass
 from collections.abc import Callable
 from datetime import date, datetime, timedelta
 from typing import Any
@@ -262,15 +263,44 @@ def try_handle_plan_step(
     turn_safety: TurnSafetyProvider | None,
 ) -> SkillResult | None:
     """Тапы шага, услуги и времени; ``None`` — не наше (форма / механизм выключен)."""
-    from apps.orchestrator.plan_engine_card import SAFETY_INPUT_UNAVAILABLE, engine_enabled
+    from apps.orchestrator.plan_engine_card import engine_enabled
 
     match = STEP_CALLBACK_RE.match((text or "").strip())
     if match is None or not engine_enabled():
         return None
+    return _dispatch(
+        kind=match.group(1),
+        token=match.group(2),
+        index=int(match.group(3)),
+        bot_user=bot_user,
+        conversation=conversation,
+        trace_id=trace_id,
+        turn_safety=turn_safety,
+    )
+
+
+def _dispatch(
+    *,
+    kind: str,
+    token: str,
+    index: int,
+    bot_user: Any,
+    conversation: Any,
+    trace_id: str,
+    turn_safety: TurnSafetyProvider | None,
+) -> SkillResult:
+    """Одно ядро на чат и экран: гейт, состояние, четвёрка, действие.
+
+    ``kind`` — ``step`` (услуги для шага), ``offer`` (выбор услуги), ``slot``
+    (запись на время). Порядок проверок общий: гейт согласия — первым; затем
+    состояние разговора («устарело» раньше, чем читается вердикт); затем
+    четвёрка безопасности; затем каталог.
+    """
+    from apps.orchestrator.plan_engine_card import SAFETY_INPUT_UNAVAILABLE
+
     refusal = _gate(bot_user)
     if refusal is not None:
         return refusal
-    kind, token, index = match.group(1), match.group(2), int(match.group(3))
 
     if kind == "step":
         four = _four(bot_user, turn_safety)
@@ -287,6 +317,77 @@ def try_handle_plan_step(
     if kind == "offer":
         return _choose_offer(bot_user, conversation, trace_id, four, waiting, index)
     return _book_slot(bot_user, conversation, trace_id, four, waiting, index)
+
+
+@dataclass(frozen=True, slots=True)
+class StepAction:
+    """Чем кончилось действие с шагом — для показа вне чата.
+
+    ``name`` — имя исхода (``PLAN_STEP_OFFERS`` / ``PLAN_STEP_SLOTS`` /
+    ``PLAN_STEP_BOOKED`` или имя отказа, в том числе причина каталога).
+    ``state`` — состояние пути после действия: варианты, выбранный вариант,
+    времена и опознаватель подбора; ``None`` — пути нет.
+    """
+
+    name: str
+    state: dict[str, Any] | None
+
+    @property
+    def token(self) -> str:
+        return _hex8((self.state or {}).get("search_id"))
+
+
+def step_action(
+    *,
+    kind: str,
+    token: str,
+    index: int,
+    bot_user: Any,
+    conversation: Any,
+    trace_id: str,
+    safety: Any,
+) -> StepAction:
+    """То же действие с шагом, что нажатие в чате, — для экрана Mini App.
+
+    Экран и чат идут одним ядром (:func:`_dispatch`) и делят одно состояние
+    разговора: начатое на экране можно продолжить в чате и наоборот.
+
+    ``safety`` — тройка вердикта, которую несёт экран: последнего хода
+    разговора; ``None`` — каталог не спрашивается.
+    """
+    from apps.orchestrator.plan_engine_card import PLAN_ENGINE_UNAVAILABLE, engine_enabled
+
+    if not engine_enabled() or kind not in ("step", "offer", "slot"):
+        return StepAction(PLAN_ENGINE_UNAVAILABLE, None)
+    result = _dispatch(
+        kind=kind,
+        token=token,
+        index=index,
+        bot_user=bot_user,
+        conversation=conversation,
+        trace_id=trace_id,
+        turn_safety=lambda: safety,
+    )
+    meta = result.meta if isinstance(result.meta, dict) else {}
+    return StepAction(str(meta.get("plan_outcome") or PLAN_ENGINE_UNAVAILABLE), _read(conversation))
+
+
+def option_view(option: dict[str, Any]) -> dict[str, Any]:
+    """Вариант «услуга × мастер» для показа: только слова каталога.
+
+    Идентификаторы услуги и мастера экрану не нужны и не уходят — запись
+    делает сервер по состоянию разговора.
+    """
+    keys = (
+        "service_name",
+        "salon_name",
+        "salon_city",
+        "master_name",
+        "price",
+        "duration_minutes",
+        "place_address",
+    )
+    return {**{key: option.get(key) for key in keys}, "synthetic": option.get("synthetic") is True}
 
 
 # ─── шаг → услуги ────────────────────────────────────────────────────────
@@ -642,7 +743,10 @@ __all__ = [
     "CB_STEP_PREFIX",
     "STATE_KEY",
     "SYNTHETIC_MARK",
+    "StepAction",
     "is_step_callback",
+    "option_view",
+    "step_action",
     "s1_restriction_of",
     "step_buttons",
     "try_handle_plan_step",
