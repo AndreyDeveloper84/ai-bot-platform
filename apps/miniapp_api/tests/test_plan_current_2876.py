@@ -40,9 +40,14 @@ from apps.miniapp_api.tests.test_plan_decision_proxy_2879 import (  # noqa: F401
 LABELS = {"cap.sleep_routine": "Режим сна", "cap.evening_walk": "Вечерняя прогулка"}
 
 
-def _plan(*refs: str) -> dict[str, Any]:
+ACTIVE_ID = "5a5a5a5a-1111-4222-8333-999999999999"
+PROPOSAL_ID = "7c1d2e3f-aaaa-4bbb-8ccc-ddddeeeeffff"
+
+
+def _plan(*refs: str, plan_id: str = "plan-2876", status: str = "active") -> dict[str, Any]:
     return {
-        "plan_id": "plan-2876",
+        "plan_id": plan_id,
+        "status": status,
         "revision": {
             "steps": [{"step_id": f"s-{i}", "capability_ref": ref} for i, ref in enumerate(refs)]
         },
@@ -61,9 +66,10 @@ def _catalog(
     plan: dict[str, Any] | None,
     labels: dict[str, str] | None = None,
     effects: dict[str, str] | None = None,
+    proposal: dict[str, Any] | None = None,
 ) -> Any:
     fake = mocked.return_value
-    fake.get_plan.return_value = plan
+    fake.get_plan_and_proposal.return_value = (plan, proposal)
     fake.capability_details.return_value = {
         key: {"label": label, "expected_effect": (effects or {}).get(key)}
         for key, label in (LABELS if labels is None else labels).items()
@@ -87,7 +93,7 @@ def test_c2_no_saved_plan_is_null_not_an_error(client, bot_user) -> None:
         resp = _get(client)
 
     assert resp.status_code == 200
-    assert resp.json() == {"plan": None}
+    assert resp.json() == {"plan": None, "proposal": None}
     fake.capability_details.assert_not_called()
 
 
@@ -104,7 +110,8 @@ def test_c3_the_saved_plan_comes_as_ids_and_labels_in_catalog_order(client, bot_
                 {"step_id": "s-0", "label": "Режим сна", "why": None},
                 {"step_id": "s-1", "label": "Вечерняя прогулка", "why": None},
             ],
-        }
+        },
+        "proposal": None,
     }
     assert fake.capability_details.call_args.kwargs["keys"] == [
         "cap.sleep_routine",
@@ -151,11 +158,11 @@ def test_c7_the_subject_is_the_person_from_the_signed_init_data(client, bot_user
         fake = _catalog(mocked, _plan("cap.sleep_routine"))
         _get(client)
 
-    assert fake.get_plan.call_args.kwargs == {"external_user_id": EXT}
+    assert fake.get_plan_and_proposal.call_args.kwargs == {"external_user_id": EXT}
     assert fake.capability_details.call_args.kwargs["external_user_id"] == EXT
 
 
-@pytest.mark.parametrize("failing", ["get_plan", "capability_details"])
+@pytest.mark.parametrize("failing", ["get_plan_and_proposal", "capability_details"])
 def test_c8_a_catalog_refusal_is_not_no_plan(client, bot_user, failing: str) -> None:
     with patch(CLIENT) as mocked:
         fake = _catalog(mocked, _plan("cap.sleep_routine"))
@@ -189,3 +196,62 @@ def test_c10_the_catalogs_effect_comes_as_why_and_only_where_it_exists(client, b
     steps = resp.json()["plan"]["steps"]
     assert steps[0]["why"] == "Помогает ложиться и вставать в одно время."
     assert steps[1]["why"] is None
+
+
+# ─── предложение рядом с действующим планом ──────────────────────────────
+
+
+def test_c11_a_proposal_comes_beside_the_plan_in_effect_and_names_what_it_replaces(
+    client, bot_user
+) -> None:
+    with patch(CLIENT) as mocked:
+        fake = _catalog(
+            mocked,
+            _plan("cap.sleep_routine", plan_id=ACTIVE_ID),
+            proposal=_plan("cap.evening_walk", plan_id=PROPOSAL_ID, status="proposed"),
+        )
+        resp = _get(client)
+
+    assert resp.status_code == 200, resp.content[:300]
+    body = resp.json()
+    assert body["plan"]["plan_id"] == ACTIVE_ID
+    assert body["proposal"] == {
+        "plan_id": PROPOSAL_ID,
+        "replaces_plan_id": ACTIVE_ID,
+        "steps": [{"step_id": "s-0", "label": "Вечерняя прогулка", "why": None}],
+    }
+    # Подписи обоих планов — одним запросом.
+    assert fake.capability_details.call_count == 1
+    assert fake.capability_details.call_args.kwargs["keys"] == [
+        "cap.sleep_routine",
+        "cap.evening_walk",
+    ]
+
+
+def test_c12_a_proposal_that_cannot_be_shown_does_not_hide_the_plan(client, bot_user) -> None:
+    with patch(CLIENT) as mocked:
+        _catalog(
+            mocked,
+            _plan("cap.sleep_routine", plan_id=ACTIVE_ID),
+            labels={"cap.sleep_routine": "Режим сна"},
+            proposal=_plan("cap.evening_walk", plan_id=PROPOSAL_ID, status="proposed"),
+        )
+        resp = _get(client)
+
+    assert resp.status_code == 200
+    assert resp.json()["plan"]["plan_id"] == ACTIVE_ID
+    assert resp.json()["proposal"] is None
+
+
+def test_c13_beside_a_paused_plan_no_replacement_is_offered(client, bot_user) -> None:
+    """Каталог заменяет ДЕЙСТВУЮЩИЙ план; у приостановленного заменять нечего."""
+    with patch(CLIENT) as mocked:
+        _catalog(
+            mocked,
+            _plan("cap.sleep_routine", plan_id=ACTIVE_ID, status="paused"),
+            proposal=_plan("cap.evening_walk", plan_id=PROPOSAL_ID, status="proposed"),
+        )
+        resp = _get(client)
+
+    assert resp.json()["plan"]["plan_id"] == ACTIVE_ID  # положительный контроль
+    assert resp.json()["proposal"] is None

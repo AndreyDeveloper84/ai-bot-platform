@@ -273,6 +273,16 @@ class PlanEngineHttpClient:
         ``None`` — штатный ответ каталога «плана нет» (в том числе при
         выключенном механизме), не ошибка.
         """
+        return self.get_plan_and_proposal(external_user_id=external_user_id)[0]
+
+    def get_plan_and_proposal(
+        self, *, external_user_id: str
+    ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+        """``GET internal/me/plan/`` — действующий план и предложение, ждущее замены.
+
+        Одно другое не заслоняет: предложение не становится планом без
+        отдельного подтверждения человека (:meth:`replace_plan`).
+        """
         try:
             url = AylaUrlBuilder(self._base_url).build(_PLAN_PATH)
         except AylaUrlError as exc:
@@ -308,7 +318,12 @@ class PlanEngineHttpClient:
         plan = data["plan"]
         if plan is not None and not isinstance(plan, dict):
             raise PlanEngineUnavailableError("plan_malformed")
-        return plan
+        # Предложение — рядом с планом (beautygo_backend#704). Ключа нет —
+        # каталог старше #704: предложения нет, и это не ошибка.
+        proposal = data.get("proposal")
+        if proposal is not None and not isinstance(proposal, dict):
+            raise PlanEngineUnavailableError("proposal_malformed")
+        return plan, proposal
 
     def capability_labels(self, *, external_user_id: str, keys: list[str]) -> dict[str, str]:
         """``POST …/capability-labels/`` → ``{ключ: подпись}`` только для подписанных.

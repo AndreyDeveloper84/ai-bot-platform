@@ -346,3 +346,43 @@ class TestReplaceAndArchive:
             _client(lambda r: _refused(404, "NOT_FOUND", "goal_not_found")).save_plan(
                 external_user_id="bot:max:1", command={}
             )
+
+
+class TestReadWithTheProposal:
+    """Чтение отдаёт действующий план и предложение рядом (каталог #704)."""
+
+    def test_q1_the_proposal_comes_beside_the_plan(self) -> None:
+        answer = {"plan": {"plan_id": "p-old"}, "proposal": {"plan_id": "p-new"}}
+
+        plan, proposal = _client(lambda r: _ok(answer)).get_plan_and_proposal(
+            external_user_id="bot:max:1"
+        )
+
+        assert plan == {"plan_id": "p-old"}
+        assert proposal == {"plan_id": "p-new"}
+
+    @pytest.mark.parametrize(
+        "answer", [{"plan": {"plan_id": "p"}}, {"plan": {"plan_id": "p"}, "proposal": None}]
+    )
+    def test_q2_no_proposal_key_or_null_is_no_proposal(self, answer: Any) -> None:
+        """Каталог старше #704 ключа не шлёт — это «предложения нет», не ошибка."""
+        plan, proposal = _client(lambda r: _ok(answer)).get_plan_and_proposal(
+            external_user_id="bot:max:1"
+        )
+
+        assert plan == {"plan_id": "p"}  # положительный контроль: план прочитан
+        assert proposal is None
+
+    @pytest.mark.parametrize("bad", ["мусор", [], 7])
+    def test_q3_a_malformed_proposal_is_not_no_proposal(self, bad: Any) -> None:
+        with pytest.raises(PlanEngineUnavailableError):
+            _client(lambda r: _ok({"plan": None, "proposal": bad})).get_plan_and_proposal(
+                external_user_id="bot:max:1"
+            )
+
+    def test_q4_get_plan_is_the_same_read_without_the_proposal(self) -> None:
+        answer = {"plan": {"plan_id": "p-old"}, "proposal": {"plan_id": "p-new"}}
+
+        assert _client(lambda r: _ok(answer)).get_plan(external_user_id="bot:max:1") == {
+            "plan_id": "p-old"
+        }
