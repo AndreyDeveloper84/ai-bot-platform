@@ -123,6 +123,7 @@ describe("«Мой план»: сохранённый план нового ме
     // Положительный контроль: карточка с шагами, а не пустая.
     expect(within(card).getAllByRole("listitem")).toHaveLength(2);
     expect(card.textContent).not.toMatch(/\d/);
+    // У шагов без текста «зачем» нет ни одной кнопки.
     expect(within(card).queryByRole("button")).toBeNull();
   });
 
@@ -144,5 +145,49 @@ describe("«Мой план»: сохранённый план нового ме
 
     expect(await screen.findByTestId("plan-saved-card")).toBeTruthy();
     expect(mockedSaved).toHaveBeenCalledTimes(2);
+  });
+
+  it("«Почему этот шаг?» раскрывает слова каталога — и только у шага, где они есть", async () => {
+    const why = "Помогает ложиться и вставать в одно время.";
+    mockedSaved.mockResolvedValue({
+      plan_id: "plan-2876",
+      steps: [
+        { step_id: "s-0", label: "Режим сна", why },
+        { step_id: "s-1", label: "Вечерняя прогулка", why: null },
+      ],
+    });
+    renderScreen();
+
+    const card = await screen.findByTestId("plan-saved-card");
+    const [first, second] = within(card).getAllByRole("listitem");
+    if (!first || !second) throw new Error("в карточке должно быть два шага");
+    const link = within(first).getByRole("button", { name: PLAN_LITE_COPY.whyThisStep });
+    expect(link.getAttribute("aria-expanded")).toBe("false");
+    expect(within(first).queryByText(why)).toBeNull();
+
+    fireEvent.click(link);
+    expect(within(first).getByText(why)).toBeTruthy();
+    expect(link.getAttribute("aria-expanded")).toBe("true");
+    // У шага без текста ссылки нет вовсе.
+    expect(within(second).queryByRole("button")).toBeNull();
+
+    fireEvent.click(link);
+    expect(within(first).queryByText(why)).toBeNull();
+  });
+
+  it("пустой текст «зачем» — как его отсутствие: ссылки нет", async () => {
+    mockedSaved.mockResolvedValue({
+      plan_id: "plan-2876",
+      steps: [
+        { step_id: "s-0", label: "Режим сна", why: "   " },
+        { step_id: "s-1", label: "Вечерняя прогулка" },
+      ],
+    });
+    renderScreen();
+
+    const card = await screen.findByTestId("plan-saved-card");
+    // Положительный контроль: шаги на месте.
+    expect(within(card).getAllByRole("listitem")).toHaveLength(2);
+    expect(within(card).queryByRole("button")).toBeNull();
   });
 });
