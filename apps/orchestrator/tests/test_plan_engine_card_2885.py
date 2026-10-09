@@ -956,7 +956,10 @@ class TestDiscussingThePlan:
         shown = card.try_handle_saved_plan(text="мой план", bot_user=_bot_user(), trace_id="t")
 
         assert shown is not None
-        assert shown.action_data["buttons"][0] == {"label": "Обсудить", "callback": DISCUSS_SAVED}
+        assert (shown.action_data or {})["buttons"][0] == {
+            "label": "Обсудить",
+            "callback": DISCUSS_SAVED,
+        }
 
     def test_d14_the_tap_goes_through_the_turn_and_into_history_as_the_buttons_words(
         self, catalog: FakeCatalog
