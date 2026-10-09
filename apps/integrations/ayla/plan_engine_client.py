@@ -19,7 +19,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, TypedDict
 
 import httpx
 from django.conf import settings
@@ -33,6 +33,13 @@ _DECISION_PATH = "internal/me/plan/decision/"
 _PLAN_PATH = "internal/me/plan/"
 _LABELS_PATH = "internal/me/plan/capability-labels/"
 DEFAULT_TIMEOUT_S = 10.0
+
+
+class CapabilityDetails(TypedDict):
+    """Слова каталога о способности: подпись шага и «зачем» (если есть)."""
+
+    label: str
+    expected_effect: str | None
 
 
 class PlanEngineError(Exception):
@@ -223,13 +230,30 @@ class PlanEngineHttpClient:
         Способность без подтверждённой подписи в ответ не попадает: показывать
         человеку ключ вместо слов нельзя, а сочинять подпись — тем более.
         """
+        details = self.capability_details(external_user_id=external_user_id, keys=keys)
+        return {key: row["label"] for key, row in details.items()}
+
+    def capability_details(
+        self, *, external_user_id: str, keys: list[str]
+    ) -> dict[str, CapabilityDetails]:
+        """Тот же вызов, что :meth:`capability_labels`, — подпись и «зачем».
+
+        ``expected_effect`` — курируемый «ожидаемый эффект» способности из
+        знания каталога: ответ на «почему этот шаг» (решение главного окна
+        09.10 по выбору владельца «из обоснования»). Каталог начнёт отдавать
+        его отдельным PR; пока поля нет — ``None``, и это не ошибка: шаг без
+        текста «зачем» показывается без него, сочинять текст нельзя.
+
+        Способность без подтверждённой подписи в ответ не попадает вовсе —
+        и её «зачем» тоже: объяснение шага, который нечем назвать, не нужно.
+        """
         data = self._post(
             _LABELS_PATH, external_user_id=external_user_id, body={"keys": list(keys)}, op="labels"
         )
         labels = data.get("labels")
         if not isinstance(labels, dict):
             raise PlanEngineUnavailableError("labels_missing")
-        out: dict[str, str] = {}
+        out: dict[str, CapabilityDetails] = {}
         for key, item in labels.items():
             if (
                 isinstance(item, dict)
@@ -237,7 +261,13 @@ class PlanEngineHttpClient:
                 and isinstance(item.get("label"), str)
                 and item["label"].strip()
             ):
-                out[str(key)] = item["label"].strip()
+                effect = item.get("expected_effect")
+                out[str(key)] = {
+                    "label": item["label"].strip(),
+                    "expected_effect": effect.strip()
+                    if isinstance(effect, str) and effect.strip()
+                    else None,
+                }
         return out
 
     def _post(

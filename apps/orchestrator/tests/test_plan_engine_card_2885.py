@@ -85,6 +85,8 @@ class FakeCatalog:
         self.saved: list[dict[str, Any]] = []
         self.outcome: dict[str, Any] = {"outcome": "PLAN", "decision": _decision()}
         self.labels: dict[str, str] = dict(LABELS)
+        #: «Зачем шаг» — ожидаемый эффект способности; по умолчанию каталог его не отдаёт.
+        self.effects: dict[str, str] = {}
         self.save_error: Exception | None = None
         self.min_steps = 1
         self.read = 0
@@ -117,6 +119,13 @@ class FakeCatalog:
 
     def capability_labels(self, *, external_user_id: str, keys: list[str]) -> dict[str, str]:
         return {k: v for k, v in self.labels.items() if k in keys}
+
+    def capability_details(self, *, external_user_id: str, keys: list[str]) -> dict[str, Any]:
+        return {
+            k: {"label": v, "expected_effect": self.effects.get(k)}
+            for k, v in self.labels.items()
+            if k in keys
+        }
 
     def save_plan(self, *, external_user_id: str, command: dict[str, Any]) -> dict[str, Any]:
         self.saved.append(command)
@@ -975,3 +984,72 @@ class TestDiscussingThePlan:
         assert is_plan_callback(DISCUSS) is True
         assert is_plan_callback(DISCUSS_SAVED) is True
         assert tap_history_text(DISCUSS) == "Обсудить"
+
+
+# ─── «почему этот шаг»: слова каталога в обсуждении ──────────────────────
+
+EFFECT_SLEEP = "Помогает ложиться и вставать в одно время."
+
+
+class TestWhyThisStepInTheDiscussion:
+    """Решение владельца (лист 07.10, п.13) и главного окна 09.10: «зачем шаг»
+    — курируемый «ожидаемый эффект» способности из каталога. Модель приводит
+    его дословно; у шага без текста причину не сочиняет."""
+
+    def test_w1_the_catalogs_effect_reaches_the_model_next_to_its_step(
+        self, catalog: FakeCatalog
+    ) -> None:
+        catalog.effects = {"cap.sleep_routine": EFFECT_SLEEP}
+        conversation = _conversation()
+        _proposed(conversation)
+        _discuss(DISCUSS, conversation)
+
+        block = card.render_plan_discussion_block(conversation)
+
+        assert f"1. Режим сна — зачем: {EFFECT_SLEEP}" in block
+        # У второго шага текста нет — и в подсказке его нет.
+        assert "2. Вечерняя прогулка\n" in block
+        assert "дословно" in block
+
+    def test_w2_no_effect_from_the_catalog_no_reason_in_the_prompt(
+        self, catalog: FakeCatalog
+    ) -> None:
+        conversation = _conversation()
+        _proposed(conversation)
+        _discuss(DISCUSS, conversation)
+
+        block = card.render_plan_discussion_block(conversation)
+
+        assert "1. Режим сна\n" in block  # положительный контроль: шаг в подсказке есть
+        assert "— зачем:" not in block
+
+    def test_w3_the_effect_follows_the_step_after_another_is_removed(
+        self, catalog: FakeCatalog
+    ) -> None:
+        from apps.orchestrator.safety.plan_turn import attach_turn_safety
+
+        catalog.effects = {"cap.evening_walk": "Даёт спокойный вечер."}
+        conversation = _conversation()
+        _proposed(conversation)
+        _discuss(DISCUSS, conversation)
+        attach_turn_safety(conversation, lambda: _safety("NORMAL", 9))
+
+        card.remove_step_for_request(
+            bot_user=_bot_user(), conversation=conversation, trace_id="t", step_number=1
+        )
+        block = card.render_plan_discussion_block(conversation)
+
+        assert "1. Вечерняя прогулка — зачем: Даёт спокойный вечер." in block
+
+    def test_w4_the_saved_plan_carries_its_effects_into_the_discussion(
+        self, catalog: FakeCatalog
+    ) -> None:
+        catalog.saved_plan = _saved_plan()
+        catalog.effects = {"cap.sleep_routine": EFFECT_SLEEP}
+        conversation = _conversation()
+
+        _discuss(DISCUSS_SAVED, conversation)
+        block = card.render_plan_discussion_block(conversation)
+
+        assert f"1. Режим сна — зачем: {EFFECT_SLEEP}" in block
+        assert "2. Вечерняя прогулка\n" in block
