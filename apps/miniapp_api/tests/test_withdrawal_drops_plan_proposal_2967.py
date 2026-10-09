@@ -186,9 +186,12 @@ def test_w5_a_failed_cleanup_does_not_cost_the_withdrawal(
     def _broken(*args: Any, **kwargs: Any) -> None:
         raise RuntimeError("state is not writable")
 
-    monkeypatch.setattr(conversation_services, "write_skill_state", _broken)
-
-    _withdraw(django_capture_on_commit_callbacks)
+    # Подмена живёт только на время отзыва. ``monkeypatch.undo()`` снял бы и
+    # подмены общих фикстур (Redis в том числе) — и следующий ход чата пошёл
+    # бы в настоящий Redis: зелёный в CI, красный на машине без него.
+    with monkeypatch.context() as during_withdrawal:
+        during_withdrawal.setattr(conversation_services, "write_skill_state", _broken)
+        _withdraw(django_capture_on_commit_callbacks)
 
     active = ConsentRecord.all_tenants.filter(
         bot_user__in=_shells(),
@@ -196,6 +199,6 @@ def test_w5_a_failed_cleanup_does_not_cost_the_withdrawal(
         withdrawn_at__isnull=True,
     )
     assert active.count() == 0  # empty-assert-ok: до отзыва действующая запись была
-    monkeypatch.undo()
+    assert _state_keys() >= PLAN_KEYS  # очистка действительно не прошла
     refused = _ask(client, SAVE, as_user=PERSON).json()["answer"]
     assert refused == f"PLAN_CONSENT_REQUIRED · {card.TEST_MARK}"
