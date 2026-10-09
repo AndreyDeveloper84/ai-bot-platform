@@ -52,6 +52,8 @@ import {
   getSavedPlanState,
   keepCurrentPlan,
   replacePlan,
+  saveDraft,
+  type PlanDraft,
   type PlanProposal,
   type SavedPlan,
   type SavedPlanStep,
@@ -85,6 +87,9 @@ export const PLAN_LITE_COPY = {
   /** Слова владельца — лист решений 07.10, п.13. */
   whyThisStep: "Почему этот шаг?",
   /** Слова владельца — лист решений 07.10, п.15 («Полная замена»). */
+  /** Слова владельца — лист решений 07.10, п.15 («Первый план»). */
+  saveQuestion: "Сохранить выбранные шаги в мой план?",
+  saveYes: "Сохранить",
   replaceQuestion: "Заменить текущий план новым? Прежний останется в истории",
   replaceYes: "Заменить план",
   replaceNo: "Оставить текущий",
@@ -247,6 +252,10 @@ export function PlanLiteScreen() {
   const [diaryConsent, setDiaryConsent] = useState<boolean | null>(null);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
+  // DRF-2876 — несохранённое предложение из чата. Показывается рядом с тем,
+  // что на экране сейчас (прежним планом, сохранённым новым, конструктором):
+  // оно ничего не заслоняет, пока человек его не сохранил.
+  const [draft, setDraft] = useState<PlanDraft | null>(null);
   const alive = useRef(true);
 
   useEffect(() => {
@@ -266,12 +275,14 @@ export function PlanLiteScreen() {
     try {
       const saved = await getSavedPlanState();
       if (!alive.current) return;
+      setDraft(saved.draft);
       if (saved.plan) {
         setStatus({ kind: "saved", plan: saved.plan, proposal: saved.proposal });
         return;
       }
     } catch {
       if (!alive.current) return;
+      setDraft(null);
       setStatus({ kind: "error" });
       return;
     }
@@ -323,6 +334,26 @@ export function PlanLiteScreen() {
       try {
         if (answer === "replace") await replacePlan(proposal);
         else await keepCurrentPlan(proposal);
+      } catch (e) {
+        refusal = `${(refusalSlug(e) ?? "plan_engine_unavailable").toUpperCase()} · тест`;
+      }
+      if (!alive.current) return;
+      setBusy(false);
+      await load();
+      if (alive.current && refusal) setNotice(refusal);
+    },
+    [load],
+  );
+
+  // DRF-2876 — «Сохранить» несохранённое предложение (§9 владельца). После
+  // любого исхода экран перечитывает сохранённое с сервера.
+  const saveShownDraft = useCallback(
+    async (shown: PlanDraft) => {
+      setBusy(true);
+      setNotice(null);
+      let refusal: string | null = null;
+      try {
+        await saveDraft(shown);
       } catch (e) {
         refusal = `${(refusalSlug(e) ?? "plan_engine_unavailable").toUpperCase()} · тест`;
       }
@@ -695,6 +726,33 @@ export function PlanLiteScreen() {
                 onClick={() => void answerProposal(status.proposal as PlanProposal, "keep")}
               >
                 {PLAN_LITE_COPY.replaceNo}
+              </button>
+            </div>
+          </section>
+        )}
+
+        {/* DRF-2876 — несохранённое предложение из чата: шаги словами каталога
+            и вопрос владельца. Пока идёт загрузка или экран в ошибке — не
+            показывается: сохранять можно только то, что прочитано сейчас. */}
+        {draft && status.kind !== "loading" && status.kind !== "error" && (
+          <section data-testid="plan-draft-card" aria-label={PLAN_LITE_COPY.saveQuestion}>
+            <ul className="food-scanner-diary__list">
+              {draft.steps.map((step, index) => (
+                <SavedPlanStepRow
+                  key={`${draft.token}-${index}`}
+                  step={{ step_id: `${draft.token}-${index}`, label: step.label, why: step.why }}
+                />
+              ))}
+            </ul>
+            <p className="food-scanner-diary__caption">{PLAN_LITE_COPY.saveQuestion}</p>
+            <div className="food-scanner-screen__cta-stack">
+              <button
+                type="button"
+                className="btn-primary"
+                disabled={busy}
+                onClick={() => void saveShownDraft(draft)}
+              >
+                {PLAN_LITE_COPY.saveYes}
               </button>
             </div>
           </section>
