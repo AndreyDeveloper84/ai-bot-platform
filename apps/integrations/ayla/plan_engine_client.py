@@ -80,6 +80,18 @@ class PlanCapabilityNotConfirmedError(PlanEngineError):
     """409 ``PLAN_CAPABILITY_NOT_CONFIRMED`` — способность шага больше не в знании."""
 
 
+class PlanDeletionInProgressError(PlanEngineError):
+    """423 ``DELETION_IN_PROGRESS`` — у человека открыта заявка на удаление (DRF-2967)."""
+
+
+class PlanConsentRequiredError(PlanEngineError):
+    """422 ``CONSENT_REQUIRED`` — основания для обработки плана каталог не видит.
+
+    Вторая линия правила бота: утверждения нет, оно старше известного
+    каталогу отзыва или не разбирается (DRF-2967).
+    """
+
+
 class PlanReplacementTargetChangedError(PlanEngineError):
     """409 ``PLAN_REPLACEMENT_TARGET_CHANGED`` — действующим стал другой план
     (или никакой): «да» человека относилось не к нему."""
@@ -133,6 +145,7 @@ class PlanEngineHttpClient:
         safety_policy_version: str,
         rules_registry: dict[str, Any],
         excluded_capability_refs: list[str],
+        consent: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         """Собрать эфемерный план. Возвращает документ ответа каталога как есть."""
         try:
@@ -148,6 +161,10 @@ class PlanEngineHttpClient:
             "rules_registry": rules_registry,
             "excluded_capability_refs": list(excluded_capability_refs),
         }
+        if consent is not None:
+            # DRF-2967 — утверждение основания: вид согласия, версия текста,
+            # время выдачи действующей записи.
+            body["consent"] = dict(consent)
         try:
             response = self._client().post(
                 url,
@@ -211,6 +228,7 @@ class PlanEngineHttpClient:
         safety_state: str,
         safety_policy_version: str,
         evaluated_at_revision: int,
+        consent: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         """``POST internal/me/plan/replace/`` — подтверждённая замена плана.
 
@@ -218,18 +236,17 @@ class PlanEngineHttpClient:
         Ответ ``{"plan": <документ>, "replaced": bool}``; ``replaced=False`` —
         замена уже выполнена (повторное нажатие), не ошибка.
         """
-        data = self._post(
-            _REPLACE_PATH,
-            external_user_id=external_user_id,
-            body={
-                "plan_id": plan_id,
-                "replaces_plan_id": replaces_plan_id,
-                "safety_state": safety_state,
-                "safety_policy_version": safety_policy_version,
-                "evaluated_at_revision": evaluated_at_revision,
-            },
-            op="replace",
-        )
+        body: dict[str, Any] = {
+            "plan_id": plan_id,
+            "replaces_plan_id": replaces_plan_id,
+            "safety_state": safety_state,
+            "safety_policy_version": safety_policy_version,
+            "evaluated_at_revision": evaluated_at_revision,
+        }
+        if consent is not None:
+            # DRF-2967 — утверждение основания, как у сборки и сохранения.
+            body["consent"] = dict(consent)
+        data = self._post(_REPLACE_PATH, external_user_id=external_user_id, body=body, op="replace")
         if not isinstance(data.get("plan"), dict) or not isinstance(data.get("replaced"), bool):
             raise PlanEngineUnavailableError("plan_missing")
         return data
@@ -414,6 +431,10 @@ def _refusal(response: httpx.Response) -> PlanEngineError:
         return PlanIdempotencyConflictError("plan_idempotency_conflict")
     if response.status_code == 409 and code == "PLAN_CAPABILITY_NOT_CONFIRMED":
         return PlanCapabilityNotConfirmedError("plan_capability_not_confirmed")
+    if response.status_code == 423 and code == "DELETION_IN_PROGRESS":
+        return PlanDeletionInProgressError("deletion_in_progress")
+    if response.status_code == 422 and code == "CONSENT_REQUIRED":
+        return PlanConsentRequiredError(reason or "consent_required")
     if response.status_code == 409 and code == "PLAN_REPLACEMENT_TARGET_CHANGED":
         return PlanReplacementTargetChangedError("plan_replacement_target_changed")
     if response.status_code == 409 and code == "PLAN_TRANSITION_REFUSED":
@@ -441,6 +462,8 @@ def _error_code_and_reason(response: httpx.Response) -> tuple[str, str]:
 
 __all__ = [
     "PlanCapabilityNotConfirmedError",
+    "PlanConsentRequiredError",
+    "PlanDeletionInProgressError",
     "PlanEngineAuthError",
     "PlanEngineConfigError",
     "PlanEngineContractError",

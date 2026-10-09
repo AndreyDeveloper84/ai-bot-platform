@@ -61,7 +61,15 @@ from apps.miniapp_api.tests.test_plan_from_chat_e2e_2885 import (  # noqa: F401 
 )
 from apps.orchestrator import plan_engine_card as card
 from apps.orchestrator import plan_gate
-from apps.orchestrator.tests.test_plan_engine_card_2885 import TOKEN, FakeCatalog, _saved_plan
+from apps.orchestrator.tests.test_plan_engine_card_2885 import (
+    ACTIVE_ID,
+    KEEP,
+    PROPOSAL_ID,
+    REPLACE,
+    TOKEN,
+    FakeCatalog,
+    _saved_plan,
+)
 
 pytestmark = pytest.mark.django_db
 
@@ -86,6 +94,7 @@ ACCOUNTS = {
     DELETION_REQUESTED: "2967103",
 }
 CONSENTING = "2967104"
+ACCOUNTS["consenting"] = "2967107"
 
 #: Входы, где план обрабатывается.
 PROCESSING_TAPS = {
@@ -280,6 +289,79 @@ def test_g9_a_deletion_request_on_another_shell_closes_this_one(tenant) -> None:
     mark_deletion_requested(linked_id, request_id=str(uuid.uuid4()))
 
     assert plan_gate.plan_processing_refusal(asking) == plan_gate.PLAN_DELETION_REQUESTED
+
+
+# ─── замена действующего плана: «Заменить» закрыта, «Оставить» открыта ───────
+
+
+def _person_with_a_waiting_replacement(
+    state: str, client: Client, tenant, catalog: FakeCatalog
+) -> str:
+    """Человек сохранил план поверх действующего — каталог держит предложение
+    и ждёт «Заменить» или «Оставить». Потом основание ушло."""
+    person = ACCOUNTS[state]
+    record_global_consent(_bare_person_shell(tenant, person), source="test")
+    catalog.active_plan_id = ACTIVE_ID
+    _ask(client, card.CB_COMPOSE, as_user=person)
+    asked = _ask(client, PROCESSING_TAPS["save"], as_user=person).json()
+    assert [button["payload"] for button in asked["buttons"]][:2] == [REPLACE, KEEP]
+    if state == CONSENT_WITHDRAWN:
+        _withdraw(person)
+    elif state == DELETION_REQUESTED:
+        _request_deletion(person)
+    return person
+
+
+@pytest.mark.parametrize("state", [CONSENT_WITHDRAWN, DELETION_REQUESTED])
+def test_g10_replacing_the_plan_is_closed_without_a_basis(
+    state: str, client: Client, tenant, wire, catalog: FakeCatalog
+) -> None:
+    person = _person_with_a_waiting_replacement(state, client, tenant, catalog)
+
+    answer = _answer(_ask(client, REPLACE, as_user=person))
+
+    assert answer == f"{BLOCKED[state]} · {card.TEST_MARK}"
+    assert catalog.replaced == []  # empty-assert-ok: близнец g10 видит здесь одну замену
+
+
+def test_g10_a_never_consenting_person_replaces_nothing(
+    client: Client, tenant, wire, catalog: FakeCatalog
+) -> None:
+    """Гейт стоит раньше чтения состояния: чужая или старая карточка
+    «Заменить» у человека без согласия отвечает отказом, а не «устарело»."""
+    person = _person_in(NEVER_CONSENTED, client, tenant, catalog)
+
+    answer = _answer(_ask(client, REPLACE, as_user=person))
+
+    assert answer == f"{plan_gate.PLAN_CONSENT_REQUIRED} · {card.TEST_MARK}"
+    assert catalog.replaced == []  # empty-assert-ok: близнец g10 видит здесь одну замену
+
+
+def test_g10_a_consenting_person_replaces_the_plan(
+    client: Client, tenant, wire, catalog: FakeCatalog
+) -> None:
+    person = _person_with_a_waiting_replacement("consenting", client, tenant, catalog)
+
+    answer = _answer(_ask(client, REPLACE, as_user=person))
+
+    assert answer == f"{card.PLAN_REPLACED} · {card.TEST_MARK}"
+    (sent,) = catalog.replaced
+    assert (sent["plan_id"], sent["replaces_plan_id"]) == (PROPOSAL_ID, ACTIVE_ID)
+
+
+@pytest.mark.parametrize("state", [CONSENT_WITHDRAWN, DELETION_REQUESTED, "consenting"])
+def test_g11_keeping_the_current_plan_stays_open(
+    state: str, client: Client, tenant, wire, catalog: FakeCatalog
+) -> None:
+    """«Оставить текущий» — отказ от предложения: данных о человеке после
+    него меньше, и убрать висящее предложение ему надо дать и под отзывом."""
+    person = _person_with_a_waiting_replacement(state, client, tenant, catalog)
+
+    answer = _answer(_ask(client, KEEP, as_user=person))
+
+    assert answer == f"{card.PLAN_KEPT} · {card.TEST_MARK}"
+    assert catalog.archived == [PROPOSAL_ID]
+    assert catalog.replaced == []  # empty-assert-ok: строкой выше — архив, не замена
 
 
 # ─── обсуждение, открытое до отзыва ──────────────────────────────────────────

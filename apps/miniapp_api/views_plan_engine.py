@@ -42,6 +42,8 @@ from django.views.decorators.http import require_http_methods
 
 from apps.identity.models import BotUser
 from apps.integrations.ayla.plan_engine_client import (
+    PlanConsentRequiredError,
+    PlanDeletionInProgressError,
     PlanEngineAuthError,
     PlanEngineConfigError,
     PlanEngineContractError,
@@ -53,6 +55,7 @@ from apps.orchestrator.plan_gate import (
     PLAN_BASIS_UNAVAILABLE,
     PLAN_CONSENT_REQUIRED,
     PLAN_DELETION_REQUESTED,
+    plan_consent_basis,
     plan_processing_refusal,
 )
 from apps.planning_rules.registry import PlanningRegistryError, load_registry
@@ -161,6 +164,7 @@ def customer_plan_decision(request: HttpRequest) -> HttpResponse:
             safety_policy_version=safety_policy_version,
             rules_registry=rules_registry,
             excluded_capability_refs=excluded,
+            consent=plan_consent_basis(bot_user),
         )
     except Exception as exc:  # noqa: BLE001 — каждый класс назван в _refusal
         return _refusal(exc)
@@ -478,6 +482,14 @@ def _basis_refusal(bot_user: BotUser) -> JsonResponse | None:
 
 
 def _refusal(exc: Exception) -> JsonResponse:
+    # DRF-2967 — вторая линия каталога отвечает теми же двумя отказами, что
+    # и гейт бота: экран видит одно и то же с любой стороны.
+    if isinstance(exc, PlanDeletionInProgressError):
+        error, status = _BASIS_REFUSALS[PLAN_DELETION_REQUESTED]
+        return _error(error, "the plan is not processed for this person", status)
+    if isinstance(exc, PlanConsentRequiredError):
+        error, status = _BASIS_REFUSALS[PLAN_CONSENT_REQUIRED]
+        return _error(error, "the plan is not processed for this person", status)
     if isinstance(exc, PlanEngineDisabledError):
         return _error("plan_engine_disabled", "plan engine is not enabled", 404)
     if isinstance(exc, PlanEngineContractError):

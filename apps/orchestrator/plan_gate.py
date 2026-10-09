@@ -32,6 +32,11 @@ PLAN_BASIS_UNAVAILABLE = "PLAN_BASIS_UNAVAILABLE"
 
 REFUSALS = (PLAN_DELETION_REQUESTED, PLAN_CONSENT_REQUIRED, PLAN_BASIS_UNAVAILABLE)
 
+#: Версия текста у старых записей согласия бывает пустой. Каталогу уходит
+#: явная метка, а не пустая строка: согласие человек дал, отсутствие версии —
+#: не его вина и не отказ.
+UNVERSIONED = "unversioned"
+
 
 def plan_processing_refusal(bot_user: Any) -> str | None:
     """Имя отказа — или ``None``, когда план этому человеку обрабатывать можно.
@@ -55,10 +60,52 @@ def plan_processing_refusal(bot_user: Any) -> str | None:
     return None
 
 
+def plan_consent_basis(bot_user: Any) -> dict[str, str] | None:
+    """Утверждение основания для каталога — или ``None``, когда утверждать нечего.
+
+    Каталог — вторая линия того же правила. Реестра согласий у него нет,
+    поэтому каждый вызов, который план обрабатывает, несёт вид согласия,
+    версию текста и время выдачи ДЕЙСТВУЮЩЕЙ записи. Время нужно каталогу для
+    сравнения с известным ему отзывом: отзыв побеждает, только если он позже.
+
+    Запись — самая поздняя действующая у человека по всем оболочкам: та же,
+    по которой открывает :func:`apps.consent.services.has_person_consent`.
+    Сбой чтения — ``None``: без утверждения каталог откажет сам.
+    """
+    try:
+        from apps.consent.models import ConsentRecord
+        from apps.consent.services import person_channel_shells
+
+        consent_type = ConsentRecord.ConsentType.PERSONAL_DATA.value
+        row = (
+            ConsentRecord.all_tenants.filter(
+                bot_user__in=person_channel_shells(bot_user),
+                consent_type=consent_type,
+                granted=True,
+                withdrawn_at__isnull=True,
+            )
+            .order_by("-captured_at")
+            .values_list("captured_at", "document_version")
+            .first()
+        )
+    except Exception:  # noqa: BLE001 — fail-closed: утверждать нечего
+        logger.exception("orchestrator.plan_gate.basis_read_failed")
+        return None
+    if row is None or row[0] is None:
+        return None
+    return {
+        "type": consent_type,
+        "document_version": str(row[1] or "").strip() or UNVERSIONED,
+        "granted_at": row[0].isoformat(),
+    }
+
+
 __all__ = [
     "PLAN_BASIS_UNAVAILABLE",
     "PLAN_CONSENT_REQUIRED",
     "PLAN_DELETION_REQUESTED",
     "REFUSALS",
+    "UNVERSIONED",
+    "plan_consent_basis",
     "plan_processing_refusal",
 ]
