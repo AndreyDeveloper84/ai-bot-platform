@@ -45,7 +45,7 @@ describe("OperationalSystemState shared contract", () => {
       />,
     );
 
-    expect(screen.getByRole("alertdialog")).toHaveTextContent("Это действие изменит запись.");
+    expect(screen.getByRole("alert")).toHaveTextContent("Это действие изменит запись.");
     await userEvent.click(screen.getByRole("button", { name: "Отменить запись" }));
     expect(onConfirm).toHaveBeenCalledTimes(1);
     await userEvent.click(screen.getByRole("button", { name: "Отмена" }));
