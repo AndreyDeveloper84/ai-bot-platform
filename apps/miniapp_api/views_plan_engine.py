@@ -415,6 +415,9 @@ def customer_plan_replace(request: HttpRequest) -> HttpResponse:
             safety_state=safety.safety_state,
             safety_policy_version=safety.safety_policy_version,
             evaluated_at_revision=safety.evaluated_at_revision,
+            # DRF-2967 — основание обработки едет с каждой записью плана;
+            # отказы каталога по нему (423 / 422) называет общий ``_refusal``.
+            consent=plan_consent_basis(bot_user),
         )
     except PlanSaveSafetyBlockedError:
         return _error("plan_safety_blocked", "the plan is not replaced now", 409)

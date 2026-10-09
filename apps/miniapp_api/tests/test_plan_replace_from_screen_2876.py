@@ -56,6 +56,8 @@ pytestmark = pytest.mark.django_db
 PROPOSAL = "7c1d2e3f-aaaa-4bbb-8ccc-ddddeeeeffff"
 ACTIVE = "5a5a5a5a-1111-4222-8333-999999999999"
 BODY = {"plan_id": PROPOSAL, "replaces_plan_id": ACTIVE}
+#: Основание обработки (DRF-2967) — что именно в нём лежит, держат узлы гейта.
+BASIS = {"state": "granted", "attested_at": "2026-10-09T10:00:00+00:00"}
 
 
 def _triple(state: str = "NORMAL", revision: int = 14) -> PlanTurnSafety:
@@ -68,6 +70,7 @@ def _triple(state: str = "NORMAL", revision: int = 14) -> PlanTurnSafety:
 def _basis_proven(monkeypatch: pytest.MonkeyPatch) -> None:
     """Человек этих узлов — с основанием; сам гейт держит test_plan_basis_gate_2967."""
     monkeypatch.setattr(views, "plan_processing_refusal", lambda bot_user: None)
+    monkeypatch.setattr(views, "plan_consent_basis", lambda bot_user: dict(BASIS))
 
 
 @pytest.fixture
@@ -111,6 +114,7 @@ def test_r1_the_replacement_carries_both_plans_and_the_last_turns_triple(
         "safety_state": "NORMAL",
         "safety_policy_version": "pre_check-abc",
         "evaluated_at_revision": 14,
+        "consent": BASIS,
     }
 
 
@@ -218,6 +222,47 @@ def test_r8_switched_off_nothing_is_called(client, bot_user, last_turn, settings
     assert resp.status_code == 404
     assert resp.json()["error"] == "plan_engine_disabled"
     mocked.assert_not_called()
+
+
+def test_r9_the_basis_of_processing_rides_with_the_replacement(
+    client, bot_user, last_turn, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """DRF-2967: замена — запись, основание обработки едет с ней; каким оно
+    было у человека в момент нажатия, таким и ушло."""
+    other = {"state": "granted", "attested_at": "2026-10-01T00:00:00+00:00"}
+    monkeypatch.setattr(views, "plan_consent_basis", lambda bot_user: dict(other))
+    with patch(CLIENT) as mocked:
+        fake = _replaced(mocked)
+        _post(client, "customer_plan_replace", BODY)
+
+    assert fake.replace_plan.call_args.kwargs["consent"] == other
+
+
+@pytest.mark.parametrize(
+    ("error_name", "status", "slug"),
+    [
+        ("PlanDeletionInProgressError", 423, "deletion_requested"),
+        ("PlanConsentRequiredError", 403, "plan_consent_required"),
+    ],
+)
+def test_r10_a_catalog_refusal_on_the_basis_is_named_like_the_bots_own(
+    client, bot_user, last_turn, error_name: str, status: int, slug: str
+) -> None:
+    import apps.integrations.ayla.plan_engine_client as client_mod
+
+    with patch(CLIENT) as mocked:
+        mocked.return_value.replace_plan.side_effect = getattr(client_mod, error_name)("x")
+        resp = _post(client, "customer_plan_replace", BODY)
+
+    assert resp.status_code == status, resp.content
+    assert resp.json()["error"] == slug
+
+
+def test_k5_keep_sends_no_basis_it_is_not_a_record_of_processing(client, bot_user) -> None:
+    with patch(CLIENT) as mocked:
+        _post(client, "customer_plan_keep", {"plan_id": PROPOSAL})
+
+    assert "consent" not in mocked.return_value.archive_plan.call_args.kwargs
 
 
 # ─── отказ от предложения ────────────────────────────────────────────────
