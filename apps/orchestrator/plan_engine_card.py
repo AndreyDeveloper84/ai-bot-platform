@@ -312,7 +312,11 @@ def _compose(
             return _named(outcome)
         steps = [s for s in decision.get("steps") or [] if isinstance(s, dict)]
         keys = [str(s.get("capability_ref") or "") for s in steps]
-        labels_by_key = client.capability_labels(external_user_id=external_user_id, keys=keys)
+        details = client.capability_details(external_user_id=external_user_id, keys=keys)
+        labels_by_key = {key: row["label"] for key, row in details.items()}
+        effects_by_key = {
+            key: row["expected_effect"] for key, row in details.items() if row["expected_effect"]
+        }
     except PlanEngineError as exc:
         logger.warning(
             "orchestrator.plan_engine_card.compose_failed trace=%s class=%s",
@@ -340,6 +344,8 @@ def _compose(
             # ``step_id`` у каждой сборки новый.
             "excluded": list(excluded),
             "labels": {key: labels_by_key[key] for key in keys},
+            # «Зачем шаг» — слова каталога; есть не у каждого шага.
+            "effects": {key: effects_by_key[key] for key in keys if key in effects_by_key},
         },
     )
     return _proposal([labels_by_key[key] for key in keys], _token(decision))
@@ -474,6 +480,19 @@ def _write_discussion(conversation: Any, value: dict[str, Any] | None) -> None:
     write_conversation_state(conversation, DISCUSSION_KEY, value)
 
 
+def _proposal_effects(conversation: Any) -> list[str | None]:
+    """«Зачем» по шагам текущего предложения, по порядку; ``None`` — текста нет."""
+    pending = _read_pending(conversation)
+    if pending is None:
+        return []
+    raw = pending.get("effects")
+    effects: dict[str, Any] = raw if isinstance(raw, dict) else {}
+    return [
+        str(effects[key]) if isinstance(effects.get(key), str) and effects[key] else None
+        for key in _step_keys(pending)
+    ]
+
+
 def _proposal_labels(conversation: Any) -> list[str] | None:
     """Подписи шагов текущего предложения по порядку — или ``None``."""
     pending = _read_pending(conversation)
@@ -487,8 +506,8 @@ def _proposal_labels(conversation: Any) -> list[str] | None:
     return [str(labels[key]) for key in keys]
 
 
-def discussed_plan(conversation: Any) -> tuple[str, list[str]] | None:
-    """Что сейчас обсуждают: вид плана и подписи шагов — или ``None``.
+def discussed_plan(conversation: Any) -> tuple[str, list[tuple[str, str | None]]] | None:
+    """Что сейчас обсуждают: вид плана и шаги (подпись, «зачем») — или ``None``.
 
     Предложение читается из того, что ждёт подтверждения, а не из снимка:
     убрали шаг — обсуждается уже новое предложение. Сохранённый план — снимок
@@ -501,11 +520,34 @@ def discussed_plan(conversation: Any) -> tuple[str, list[str]] | None:
         return None
     if row.get("subject") == SUBJECT_PROPOSAL:
         labels = _proposal_labels(conversation)
-        return (SUBJECT_PROPOSAL, labels) if labels else None
+        if not labels:
+            return None
+        effects = _proposal_effects(conversation)
+        return (
+            SUBJECT_PROPOSAL,
+            [(label, effects[i] if i < len(effects) else None) for i, label in enumerate(labels)],
+        )
     if row.get("subject") == SUBJECT_SAVED:
         raw = row.get("labels")
         saved = [x for x in raw if isinstance(x, str) and x] if isinstance(raw, list) else []
-        return (SUBJECT_SAVED, saved) if saved else None
+        raw_effects = row.get("effects")
+        saved_effects = raw_effects if isinstance(raw_effects, list) else []
+        if not saved:
+            return None
+        return (
+            SUBJECT_SAVED,
+            [
+                (
+                    label,
+                    saved_effects[i]
+                    if i < len(saved_effects)
+                    and isinstance(saved_effects[i], str)
+                    and saved_effects[i]
+                    else None,
+                )
+                for i, label in enumerate(saved)
+            ],
+        )
     return None
 
 
@@ -524,8 +566,11 @@ def render_plan_discussion_block(conversation: Any) -> str:
     found = discussed_plan(conversation)
     if found is None:
         return ""
-    subject, labels = found
-    steps = "\n".join(f"{n}. {label}" for n, label in enumerate(labels, start=1))
+    subject, plan_steps = found
+    steps = "\n".join(
+        f"{n}. {label}" + (f" — зачем: {effect}" if effect else "")
+        for n, (label, effect) in enumerate(plan_steps, start=1)
+    )
     if subject == SUBJECT_PROPOSAL:
         kind = "Это ПРЕДЛОЖЕНИЕ плана: оно ещё не сохранено."
         change = (
@@ -546,9 +591,11 @@ def render_plan_discussion_block(conversation: Any) -> str:
         "Правила обсуждения плана:\n"
         "- План составляет и меняет только платформа. Не добавляй, не заменяй "
         "и не придумывай шаги; не предлагай своих вариантов плана.\n"
-        "- О шаге говори только то, что следует из его названия. Почему именно "
-        "этот шаг попал в план, тебе не сообщено — не сочиняй причину; если "
-        "спрашивают «почему», скажи, что объяснения пока нет.\n"
+        "- О шаге говори только то, что следует из его названия и из текста "
+        "после «зачем:», если он есть. На вопрос «почему этот шаг» приводи "
+        "текст после «зачем:» дословно — это слова платформы. Если у шага "
+        "такого текста нет — не сочиняй причину, скажи, что объяснения пока "
+        "нет.\n"
         "- Не обещай результат и не давай медицинских советов.\n"
         "- Добавить свой шаг или заменить один шаг другим пока нельзя — скажи "
         "об этом прямо.\n"
@@ -572,12 +619,20 @@ def try_handle_plan_discuss(
 
     token = match.group(1)
     if token == DISCUSS_SAVED:
-        labels = _saved_plan_labels(bot_user, trace_id)
-        if labels is None:
+        saved_steps = _saved_plan_steps(bot_user, trace_id)
+        if saved_steps is None:
             return _named(PLAN_ENGINE_UNAVAILABLE)
-        if not labels:
+        if not saved_steps:
             return _named(PLAN_PROPOSAL_EXPIRED)
-        _write_discussion(conversation, {"subject": SUBJECT_SAVED, "labels": labels})
+        _write_discussion(
+            conversation,
+            {
+                "subject": SUBJECT_SAVED,
+                "labels": [label for label, _ in saved_steps],
+                # Тем же порядком, что подписи; у шага без текста — ``None``.
+                "effects": [effect for _, effect in saved_steps],
+            },
+        )
     else:
         if _pending_for(conversation, token) is None or not _proposal_labels(conversation):
             return _named(PLAN_PROPOSAL_EXPIRED)
@@ -592,8 +647,8 @@ def try_handle_plan_discuss(
     )
 
 
-def _saved_plan_labels(bot_user: Any, trace_id: str) -> list[str] | None:
-    """Подписи шагов сохранённого плана; ``[]`` — показать нечего; ``None`` — сбой."""
+def _saved_plan_steps(bot_user: Any, trace_id: str) -> list[tuple[str, str | None]] | None:
+    """Шаги сохранённого плана (подпись, «зачем»); ``[]`` — показать нечего; ``None`` — сбой."""
     from apps.integrations.ayla import external_user_id_for
     from apps.integrations.ayla.plan_engine_client import PlanEngineError, PlanEngineHttpClient
 
@@ -607,8 +662,8 @@ def _saved_plan_labels(bot_user: Any, trace_id: str) -> list[str] | None:
         revision: dict[str, Any] = raw_revision if isinstance(raw_revision, dict) else {}
         steps = [s for s in revision.get("steps") or [] if isinstance(s, dict)]
         keys = [str(s.get("capability_ref") or "") for s in steps]
-        labels = (
-            client.capability_labels(external_user_id=external_user_id, keys=keys) if keys else {}
+        details = (
+            client.capability_details(external_user_id=external_user_id, keys=keys) if keys else {}
         )
     except PlanEngineError as exc:
         logger.warning(
@@ -617,9 +672,9 @@ def _saved_plan_labels(bot_user: Any, trace_id: str) -> list[str] | None:
             type(exc).__name__,
         )
         return None
-    if not keys or any(key not in labels for key in keys):
+    if not keys or any(key not in details for key in keys):
         return []
-    return [labels[key] for key in keys]
+    return [(details[key]["label"], details[key]["expected_effect"]) for key in keys]
 
 
 def remove_step_for_request(

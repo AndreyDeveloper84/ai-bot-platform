@@ -48,7 +48,7 @@ import { useScreenBack } from "../hooks/useScreenBack";
 import { ApiError } from "../lib/api";
 import { fetchDecisionContext } from "../lib/customer-goals";
 import { fetchDiaryConsentGate } from "../lib/food-scanner";
-import { getSavedPlan, type SavedPlan } from "../lib/plan-engine";
+import { getSavedPlan, type SavedPlan, type SavedPlanStep } from "../lib/plan-engine";
 import {
   closePlanLite,
   createPlanLite,
@@ -75,6 +75,8 @@ export const PLAN_LITE_COPY = {
   entryFromGoal: "Мой план",
   entryFromDashboard: "Мой план",
   loading: "Загружаю…",
+  /** Слова владельца — лист решений 07.10, п.13. */
+  whyThisStep: "Почему этот шаг?",
   builderTitle: "Выбери 1–3 шага под свою цель",
   builderHint: "План — это действия, а не обещание результата: я буду показывать, сколько из них сделано.",
   chipBook: "Записаться на услугу под цель",
@@ -627,11 +629,7 @@ export function PlanLiteScreen() {
             {/* Только подписи каталога: без номеров, счётчиков и шкал. */}
             <ul className="food-scanner-diary__list">
               {status.plan.steps.map((step) => (
-                <li key={step.step_id} className="food-scanner-diary__entry">
-                  <div className="food-scanner-diary__entry-main">
-                    <span className="food-scanner-diary__entry-dish">{step.label}</span>
-                  </div>
-                </li>
+                <SavedPlanStepRow key={step.step_id} step={step} />
               ))}
             </ul>
           </section>
@@ -686,6 +684,42 @@ export function PlanLiteScreen() {
           состояние ошибки не убирает навигацию (#1918). */}
       <CustomerTabBar active="plan" />
     </div>
+  );
+}
+
+/**
+ * Шаг сохранённого плана. «Почему этот шаг?» раскрывает слова каталога
+ * (лист решений 07.10, п.13); у шага без текста ссылки нет — объяснение не
+ * придумывается.
+ */
+function SavedPlanStepRow({ step }: { step: SavedPlanStep }) {
+  const [open, setOpen] = useState(false);
+  const why = typeof step.why === "string" ? step.why.trim() : "";
+  const whyId = `plan-step-why-${step.step_id}`;
+  return (
+    <li className="food-scanner-diary__entry">
+      <div className="food-scanner-diary__entry-main">
+        <span className="food-scanner-diary__entry-dish">{step.label}</span>
+        {why && open && (
+          <span id={whyId} className="food-scanner-diary__entry-time">
+            {why}
+          </span>
+        )}
+      </div>
+      {why && (
+        <div className="food-scanner-diary__entry-actions">
+          <button
+            type="button"
+            className="food-scanner-diary__entry-action"
+            aria-expanded={open}
+            aria-controls={whyId}
+            onClick={() => setOpen((value) => !value)}
+          >
+            {PLAN_LITE_COPY.whyThisStep}
+          </button>
+        </div>
+      )}
+    </li>
   );
 }
 

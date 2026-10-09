@@ -56,10 +56,18 @@ def _get(client: Client, *, auth: bool = True):
     return client.get(url, HTTP_AUTHORIZATION=_auth())
 
 
-def _catalog(mocked, plan: dict[str, Any] | None, labels: dict[str, str] | None = None) -> Any:
+def _catalog(
+    mocked,
+    plan: dict[str, Any] | None,
+    labels: dict[str, str] | None = None,
+    effects: dict[str, str] | None = None,
+) -> Any:
     fake = mocked.return_value
     fake.get_plan.return_value = plan
-    fake.capability_labels.return_value = dict(LABELS if labels is None else labels)
+    fake.capability_details.return_value = {
+        key: {"label": label, "expected_effect": (effects or {}).get(key)}
+        for key, label in (LABELS if labels is None else labels).items()
+    }
     return fake
 
 
@@ -80,7 +88,7 @@ def test_c2_no_saved_plan_is_null_not_an_error(client, bot_user) -> None:
 
     assert resp.status_code == 200
     assert resp.json() == {"plan": None}
-    fake.capability_labels.assert_not_called()
+    fake.capability_details.assert_not_called()
 
 
 def test_c3_the_saved_plan_comes_as_ids_and_labels_in_catalog_order(client, bot_user) -> None:
@@ -93,12 +101,12 @@ def test_c3_the_saved_plan_comes_as_ids_and_labels_in_catalog_order(client, bot_
         "plan": {
             "plan_id": "plan-2876",
             "steps": [
-                {"step_id": "s-0", "label": "Режим сна"},
-                {"step_id": "s-1", "label": "Вечерняя прогулка"},
+                {"step_id": "s-0", "label": "Режим сна", "why": None},
+                {"step_id": "s-1", "label": "Вечерняя прогулка", "why": None},
             ],
         }
     }
-    assert fake.capability_labels.call_args.kwargs["keys"] == [
+    assert fake.capability_details.call_args.kwargs["keys"] == [
         "cap.sleep_routine",
         "cap.evening_walk",
     ]
@@ -144,10 +152,10 @@ def test_c7_the_subject_is_the_person_from_the_signed_init_data(client, bot_user
         _get(client)
 
     assert fake.get_plan.call_args.kwargs == {"external_user_id": EXT}
-    assert fake.capability_labels.call_args.kwargs["external_user_id"] == EXT
+    assert fake.capability_details.call_args.kwargs["external_user_id"] == EXT
 
 
-@pytest.mark.parametrize("failing", ["get_plan", "capability_labels"])
+@pytest.mark.parametrize("failing", ["get_plan", "capability_details"])
 def test_c8_a_catalog_refusal_is_not_no_plan(client, bot_user, failing: str) -> None:
     with patch(CLIENT) as mocked:
         fake = _catalog(mocked, _plan("cap.sleep_routine"))
@@ -164,3 +172,20 @@ def test_c9_without_the_miniapp_signature_nothing_is_read(client, bot_user) -> N
 
     assert resp.status_code == 401
     mocked.assert_not_called()
+
+
+def test_c10_the_catalogs_effect_comes_as_why_and_only_where_it_exists(client, bot_user) -> None:
+    """«Почему этот шаг?» — курируемый «ожидаемый эффект» способности; у шага
+    без текста — ``null``: экран ссылку не показывает, текст не сочиняется."""
+    with patch(CLIENT) as mocked:
+        _catalog(
+            mocked,
+            _plan("cap.sleep_routine", "cap.evening_walk"),
+            effects={"cap.sleep_routine": "Помогает ложиться и вставать в одно время."},
+        )
+        resp = _get(client)
+
+    assert resp.status_code == 200, resp.content[:300]
+    steps = resp.json()["plan"]["steps"]
+    assert steps[0]["why"] == "Помогает ложиться и вставать в одно время."
+    assert steps[1]["why"] is None
