@@ -10,7 +10,7 @@
  *      (заявки не в знаменателе);
  * S5 — «Продолжить» ведёт на deep_link первого missing-пункта готовности (M2);
  *      нет missing / готовность не загрузилась → /solo/setup;
- * S6 — «Сохранить и продолжить позже» → /solo/setup всегда;
+ * S6 — «Сохранить и выйти» → /solo/setup всегда;
  * S7 — шторка: ровно два поля (цена и длительность 15/30/45/60/75/90/120 или
  *      «Другое время» 5..480) + «Убрать из моих услуг»; сохранение — PUT и состояние
  *      из ответа;
@@ -272,7 +272,7 @@ describe("MasterServicesScreen — экран 04 «Цены и длительн�
 
     expect(screen.getByRole("button", { name: "Продолжить" })).toBeDisabled();
     expect(screen.getByText("Выбери хотя бы одну услугу")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Сохранить и продолжить позже" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Сохранить и выйти" })).toBeEnabled();
   });
 
   it("S5 (DRF-1808): «Направления» ведёт на экран 02 — изменить в любое время", async () => {
@@ -290,13 +290,14 @@ describe("MasterServicesScreen — экран 04 «Цены и длительн�
 
     expect(screen.getByRole("button", { name: "Продолжить" })).toBeDisabled();
     expect(screen.queryByText("Выбери хотя бы одну услугу")).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Сохранить и продолжить позже" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Сохранить и выйти" })).toBeEnabled();
   });
 
-  it("S4: 6/6 enables «Продолжить»", async () => {
+  it("S4: 6/6 enables only «Продолжить» — completed state has no secondary exit", async () => {
     mockedSelection.mockResolvedValue(state([configured("a", "А", "1000.00", 60)], 6, 6));
     await renderScreen();
     expect(screen.getByRole("button", { name: "Продолжить" })).toBeEnabled();
+    expect(screen.queryByRole("button", { name: "Сохранить и выйти" })).toBeNull();
   });
 
   it("S4: a pending own request does not enter the denominator", async () => {
@@ -361,11 +362,11 @@ describe("MasterServicesScreen — экран 04 «Цены и длительн�
     expect(screen.getByTestId("location")).toHaveTextContent("/solo/setup");
   });
 
-  it("S6: «Сохранить и продолжить позже» always goes to /solo/setup", async () => {
+  it("S6: «Сохранить и выйти» always goes to /solo/setup", async () => {
     mockedSelection.mockResolvedValue(state([row("a", "А")], 6, 3));
     await renderScreen();
 
-    fireEvent.click(screen.getByRole("button", { name: "Сохранить и продолжить позже" }));
+    fireEvent.click(screen.getByRole("button", { name: "Сохранить и выйти" }));
     await settleScenario();
     expect(screen.getByTestId("location")).toHaveTextContent("/solo/setup");
   });
