@@ -340,7 +340,7 @@ function BookingActions({
   const [date, setDate] = useState(data.start_at.slice(0, 10));
   const [slots, setSlots] = useState<Array<{ time: string; start_at: string | null }>>([]);
   const [slotsBusy, setSlotsBusy] = useState(false);
-  const [slotsError, setSlotsError] = useState("");
+  const [slotsError, setSlotsError] = useState<unknown>(null);
   const [selectedStart, setSelectedStart] = useState<string | null>(null);
   const [actionError, setActionError] = useState("");
 
@@ -412,7 +412,7 @@ function BookingActions({
   const loadSlots = async () => {
     if (!data.service.id) return;
     setSlotsBusy(true);
-    setSlotsError("");
+    setSlotsError(null);
     setSelectedStart(null);
     try {
       const result = await getMasterBookingSlots({ serviceId: data.service.id, date });
@@ -504,7 +504,15 @@ function BookingActions({
         <button type="button" className="btn-secondary" onClick={() => void loadSlots()} disabled={slotsBusy}>
           {slotsBusy ? "Загружаем…" : "Показать свободное время"}
         </button>
-        {slotsError ? <p role="alert">{slotsError}</p> : null}
+        {slotsError ? (
+          <SystemState
+            kind="load_error"
+            err={slotsError}
+            what="schedule"
+            busy={slotsBusy}
+            onRetry={() => void loadSlots()}
+          />
+        ) : null}
         {slots.length > 0 ? (
           <div className="booking-detail__slot-list" aria-label="Свободное время">
             {slots.filter((slot) => slot.start_at).map((slot) => (
