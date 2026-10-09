@@ -868,16 +868,17 @@ function AvailabilityLifecycle({
   );
 }
 
-function availabilityWindowText(item: PendingAvailabilityItem): string {
+export function availabilityWindowText(item: PendingAvailabilityItem): string {
   if (!item.requested_start || !item.requested_end) return "Период не указан";
   const start = parseSalonWallClock(item.requested_start);
   const end = parseSalonWallClock(item.requested_end);
-  if (!start || !end) return `${item.requested_start} — ${item.requested_end}`;
+  if (!start || !end) return "Период не удалось прочитать";
+  const startMonth = MONTHS_GENITIVE[start.month - 1] ?? "";
   if (start.ymd !== end.ymd) {
-    return `${item.requested_start} — ${item.requested_end}`;
+    const endMonth = MONTHS_GENITIVE[end.month - 1] ?? "";
+    return `${start.day} ${startMonth} · ${start.hm} — ${end.day} ${endMonth} · ${end.hm}`;
   }
-  const month = MONTHS_GENITIVE[start.month - 1] ?? "";
-  return `${start.day} ${month} · ${start.hm}–${end.hm}`;
+  return `${start.day} ${startMonth} · ${start.hm}–${end.hm}`;
 }
 
 function weekdayFromYmd(ymd: string): number {
