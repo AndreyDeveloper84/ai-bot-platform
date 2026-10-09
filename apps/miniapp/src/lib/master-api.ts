@@ -51,7 +51,7 @@ async function fetchMaster(
   if (body && !isFormData && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
   }
-  return fetch(`${MASTER_API_BASE}${path}`, { ...init, headers });
+  return await fetch(`${MASTER_API_BASE}${path}`, { ...init, headers });
 }
 
 export async function request<T>(
