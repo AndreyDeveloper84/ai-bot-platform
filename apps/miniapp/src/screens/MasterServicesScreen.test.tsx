@@ -247,7 +247,7 @@ describe("MasterServicesScreen — экран 04 «Цены и длительн�
     await renderScreen();
 
     expect(within(prices()).getByText("Настроено 3 из 6")).toBeInTheDocument();
-    expect(within(prices()).getByText("Осталось 3")).toBeInTheDocument();
+    expect(within(prices()).queryByText(/Осталось/)).toBeNull();
   });
 
   it("S3: an unconfigured row says «Не настроено»; a configured one shows price · minutes · ✓", async () => {
@@ -256,6 +256,7 @@ describe("MasterServicesScreen — экран 04 «Цены и длительн�
 
     const pending = within(prices()).getByRole("button", { name: /Коррекция бровей/ });
     expect(within(pending).getByText("Не настроено")).toBeInTheDocument();
+    expect(within(pending).getByText("›")).toHaveAttribute("aria-hidden", "true");
     const done = within(prices()).getByRole("button", { name: /Окрашивание бровей/ });
     expect(within(done).getByText("1500 ₽ · 45 мин ✓")).toBeInTheDocument();
   });
