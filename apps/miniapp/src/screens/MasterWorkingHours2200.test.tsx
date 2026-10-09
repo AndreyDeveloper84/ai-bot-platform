@@ -499,6 +499,9 @@ describe("5b · lifecycle заявки живёт в Working Time", () => {
     expect(screen.getByText(/Причина: В это время есть важная запись/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: HOURS_COPY.salon.rejectedEdit }));
     expect(await screen.findByText("Укажите период, в который вы недоступны.")).toBeInTheDocument();
+    expect(screen.getByLabelText("С")).toHaveValue("10:00");
+    expect(screen.getByLabelText("До")).toHaveValue("14:00");
+    expect(screen.getByLabelText("Причина (необязательно)")).toHaveValue("Нужно уйти раньше");
   });
 });
 
