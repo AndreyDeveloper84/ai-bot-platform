@@ -56,6 +56,27 @@ export function formatSlotTime(isoWithOffset: string): string {
 }
 
 /**
+ * Parse a salon-local ISO wall clock into reusable date/time parts.
+ *
+ * DRF-2589: this stays in the single formatting home because callers must
+ * never project schedule/visit wall-clock values through the device timezone.
+ * Returns null for an unexpected wire shape.
+ */
+export function parseSalonWallClock(
+  isoWithOffset: string,
+): { ymd: string; year: number; month: number; day: number; hm: string } | null {
+  const match = isoWithOffset.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}:\d{2})/);
+  if (!match) return null;
+  return {
+    ymd: `${match[1]}-${match[2]}-${match[3]}`,
+    year: Number(match[1]),
+    month: Number(match[2]),
+    day: Number(match[3]),
+    hm: match[4] ?? "",
+  };
+}
+
+/**
  * «25 сентября в 09:00» — слова владельца 28.09, п.8 (DRF-2585), для
  * подтверждения переноса «Было / Стало». Часы — из строки, как у
  * {@link formatVisitFull}: пояс задаёт сервер. Не разобралось — «—».
