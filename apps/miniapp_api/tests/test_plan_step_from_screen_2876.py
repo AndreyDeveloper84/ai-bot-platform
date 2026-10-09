@@ -13,7 +13,9 @@
 * p2 — выбор услуги → времена → запись; каждый вызов каталога несёт вердикт
   ПОСЛЕДНЕГО хода, длительное ограничение и основание из настоящего согласия;
 * p3 — хода в чате не было: каталог не спрошен;
+* p3b — разговор есть, вердикта нет: каталог не спрошен;
 * p4 — после отзыва согласия ни одно действие до каталога не доходит;
+* p4b — гейт отвечает раньше разбора тела;
 * p5 — чужой или устаревший опознаватель подбора ничего не делает;
 * p6 — тело не по форме: 400, каталог не спрошен;
 * p7 — флаг выключен: 404;
@@ -223,6 +225,29 @@ def test_p3_without_a_chat_turn_the_catalog_is_not_asked(
     assert _calls(catalog, booking) == (0, 0, 0)
 
 
+def test_p3b_a_conversation_without_a_verdict_does_not_reach_the_catalog(
+    client: Client, tenant, wire, person: str, catalog: StepCatalog, booking: Booking, monkeypatch
+) -> None:
+    """Разговор есть, а вердикта последнего хода нет (истёк, не записан)."""
+    _turn(client, person)
+    _step(client, person, "offers", PLAN8, 0)
+    _step(client, person, "choose", SEARCH8, 0)
+    before = _calls(catalog, booking)
+    assert before == (1, 1, 0)  # с вердиктом путь шёл
+    monkeypatch.setattr(views, "last_turn_safety_for", lambda bot_user: None)
+
+    answers = [
+        _step(client, person, "offers", PLAN8, 0),
+        _step(client, person, "choose", SEARCH8, 0),
+        _step(client, person, "book", SEARCH8, 0),
+    ]
+
+    assert [(a.status_code, a.json()["error"]) for a in answers] == [
+        (409, "plan_safety_unavailable")
+    ] * 3
+    assert _calls(catalog, booking) == before
+
+
 def test_p4_after_a_withdrawal_no_action_reaches_the_catalog(
     client: Client, tenant, wire, person: str, catalog: StepCatalog, booking: Booking
 ) -> None:
@@ -243,6 +268,19 @@ def test_p4_after_a_withdrawal_no_action_reaches_the_catalog(
         (403, "plan_consent_required")
     ] * 3
     assert _calls(catalog, booking) == before
+
+
+def test_p4b_the_gate_answers_before_the_body_is_read(
+    client: Client, tenant, wire, person: str, catalog: StepCatalog
+) -> None:
+    """Под отзывом ручка не разбирает тело вовсе: отказ гейта, а не «не по форме»."""
+    _turn(client, person)
+    assert _step(client, person, "drop", PLAN8, 0).status_code == 400  # до отзыва — «не по форме»
+    _withdraw(person)
+
+    resp = _step(client, person, "drop", PLAN8, 0)
+
+    assert (resp.status_code, resp.json()["error"]) == (403, "plan_consent_required")
 
 
 @pytest.mark.parametrize("action", ["choose", "book"])
