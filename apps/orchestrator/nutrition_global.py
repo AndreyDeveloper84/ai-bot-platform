@@ -1011,9 +1011,11 @@ def try_handle_structured_nutrition_turn(
             CB_COMPOSE,
             is_discuss_callback,
             is_edit_callback,
+            is_replace_callback,
             is_save_callback,
             try_handle_plan_discuss,
             try_handle_plan_edit,
+            try_handle_plan_replace,
             try_handle_plan_save,
             try_handle_plan_trigger,
         )
@@ -1048,6 +1050,22 @@ def try_handle_structured_nutrition_turn(
             except Exception:  # noqa: BLE001 — план не должен ломать глобальный ход
                 logger.exception(
                     "orchestrator.nutrition_global.plan_engine_save_failed trace=%s", trace_id
+                )
+                return None
+
+        if is_replace_callback(text):
+            # DRF-2885 — «Заменить план» / «Оставить текущий» под предложением.
+            try:
+                return try_handle_plan_replace(
+                    text=text,
+                    bot_user=bot_user,
+                    conversation=conversation,
+                    trace_id=trace_id,
+                    turn_safety=plan_turn_safety,
+                )
+            except Exception:  # noqa: BLE001 — план не должен ломать глобальный ход
+                logger.exception(
+                    "orchestrator.nutrition_global.plan_engine_replace_failed trace=%s", trace_id
                 )
                 return None
 

@@ -309,3 +309,29 @@ def test_e10_discussing_through_the_real_turn_gives_the_model_the_plan(
 
     assert "1. Режим сна" in seen["block"]
     assert seen["removable"] is True
+
+
+def test_e11_saving_over_an_active_plan_asks_and_replaces_through_the_real_turn(
+    client: Client, tenant, wire, catalog: FakeCatalog, settings
+) -> None:
+    """У цели уже действует план: «Сохранить» задаёт вопрос владельца, «Заменить
+    план» шлёт замену с тройкой СВОЕГО хода — сквозь настоящий ход."""
+    person = "2885111"
+    settings.SYNTHETIC_TEST_TRIGGER_ACCOUNTS = (f"max:{person}",)
+    _person_shell(tenant, person)
+    catalog.active_plan_id = "5a5a5a5a-1111-4222-8333-999999999999"
+    _ask(client, card.TRIGGER, as_user=person)
+
+    asked = _ask(client, f"cb:plan:save:{TOKEN}", as_user=person)
+    assert asked.status_code == 200, asked.content[:300]
+    body = asked.json()
+    assert body["answer"] == "Заменить текущий план новым? Прежний останется в истории"
+    assert [b["label"] for b in body["buttons"]] == ["Заменить план", "Оставить текущий"]
+    assert catalog.replaced == []
+
+    done = _ask(client, body["buttons"][0]["payload"], as_user=person)
+    assert done.json()["answer"] == "PLAN_REPLACED · тест"
+    sent = catalog.replaced[0]
+    assert sent["replaces_plan_id"] == "5a5a5a5a-1111-4222-8333-999999999999"
+    # Замена несёт вердикт хода нажатия «Заменить план», а не хода сохранения.
+    assert sent["evaluated_at_revision"] > catalog.saved[0]["evaluated_at_revision"]

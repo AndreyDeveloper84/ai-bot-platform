@@ -51,7 +51,12 @@ from apps.miniapp_api.tests.test_plan_from_chat_e2e_2885 import (  # noqa: F401 
 )
 from apps.orchestrator import plan_engine_card as card
 from apps.orchestrator import plan_gate
-from apps.orchestrator.tests.test_plan_engine_card_2885 import TOKEN, FakeCatalog
+from apps.orchestrator.tests.test_plan_engine_card_2885 import (
+    ACTIVE_ID,
+    REPLACE,
+    TOKEN,
+    FakeCatalog,
+)
 
 pytestmark = pytest.mark.django_db
 
@@ -240,3 +245,43 @@ def test_b7_the_miniapp_shows_a_catalog_refusal_like_the_bots_own(
 
     assert response.status_code == status, response.content
     assert response.json()["error"] == code
+
+
+# ─── замена действующего плана ───────────────────────────────────────────────
+
+
+def _waiting_replacement(client: Client, tenant, catalog: FakeCatalog) -> BotUser:
+    shell = _bare_person_shell(tenant, PERSON)
+    _grant(shell)
+    catalog.active_plan_id = ACTIVE_ID
+    _ask(client, card.CB_COMPOSE, as_user=PERSON)
+    _ask(client, SAVE, as_user=PERSON)
+    return shell
+
+
+def test_b8_the_basis_rides_with_the_replacement(
+    client: Client, tenant, wire, catalog: FakeCatalog
+) -> None:
+    shell = _waiting_replacement(client, tenant, catalog)
+
+    answer = _ask(client, REPLACE, as_user=PERSON).json()["answer"]
+
+    assert answer == f"{card.PLAN_REPLACED} · {card.TEST_MARK}"
+    assert catalog.replaced[0]["consent"] == plan_gate.plan_consent_basis(shell)
+    assert catalog.replaced[0]["consent"] is not None
+
+
+@pytest.mark.parametrize(("error", "name"), CATALOG_REFUSALS)
+def test_b8_a_catalog_refusal_on_replacement_is_named_and_keeps_the_question(
+    error: Exception, name: str, client: Client, tenant, wire, catalog: FakeCatalog
+) -> None:
+    """Вопрос остаётся: «Оставить текущий» открыт, а основание может вернуться."""
+    _waiting_replacement(client, tenant, catalog)
+    catalog.replace_error = error
+
+    refused = _ask(client, REPLACE, as_user=PERSON).json()["answer"]
+    catalog.replace_error = None
+    later = _ask(client, REPLACE, as_user=PERSON).json()["answer"]
+
+    assert refused == f"{name} · {card.TEST_MARK}"
+    assert later == f"{card.PLAN_REPLACED} · {card.TEST_MARK}"

@@ -95,3 +95,41 @@ def test_a3_the_basis_in_a_save_command_reaches_the_wire() -> None:
     _client(handler).save_plan(external_user_id="bot:max:1", command={**COMMAND, "consent": BASIS})
 
     assert seen["body"]["consent"] == BASIS
+
+
+def _replace(client: Any, **over: Any) -> dict[str, Any]:
+    kwargs: dict[str, Any] = {
+        "external_user_id": "bot:max:1",
+        "plan_id": "p-new",
+        "replaces_plan_id": "p-old",
+        "safety_state": "NORMAL",
+        "safety_policy_version": "pre_check-abc",
+        "evaluated_at_revision": 7,
+    }
+    kwargs.update(over)
+    return client.replace_plan(**kwargs)
+
+
+def test_a4_the_basis_rides_in_the_replace_body() -> None:
+    seen: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(json.loads(request.content))
+        return httpx.Response(200, json={"data": {"plan": {}, "replaced": True}})
+
+    _replace(_client(handler), consent=BASIS)
+    _replace(_client(handler))
+
+    assert seen[0]["consent"] == BASIS
+    assert seen[1]["plan_id"] == "p-new"  # тело то самое
+    assert "consent" not in seen[1]
+
+
+@pytest.mark.parametrize(("response", "error"), REFUSALS)
+def test_a4_the_second_line_refusals_are_named_on_replace(
+    response: httpx.Response, error: type[Exception]
+) -> None:
+    with pytest.raises(error) as caught:
+        _replace(_client(lambda r: response))
+
+    assert type(caught.value) is error
