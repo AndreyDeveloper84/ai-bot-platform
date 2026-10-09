@@ -381,7 +381,7 @@ export function MasterWorkingHoursScreen() {
   useScreenBack(backTo(isSolo ? "/solo/my-day" : "/master/dashboard"));
   useEffect(() => {
     signalReady();
-  }, [isSolo]);
+  }, []);
 
   const load = useCallback(async () => {
     setPhase({ kind: "loading" });
@@ -415,7 +415,7 @@ export function MasterWorkingHoursScreen() {
       }
       setPhase({ kind: "error", err });
     }
-  }, []);
+  }, [isSolo]);
 
   useEffect(() => {
     void load();
