@@ -417,9 +417,9 @@ function BookingActions({
     try {
       const result = await getMasterBookingSlots({ serviceId: data.service.id, date });
       setSlots(result.slots);
-    } catch {
+    } catch (err) {
       setSlots([]);
-      setSlotsError("Не удалось загрузить свободное время.");
+      setSlotsError(err);
     } finally {
       setSlotsBusy(false);
     }
