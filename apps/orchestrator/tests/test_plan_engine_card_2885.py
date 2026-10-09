@@ -127,6 +127,10 @@ class FakeCatalog:
         self.read += 1
         return self.saved_plan
 
+    def get_plan_and_proposal(self, *, external_user_id: str) -> tuple[Any, Any]:
+        self.read += 1
+        return self.saved_plan, None
+
     def capability_labels(self, *, external_user_id: str, keys: list[str]) -> dict[str, str]:
         return {k: v for k, v in self.labels.items() if k in keys}
 

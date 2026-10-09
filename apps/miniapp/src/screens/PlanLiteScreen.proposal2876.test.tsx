@@ -99,7 +99,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   primeDisplayName("Тест Тестов");
   mockedDoc.mockResolvedValue(DOC);
-  mockedState.mockResolvedValue({ plan: ACTIVE, proposal: PROPOSAL });
+  mockedState.mockResolvedValue({ plan: ACTIVE, proposal: PROPOSAL, draft: null });
   mockedReplace.mockResolvedValue(true);
   mockedKeep.mockResolvedValue(undefined);
 });
@@ -120,7 +120,7 @@ describe("«Мой план»: предложение рядом с действ
   });
 
   it("без предложения нет ни вопроса, ни кнопок", async () => {
-    mockedState.mockResolvedValue({ plan: ACTIVE, proposal: null });
+    mockedState.mockResolvedValue({ plan: ACTIVE, proposal: null, draft: null });
     renderScreen();
 
     // Положительный контроль: действующий план показан.

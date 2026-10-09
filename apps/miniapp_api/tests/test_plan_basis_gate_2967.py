@@ -472,5 +472,5 @@ def test_g7_the_miniapp_read_endpoint_stays_open(
         )
 
     assert response.status_code == 200, response.content
-    assert response.json() == {"plan": None, "proposal": None}
+    assert response.json() == {"plan": None, "proposal": None, "draft": None}
     assert mocked.return_value.get_plan_and_proposal.call_count == 1
