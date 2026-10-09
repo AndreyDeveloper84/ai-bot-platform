@@ -24,7 +24,7 @@ from apps.integrations.ayla.plan_engine_client import (
     PlanStepResolutionRefusedError,
 )
 
-FOUR = {
+FOUR: dict[str, Any] = {
     "safety_state": "NORMAL",
     "safety_policy_version": "pre_check-abc",
     "evaluated_at_revision": 9,
