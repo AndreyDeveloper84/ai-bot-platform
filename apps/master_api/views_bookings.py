@@ -231,6 +231,7 @@ def booking_action(request: HttpRequest, appointment_id: uuid.UUID) -> HttpRespo
         }
     )
 
+
 # ─── POST bookings ──────────────────────────────────────────────────────────
 
 
