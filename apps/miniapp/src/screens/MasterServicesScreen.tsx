@@ -72,7 +72,7 @@ const COPY = {
   noDirection: "Другое",
   continue: "Продолжить",
   selectAtLeastOne: "Выбери хотя бы одну услугу",
-  later: "Сохранить и продолжить позже",
+  later: "Сохранить и выйти",
   // DRF-1809 (M17): единственный выход из нулевого выбора — экран 03.
   chooseFromCatalog: "Выбрать из каталога",
   // DRF-1808 (M16): направления можно изменить в любое время (P13) — экран 02.
@@ -690,9 +690,11 @@ export function MasterServicesScreen() {
               </button>
             </>
           )}
-          <button type="button" className="btn-secondary" onClick={() => navigate(SETUP_PATH)}>
-            {COPY.later}
-          </button>
+          {!(state.selected > 0 && state.configured === state.selected) && (
+            <button type="button" className="btn-secondary" onClick={() => navigate(SETUP_PATH)}>
+              {COPY.later}
+            </button>
+          )}
         </div>
       )}
 
