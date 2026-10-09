@@ -92,6 +92,61 @@ def clear_model_context_for_person(bot_user: Any) -> int:
     return cleared
 
 
+def clear_plan_proposals_for_person(bot_user: Any) -> int:
+    """Стереть несохранённое предложение плана и открытое обсуждение человека.
+
+    DRF-2967. Замер 09.10: после настоящего отзыва согласия на хранение в
+    состоянии разговора оставались собранное предложение (шаги и их подписи)
+    и открытое обсуждение. Гейт их уже не показывал, но выход обработки
+    хранился без основания, а после нового согласия старая карточка
+    «Сохранить» сохранила бы предложение, собранное под прежним.
+
+    Стираются два ключа состояния — во всех разговорах всех оболочек
+    человека. Ключ вопроса «Заменить / Оставить» остаётся: в нём только
+    идентификаторы планов, и без него человек под отзывом не смог бы
+    отказаться от висящего предложения, а это действие открыто.
+
+    Никогда не бросает: сбой очистки не должен стоить человеку отзыва;
+    использование предложения уже остановлено гейтом. Сбой пишется в лог.
+
+    Returns:
+      Сколько разговоров очищено.
+    """
+    try:
+        from apps.consent.services import person_channel_shells
+        from apps.conversations.models import Conversation
+        from apps.conversations.services import write_skill_state
+        from apps.orchestrator.plan_engine_card import DISCUSSION_KEY, STATE_KEY
+        from apps.tenancy.context import tenant_scope
+
+        keys = (STATE_KEY, DISCUSSION_KEY)
+        conversations = list(
+            Conversation.all_tenants.filter(
+                bot_user__in=person_channel_shells(bot_user),
+                skill_state__has_any_keys=list(keys),
+            ).select_related("tenant")
+        )
+    except Exception:  # noqa: BLE001 — см. докстринг
+        logger.exception("conversations.model_history.plan_proposals_lookup_failed")
+        return 0
+
+    cleared = 0
+    for conversation in conversations:
+        try:
+            # Разговоры человека лежат под разными тенантами (чат глобального
+            # бота и Mini App) — область берётся у самого разговора.
+            with tenant_scope(conversation.tenant):
+                for key in keys:
+                    write_skill_state(conversation, key, None)
+            cleared += 1
+        except Exception:  # noqa: BLE001 — один разговор не должен стоить остальных
+            logger.exception(
+                "conversations.model_history.plan_proposals_clear_failed conversation=%s",
+                conversation.id,
+            )
+    return cleared
+
+
 def close_forget_turn(bot_user: Any, conversation: Any) -> None:
     """Конец хода «забудь X»: отсечка после ответа и чистое окно разговора.
 
@@ -118,5 +173,6 @@ __all__ = [
     "after_model_cutoff",
     "clear_model_context",
     "clear_model_context_for_person",
+    "clear_plan_proposals_for_person",
     "close_forget_turn",
 ]
