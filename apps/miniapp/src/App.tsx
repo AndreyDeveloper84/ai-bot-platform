@@ -59,7 +59,7 @@ import {
 import { adminLandingPath, isAdminTabAllowed } from "./lib/admin-tabs";
 import { canOpenSalonPilot } from "./lib/salon-pilot";
 import { getStartPayload, parseStartRoute } from "./lib/max-sdk";
-import { isCustomerSurfacePath } from "./lib/customer-surface";
+import { isCustomerSurfacePath, isStaffSurfacePath } from "./lib/customer-surface";
 import { channelIdentity } from "./lib/identity";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { OpenFromMaxScreen } from "./components/OpenFromMaxScreen";
@@ -901,8 +901,16 @@ function UnifiedAdminMasterRoutes({ me }: { me: MeResponse }) {
   // this whole subtree before any `/customer/*` navigation happens, so
   // the stored `"customer"` can never be overwritten with `"admin"` by
   // the prefix check below.
+  //
+  // DRF-2818 — с этого листа дерево монтируется и при сохранённом
+  // «Клиент»: рабочая кнопка салонного бота привела человека на
+  // `/master/*` или `/admin/*`. Это разовое намерение (зеркало DRF-2687),
+  // и «Клиент» трекер по-прежнему не затирает — теперь явной проверкой, а
+  // не тем, что дерево не смонтировано. Меняет режим только сам человек:
+  // «Сменить режим» → выбор.
   const location = useLocation();
   useEffect(() => {
+    if (readLastSurface() === "customer") return;
     if (location.pathname.startsWith("/admin/")) {
       writeLastSurface("admin");
     } else if (location.pathname.startsWith("/master/")) {
@@ -1730,10 +1738,22 @@ function RoleSurface({
   if (multiRole && chooserRequested) {
     return <UnifiedLanding me={me} />;
   }
-  if (multiRole && surfacePref === "customer") {
+  if (
+    multiRole &&
+    surfacePref === "customer" &&
+    !isStaffSurfacePath(location.pathname)
+  ) {
     // Ровно та же поверхность, что у обычного клиента (DRF-1469).
     // Выход обратно к «Сменить режим» есть на ней самой, поэтому
     // отдельного поведения для многоролевого больше нет.
+    //
+    // DRF-2818 — кроме рабочего адреса. Владелец-мастер в режиме «Клиент»
+    // нажимал в салонном боте «Расписание» и получал «Доступ мастера ещё
+    // не подтверждён»: клиентское дерево отдавалось на любом адресе, а
+    // `/master/*` и `/admin/*` в нём — экран для того, кому роль не
+    // выдана. На рабочем адресе каскад идёт дальше, по ролям. Сохранённый
+    // «Клиент» при этом остаётся: вернувшись на «/» или открыв приложение
+    // без кнопки, человек снова на клиентской поверхности.
     return <CustomerRoutes />;
   }
   // DRF-2687 — третье явное намерение: АДРЕС клиентской поверхности.
