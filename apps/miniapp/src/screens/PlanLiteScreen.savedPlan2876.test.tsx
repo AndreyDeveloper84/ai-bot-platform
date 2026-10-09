@@ -18,7 +18,15 @@ import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { primeDisplayName } from "../components/CustomerAvatarEntry";
 
-vi.mock("../lib/plan-engine", () => ({ getSavedPlan: vi.fn() }));
+vi.mock("../lib/plan-engine", () => {
+  // Экран читает план и предложение вместе; узлы этого файла — о плане,
+  // предложения в них нет (его сторожит PlanLiteScreen.proposal2876.test.tsx).
+  const getSavedPlan = vi.fn();
+  return {
+    getSavedPlan,
+    getSavedPlanState: async () => ({ plan: await getSavedPlan(), proposal: null }),
+  };
+});
 vi.mock("../lib/plan-lite", async (importOriginal) => {
   const original = await importOriginal<typeof import("../lib/plan-lite")>();
   return {

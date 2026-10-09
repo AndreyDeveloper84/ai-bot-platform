@@ -48,7 +48,14 @@ import { useScreenBack } from "../hooks/useScreenBack";
 import { ApiError } from "../lib/api";
 import { fetchDecisionContext } from "../lib/customer-goals";
 import { fetchDiaryConsentGate } from "../lib/food-scanner";
-import { getSavedPlan, type SavedPlan, type SavedPlanStep } from "../lib/plan-engine";
+import {
+  getSavedPlanState,
+  keepCurrentPlan,
+  replacePlan,
+  type PlanProposal,
+  type SavedPlan,
+  type SavedPlanStep,
+} from "../lib/plan-engine";
 import {
   closePlanLite,
   createPlanLite,
@@ -77,6 +84,10 @@ export const PLAN_LITE_COPY = {
   loading: "Загружаю…",
   /** Слова владельца — лист решений 07.10, п.13. */
   whyThisStep: "Почему этот шаг?",
+  /** Слова владельца — лист решений 07.10, п.15 («Полная замена»). */
+  replaceQuestion: "Заменить текущий план новым? Прежний останется в истории",
+  replaceYes: "Заменить план",
+  replaceNo: "Оставить текущий",
   builderTitle: "Выбери 1–3 шага под свою цель",
   builderHint: "План — это действия, а не обещание результата: я буду показывать, сколько из них сделано.",
   chipBook: "Записаться на услугу под цель",
@@ -185,7 +196,7 @@ type Status =
   | { kind: "need_goal" }
   | { kind: "card"; plan: PlanLite }
   /** DRF-2876 — сохранённый план нового механизма: он основной (п.9 владельца). */
-  | { kind: "saved"; plan: SavedPlan }
+  | { kind: "saved"; plan: SavedPlan; proposal: PlanProposal | null }
   | { kind: "unavailable" }
   | { kind: "error" };
 
@@ -253,10 +264,10 @@ export function PlanLiteScreen() {
     // на сервере) — прежний путь ниже, без изменений. Не прочитался — честное
     // «не получилось»: прежний план вместо него был бы неправдой.
     try {
-      const saved = await getSavedPlan();
+      const saved = await getSavedPlanState();
       if (!alive.current) return;
-      if (saved) {
-        setStatus({ kind: "saved", plan: saved });
+      if (saved.plan) {
+        setStatus({ kind: "saved", plan: saved.plan, proposal: saved.proposal });
         return;
       }
     } catch {
@@ -299,6 +310,29 @@ export function PlanLiteScreen() {
       else setStatus({ kind: "error" });
     }
   }, []);
+
+  // DRF-2876 — ответ на вопрос о замене. После любого исхода экран
+  // перечитывает сохранённое: он показывает состояние сервера, а не своё.
+  // Слов владельца для отказов нет — показывается имя отказа с пометкой
+  // «тест», как в чате.
+  const answerProposal = useCallback(
+    async (proposal: PlanProposal, answer: "replace" | "keep") => {
+      setBusy(true);
+      setNotice(null);
+      let refusal: string | null = null;
+      try {
+        if (answer === "replace") await replacePlan(proposal);
+        else await keepCurrentPlan(proposal);
+      } catch (e) {
+        refusal = `${(refusalSlug(e) ?? "plan_engine_unavailable").toUpperCase()} · тест`;
+      }
+      if (!alive.current) return;
+      setBusy(false);
+      await load();
+      if (alive.current && refusal) setNotice(refusal);
+    },
+    [load],
+  );
 
   useEffect(() => {
     void load();
@@ -632,6 +666,37 @@ export function PlanLiteScreen() {
                 <SavedPlanStepRow key={step.step_id} step={step} />
               ))}
             </ul>
+          </section>
+        )}
+
+        {/* DRF-2876 — предложение рядом с действующим планом: его шаги и
+            вопрос владельца. Нажатие кнопки — само подтверждение (п.15). */}
+        {status.kind === "saved" && status.proposal && (
+          <section data-testid="plan-proposal-card" aria-label={PLAN_LITE_COPY.replaceQuestion}>
+            <ul className="food-scanner-diary__list">
+              {status.proposal.steps.map((step) => (
+                <SavedPlanStepRow key={step.step_id} step={step} />
+              ))}
+            </ul>
+            <p className="food-scanner-diary__caption">{PLAN_LITE_COPY.replaceQuestion}</p>
+            <div className="food-scanner-screen__cta-stack">
+              <button
+                type="button"
+                className="btn-primary"
+                disabled={busy}
+                onClick={() => void answerProposal(status.proposal as PlanProposal, "replace")}
+              >
+                {PLAN_LITE_COPY.replaceYes}
+              </button>
+              <button
+                type="button"
+                className="btn-secondary"
+                disabled={busy}
+                onClick={() => void answerProposal(status.proposal as PlanProposal, "keep")}
+              >
+                {PLAN_LITE_COPY.replaceNo}
+              </button>
+            </div>
           </section>
         )}
 

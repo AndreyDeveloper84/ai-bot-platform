@@ -679,7 +679,9 @@ CUSTOMER_ROUTES: dict[str, Entry] = {
     # --- Plan Engine saved plan (DRF-2876, own) -------------------------
     "customer_plan_current": own(
         "plan.plan_id",
-        "plan.steps[].step_id / label",
+        "plan.steps[].step_id / label / why",
+        "proposal.plan_id / replaces_plan_id",
+        "proposal.steps[].step_id / label / why",
         via="apps.miniapp_api.views_plan_engine:saved_plan_payload",
         note=(
             "the caller's own saved plan, read from the catalog under their "
@@ -688,6 +690,17 @@ CUSTOMER_ROUTES: dict[str, Entry] = {
             "everyone). No capability keys, no goal text, no name, phone or health "
             "answers; `plan` is null when nothing is saved"
         ),
+    ),
+    # --- Plan Engine: replace / keep (DRF-2876, none) --------------------
+    "customer_plan_replace": none(
+        "acknowledgement only — {'replaced': bool} after the catalog made the caller's own "
+        "proposal the plan in effect; the two plan ids from the body are not echoed",
+        via="apps.miniapp_api.views_plan_engine:customer_plan_replace",
+    ),
+    "customer_plan_keep": none(
+        "acknowledgement only — {'kept': true} after the caller's own proposal was archived; "
+        "nothing about the plan or the person is returned",
+        via="apps.miniapp_api.views_plan_engine:customer_plan_keep",
     ),
     # --- Plan Lite proposal (DRF-2123, План-A, own) ---------------------
     "customer_plan_lite_proposal": own(
