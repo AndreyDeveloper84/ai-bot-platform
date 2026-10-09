@@ -1305,3 +1305,46 @@ class TestReplacingTheActivePlan:
         assert is_plan_callback(REPLACE) is True and is_plan_callback(KEEP) is True
         assert tap_history_text(REPLACE) == "Заменить план"
         assert tap_history_text(KEEP) == "Оставить текущий"
+
+
+class TestReplacingUnderTheConsentGate:
+    """DRF-2967: замена — запись, под отзывом согласия или заявкой на удаление
+    закрыта; отказ от предложения открыт."""
+
+    @pytest.mark.parametrize(
+        "refusal", ["PLAN_DELETION_REQUESTED", "PLAN_CONSENT_REQUIRED", "PLAN_BASIS_UNAVAILABLE"]
+    )
+    def test_q1_replace_is_refused_before_the_catalog_and_the_question_stays(
+        self, catalog: FakeCatalog, monkeypatch: pytest.MonkeyPatch, refusal: str
+    ) -> None:
+        from apps.orchestrator import plan_gate
+
+        conversation = _conversation()
+        _asked(conversation, catalog)
+        monkeypatch.setattr(plan_gate, "plan_processing_refusal", lambda bot_user: refusal)
+
+        closed = _turn(REPLACE, conversation, safety=_safety("NORMAL", 11))
+
+        assert closed.reply_text == f"{refusal} · тест"
+        assert catalog.replaced == []
+        # Основание вернулось — тот же вопрос ещё в силе.
+        monkeypatch.setattr(plan_gate, "plan_processing_refusal", lambda bot_user: None)
+        opened = _turn(REPLACE, conversation, safety=_safety("NORMAL", 12))
+        assert opened.reply_text == "PLAN_REPLACED · тест"
+
+    @pytest.mark.parametrize(
+        "refusal", ["PLAN_DELETION_REQUESTED", "PLAN_CONSENT_REQUIRED", "PLAN_BASIS_UNAVAILABLE"]
+    )
+    def test_q2_keep_is_open_the_proposal_can_always_be_dropped(
+        self, catalog: FakeCatalog, monkeypatch: pytest.MonkeyPatch, refusal: str
+    ) -> None:
+        from apps.orchestrator import plan_gate
+
+        conversation = _conversation()
+        _asked(conversation, catalog)
+        monkeypatch.setattr(plan_gate, "plan_processing_refusal", lambda bot_user: refusal)
+
+        result = _turn(KEEP, conversation, safety=None)
+
+        assert result.reply_text == "PLAN_KEPT · тест"
+        assert catalog.archived == [PROPOSAL_ID]

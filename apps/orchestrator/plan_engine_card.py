@@ -1023,6 +1023,8 @@ def try_handle_plan_replace(
       нажатие дубля не даёт: каталог отвечает «уже заменено».
     * «Оставить текущий» — предложение уходит в архив; действующий план не
       меняется. Вердикта не требует: это отказ, а не расширение действующего.
+      По той же причине открыт под гейтом согласия (DRF-2967), которым
+      закрыта замена.
     """
     match = REPLACE_CALLBACK_RE.match((text or "").strip())
     if match is None or not engine_enabled():
@@ -1040,6 +1042,15 @@ def try_handle_plan_replace(
     )
 
     action, token = match.group(1), match.group(2)
+    if action == "replace":
+        # DRF-2967 — замена делает предложение действующим планом: это запись.
+        # Под отзывом согласия или заявкой на удаление она закрыта — до чтения
+        # состояния и до каталога. «Оставить текущий» гейтом не закрыт
+        # намеренно: это отказ от предложения, данных о человеке после него
+        # становится меньше, и убрать висящее предложение ему надо дать.
+        refusal = _basis_refusal(bot_user)
+        if refusal is not None:
+            return refusal
     waiting = _read_replace(conversation)
     if waiting is None or _hex8(waiting["plan_id"]) != token:
         return _named(PLAN_PROPOSAL_EXPIRED)
