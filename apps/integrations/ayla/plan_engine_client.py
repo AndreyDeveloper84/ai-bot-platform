@@ -78,6 +78,18 @@ class PlanCapabilityNotConfirmedError(PlanEngineError):
     """409 ``PLAN_CAPABILITY_NOT_CONFIRMED`` — способность шага больше не в знании."""
 
 
+class PlanDeletionInProgressError(PlanEngineError):
+    """423 ``DELETION_IN_PROGRESS`` — у человека открыта заявка на удаление (DRF-2967)."""
+
+
+class PlanConsentRequiredError(PlanEngineError):
+    """422 ``CONSENT_REQUIRED`` — основания для обработки плана каталог не видит.
+
+    Вторая линия правила бота: утверждения нет, оно старше известного
+    каталогу отзыва или не разбирается (DRF-2967).
+    """
+
+
 class PlanEngineContractError(PlanEngineError):
     """Каталог отверг запрос как неконформный (400 ``PLAN_CONTRACT_VIOLATION``).
 
@@ -117,6 +129,7 @@ class PlanEngineHttpClient:
         safety_policy_version: str,
         rules_registry: dict[str, Any],
         excluded_capability_refs: list[str],
+        consent: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         """Собрать эфемерный план. Возвращает документ ответа каталога как есть."""
         try:
@@ -132,6 +145,10 @@ class PlanEngineHttpClient:
             "rules_registry": rules_registry,
             "excluded_capability_refs": list(excluded_capability_refs),
         }
+        if consent is not None:
+            # DRF-2967 — утверждение основания: вид согласия, версия текста,
+            # время выдачи действующей записи.
+            body["consent"] = dict(consent)
         try:
             response = self._client().post(
                 url,
@@ -330,6 +347,10 @@ def _refusal(response: httpx.Response) -> PlanEngineError:
         return PlanIdempotencyConflictError("plan_idempotency_conflict")
     if response.status_code == 409 and code == "PLAN_CAPABILITY_NOT_CONFIRMED":
         return PlanCapabilityNotConfirmedError("plan_capability_not_confirmed")
+    if response.status_code == 423 and code == "DELETION_IN_PROGRESS":
+        return PlanDeletionInProgressError("deletion_in_progress")
+    if response.status_code == 422 and code == "CONSENT_REQUIRED":
+        return PlanConsentRequiredError(reason or "consent_required")
     if response.status_code == 404 and reason == "goal_not_found":
         return PlanGoalNotFoundError("goal_not_found")
     return PlanEngineUnavailableError(f"unexpected 4xx: HTTP {response.status_code} {code}")
@@ -351,6 +372,8 @@ def _error_code_and_reason(response: httpx.Response) -> tuple[str, str]:
 
 __all__ = [
     "PlanCapabilityNotConfirmedError",
+    "PlanConsentRequiredError",
+    "PlanDeletionInProgressError",
     "PlanEngineAuthError",
     "PlanEngineConfigError",
     "PlanEngineContractError",

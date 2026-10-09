@@ -222,6 +222,13 @@ def _basis_refusal(bot_user: Any) -> SkillResult | None:
     return None if outcome is None else _named(outcome)
 
 
+def _consent_basis(bot_user: Any) -> dict[str, str] | None:
+    """Утверждение основания для каталога — :func:`plan_gate.plan_consent_basis`."""
+    from apps.orchestrator.plan_gate import plan_consent_basis
+
+    return plan_consent_basis(bot_user)
+
+
 def _proposal(labels: list[str], token: str) -> SkillResult:
     from apps.orchestrator.discovery import keyboard_envelope
 
@@ -291,7 +298,13 @@ def _compose(
     """
 
     from apps.integrations.ayla import external_user_id_for
-    from apps.integrations.ayla.plan_engine_client import PlanEngineError, PlanEngineHttpClient
+    from apps.integrations.ayla.plan_engine_client import (
+        PlanConsentRequiredError,
+        PlanDeletionInProgressError,
+        PlanEngineError,
+        PlanEngineHttpClient,
+    )
+    from apps.orchestrator.plan_gate import PLAN_CONSENT_REQUIRED, PLAN_DELETION_REQUESTED
     from apps.planning_rules.registry import PlanningRegistryError, load_registry
     from apps.planning_rules.wire import registry_wire_body
 
@@ -317,6 +330,7 @@ def _compose(
             safety_policy_version=safety.safety_policy_version,
             rules_registry=rules_registry,
             excluded_capability_refs=list(excluded),
+            consent=_consent_basis(bot_user),
         )
         outcome = str(document["outcome"])
         decision = document.get("decision")
@@ -333,6 +347,10 @@ def _compose(
         effects_by_key = {
             key: row["expected_effect"] for key, row in details.items() if row["expected_effect"]
         }
+    except PlanDeletionInProgressError:
+        return _named(PLAN_DELETION_REQUESTED)
+    except PlanConsentRequiredError:
+        return _named(PLAN_CONSENT_REQUIRED)
     except PlanEngineError as exc:
         logger.warning(
             "orchestrator.plan_engine_card.compose_failed trace=%s class=%s",
@@ -851,6 +869,8 @@ def try_handle_plan_save(
     from apps.integrations.ayla import external_user_id_for
     from apps.integrations.ayla.plan_engine_client import (
         PlanCapabilityNotConfirmedError,
+        PlanConsentRequiredError,
+        PlanDeletionInProgressError,
         PlanEngineContractError,
         PlanEngineError,
         PlanEngineHttpClient,
@@ -858,6 +878,7 @@ def try_handle_plan_save(
         PlanIdempotencyConflictError,
         PlanSaveSafetyBlockedError,
     )
+    from apps.orchestrator.plan_gate import PLAN_CONSENT_REQUIRED, PLAN_DELETION_REQUESTED
 
     refusal = _basis_refusal(bot_user)
     if refusal is not None:
@@ -877,10 +898,19 @@ def try_handle_plan_save(
         command = save_command(pending["decision"], safety, shown_at_revision=shown_at)
     except KeyError:
         return _named(PLAN_PROPOSAL_EXPIRED)
+    basis = _consent_basis(bot_user)
+    if basis is not None:
+        # В ключ идемпотентности каталога не входит: повторное нажатие с тем
+        # же согласием шлёт ту же команду.
+        command["consent"] = basis
     try:
         PlanEngineHttpClient().save_plan(
             external_user_id=external_user_id_for(bot_user), command=command
         )
+    except PlanDeletionInProgressError:
+        return _named(PLAN_DELETION_REQUESTED)
+    except PlanConsentRequiredError:
+        return _named(PLAN_CONSENT_REQUIRED)
     except PlanSaveSafetyBlockedError:
         return _named("PLAN_SAVE_SAFETY_BLOCKED")
     except PlanIdempotencyConflictError:
