@@ -253,6 +253,35 @@ def test_g5_a_failed_consent_read_closes_the_plan(
     assert catalog.composed == []  # empty-assert-ok: близнец g4 видит здесь одну сборку
 
 
+# ─── заявка на удаление — по человеку, а не по оболочке ───────────────────────
+
+
+def test_g9_a_deletion_request_on_another_shell_closes_this_one(tenant) -> None:
+    """У человека две оболочки (чат глобального бота и Mini App), связка с
+    Ayla и заявка — на одной. Вторая, без связки, закрыта тоже; близнец —
+    тот же человек до заявки."""
+    from apps.tenancy.models import Tenant
+
+    person = "2967106"
+    asking = _bare_person_shell(tenant, person)
+    linked_id = uuid.uuid4()
+    other_tenant = Tenant.objects.create(slug="plan-gate-2967-other", name="Other")
+    BotUser.all_tenants.create(
+        tenant=other_tenant,
+        channel="max",
+        channel_user_id=person,
+        ayla_user_id=linked_id,
+    )
+    record_global_consent(asking, source="test")
+    assert asking.ayla_user_id is None
+    assert plan_gate.plan_processing_refusal(asking) is None  # близнец: до заявки открыто
+
+    UserPersonalContext.objects.get_or_create(user_id=linked_id)
+    mark_deletion_requested(linked_id, request_id=str(uuid.uuid4()))
+
+    assert plan_gate.plan_processing_refusal(asking) == plan_gate.PLAN_DELETION_REQUESTED
+
+
 # ─── обсуждение, открытое до отзыва ──────────────────────────────────────────
 
 
