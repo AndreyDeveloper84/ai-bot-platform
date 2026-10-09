@@ -952,10 +952,14 @@ def _replacement_question(conversation: Any, saved: Any) -> SkillResult | None:
         return None
     plan_id = plan.get("plan_id")
     replaces_plan_id = replaces.get("plan_id") if isinstance(replaces, dict) else None
-    if not isinstance(plan_id, str) or not isinstance(replaces_plan_id, str):
+    if (
+        not isinstance(plan_id, str)
+        or not isinstance(replaces_plan_id, str)
+        or not replaces_plan_id
+    ):
         return None
     token = _hex8(plan_id)
-    if len(token) != 8 or not replaces_plan_id:
+    if len(token) != 8:
         return None
     _write_replace(conversation, {"plan_id": plan_id, "replaces_plan_id": replaces_plan_id})
     kind = "plan_engine_replace_question"
