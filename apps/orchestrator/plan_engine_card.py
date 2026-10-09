@@ -798,6 +798,7 @@ def try_handle_saved_plan(*, text: str, bot_user: Any, trace_id: str) -> SkillRe
     from apps.integrations.ayla import external_user_id_for
     from apps.integrations.ayla.plan_engine_client import PlanEngineError, PlanEngineHttpClient
     from apps.orchestrator.next_steps import menu_button, next_step_action_data
+    from apps.orchestrator.plan_step_card import step_buttons
 
     client = PlanEngineHttpClient()
     external_user_id = external_user_id_for(bot_user)
@@ -828,6 +829,9 @@ def try_handle_saved_plan(*, text: str, bot_user: Any, trace_id: str) -> SkillRe
         reply_text="\n".join([*lines, "", f"{PLAN_CURRENT} · {TEST_MARK}"]),
         action_type=kind,
         action_data=next_step_action_data(
+            # DRF-2885 — от шага к услуге и записи: кнопка на каждый шаг,
+            # подпись — слова каталога.
+            *step_buttons(plan, labels),
             {"label": BUTTON_DISCUSS, "callback": f"{CB_DISCUSS_PREFIX}{DISCUSS_SAVED}"},
             menu_button(),
         ),

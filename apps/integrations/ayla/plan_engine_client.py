@@ -33,6 +33,22 @@ _DECISION_PATH = "internal/me/plan/decision/"
 _PLAN_PATH = "internal/me/plan/"
 _LABELS_PATH = "internal/me/plan/capability-labels/"
 _REPLACE_PATH = "internal/me/plan/replace/"
+_STEP_CANDIDATES_PATH = "internal/me/plan/steps/candidates/"
+_STEP_RESOLUTION_PATH = "internal/me/plan/steps/resolution/"
+
+#: Почему у шага нет услуг — закрытый перечень каталога (контракт §8.2).
+NOTHING_BECAUSE = frozenset(
+    {
+        "NO_CAPABILITY",
+        "NO_OFFER",
+        "OUT_OF_SIGHT",
+        "NO_SELLABLE_MASTER",
+        "NOT_ADMITTED",
+        "HEALTH_CONDITIONS_UNDEFINED",
+        "NONE_ADMITTED",
+        "ACROSS_THE_TEST_BOUNDARY",
+    }
+)
 _STATE_PATH = "internal/me/plan/state/"
 DEFAULT_TIMEOUT_S = 10.0
 
@@ -100,6 +116,31 @@ class PlanReplacementTargetChangedError(PlanEngineError):
 class PlanTransitionRefusedError(PlanEngineError):
     """409 ``PLAN_TRANSITION_REFUSED`` — план уже не в том состоянии: это не
     предложение (замещено новым или отклонено), либо переход не разрешён."""
+
+
+class PlanStepNotExecutableError(PlanEngineError):
+    """409 ``PLAN_STEP_NOT_EXECUTABLE`` — действие с шагом не допущено.
+
+    ``reason`` — причина каталога (``safety_blocked``, ``s1_restriction_open``,
+    ``s1_restriction_stop``, ``plan_not_in_effect``, ``revision_stale``,
+    ``step_already_resolved``, ``restriction_open`` …). Имя, не данные.
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(f"plan_step_not_executable:{reason}")
+        self.reason = reason
+
+
+class PlanStepResolutionRefusedError(PlanEngineError):
+    """409 ``PLAN_STEP_RESOLUTION_REFUSED`` — выбор услуги для шага отвергнут.
+
+    ``reason`` — причина каталога (``offer_not_a_candidate``,
+    ``level_already_resolved`` и дефекты вызывающего).
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(f"plan_step_resolution_refused:{reason}")
+        self.reason = reason
 
 
 class PlanNotFoundError(PlanEngineError):
@@ -248,6 +289,96 @@ class PlanEngineHttpClient:
             body["consent"] = dict(consent)
         data = self._post(_REPLACE_PATH, external_user_id=external_user_id, body=body, op="replace")
         if not isinstance(data.get("plan"), dict) or not isinstance(data.get("replaced"), bool):
+            raise PlanEngineUnavailableError("plan_missing")
+        return data
+
+    def step_candidates(
+        self,
+        *,
+        external_user_id: str,
+        plan_id: str,
+        step_id: str,
+        safety_state: str,
+        safety_policy_version: str,
+        evaluated_at_revision: int,
+        s1_restriction: str,
+        consent: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        """``POST …/steps/candidates/`` — услуги, которыми можно выполнить шаг.
+
+        Каталог сам ищет предложения по способности шага в видимости этого
+        человека и проверяет допуск; ничего не пишет. Ответ отдаётся как есть:
+        ``candidates`` (каждый — идентификаторы каталога и слова для показа),
+        ``search_id`` и ``nothing_because`` — почему список пуст. Порядок
+        кандидатов — не ранжирование.
+
+        Ответ без списка кандидатов или с причиной вне закрытого перечня —
+        «недоступно», а не «услуг нет»: пустой список от неразобранного
+        ответа был бы утверждением, которого каталог не делал.
+        """
+        body: dict[str, Any] = {
+            "plan_id": plan_id,
+            "step_id": step_id,
+            "safety_state": safety_state,
+            "safety_policy_version": safety_policy_version,
+            "evaluated_at_revision": evaluated_at_revision,
+            "s1_restriction": s1_restriction,
+        }
+        if consent is not None:
+            body["consent"] = consent
+        data = self._post(
+            _STEP_CANDIDATES_PATH, external_user_id=external_user_id, body=body, op="candidates"
+        )
+        candidates = data.get("candidates")
+        if not isinstance(candidates, list) or not all(isinstance(c, dict) for c in candidates):
+            raise PlanEngineUnavailableError("candidates_missing")
+        nothing = data.get("nothing_because")
+        if candidates:
+            if not isinstance(data.get("search_id"), str) or not data["search_id"]:
+                raise PlanEngineUnavailableError("search_id_missing")
+        elif nothing not in NOTHING_BECAUSE:
+            raise PlanEngineUnavailableError("nothing_because_unknown")
+        return data
+
+    def resolve_step(
+        self,
+        *,
+        external_user_id: str,
+        plan_id: str,
+        step_id: str,
+        canonical_service_ref: str,
+        tenant_offer_ref: str,
+        resolver_decision_id: str,
+        safety_state: str,
+        safety_policy_version: str,
+        evaluated_at_revision: int,
+        s1_restriction: str,
+        consent: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        """``POST …/steps/resolution/`` — человек выбрал услугу для шага.
+
+        ``resolver_decision_id`` — ``search_id`` того ответа кандидатов, из
+        которого сделан выбор: повтор с тем же значением каталог узнаёт сам.
+        Ответ ``{"plan": <документ>, "created": bool}``.
+        """
+        body: dict[str, Any] = {
+            "plan_id": plan_id,
+            "step_id": step_id,
+            "level": "OFFER",
+            "canonical_service_ref": canonical_service_ref,
+            "tenant_offer_ref": tenant_offer_ref,
+            "resolver_decision_id": resolver_decision_id,
+            "safety_state": safety_state,
+            "safety_policy_version": safety_policy_version,
+            "evaluated_at_revision": evaluated_at_revision,
+            "s1_restriction": s1_restriction,
+        }
+        if consent is not None:
+            body["consent"] = consent
+        data = self._post(
+            _STEP_RESOLUTION_PATH, external_user_id=external_user_id, body=body, op="resolution"
+        )
+        if not isinstance(data.get("plan"), dict):
             raise PlanEngineUnavailableError("plan_missing")
         return data
 
@@ -435,6 +566,10 @@ def _refusal(response: httpx.Response) -> PlanEngineError:
         return PlanDeletionInProgressError("deletion_in_progress")
     if response.status_code == 422 and code == "CONSENT_REQUIRED":
         return PlanConsentRequiredError(reason or "consent_required")
+    if response.status_code == 409 and code == "PLAN_STEP_NOT_EXECUTABLE":
+        return PlanStepNotExecutableError(reason or "unknown")
+    if response.status_code == 409 and code == "PLAN_STEP_RESOLUTION_REFUSED":
+        return PlanStepResolutionRefusedError(reason or "unknown")
     if response.status_code == 409 and code == "PLAN_REPLACEMENT_TARGET_CHANGED":
         return PlanReplacementTargetChangedError("plan_replacement_target_changed")
     if response.status_code == 409 and code == "PLAN_TRANSITION_REFUSED":
