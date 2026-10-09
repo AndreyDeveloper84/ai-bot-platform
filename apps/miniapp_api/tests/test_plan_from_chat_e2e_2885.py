@@ -76,6 +76,7 @@ def test_e1_the_command_in_the_miniapp_chat_composes_with_this_turns_verdict(
     assert body["buttons"] == [
         {"label": "Сохранить", "payload": f"cb:plan:save:{TOKEN}"},
         {"label": "Изменить", "payload": f"cb:plan:edit:{TOKEN}"},
+        {"label": "Обсудить", "payload": f"cb:plan:discuss:{TOKEN}"},
     ]
     assert catalog.composed[0]["safety_state"] == "NORMAL"
     assert catalog.composed[0]["safety_policy_version"].startswith("pre_check-")
@@ -246,3 +247,55 @@ def test_e8_a_blocked_persons_turn_is_recorded_before_the_turn_ends(
 
     assert after is not None
     assert after.evaluated_at_revision > before.evaluated_at_revision
+
+
+def test_e9_a_turn_under_an_operator_is_recorded_before_the_turn_ends(
+    client: Client, tenant, wire, catalog: FakeCatalog, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ход под оператором кончается молчанием бота — и всё равно несёт вердикт
+    (сторож перестановки: запись стоит выше этого выхода)."""
+    from apps.channels.max import handler as max_handler
+
+    person = "2885109"
+    _person_shell(tenant, person)
+    _ask(client, "привет", as_user=person)
+    before = _last_turn(person)
+    assert before is not None
+
+    monkeypatch.setattr(max_handler, "global_handoff_muted", lambda **kw: True)
+    monkeypatch.setattr(max_handler, "notify_silence", lambda **kw: None)
+    _ask(client, "привет ещё раз", as_user=person)
+    after = _last_turn(person)
+
+    assert after is not None
+    assert after.evaluated_at_revision > before.evaluated_at_revision
+
+
+def test_e10_discussing_through_the_real_turn_gives_the_model_the_plan(
+    client: Client, tenant, wire, catalog: FakeCatalog, _concierge, settings
+) -> None:
+    """«Обсудить» → дословная реплика; следующий свободный ход идёт модели, и
+    разговор этого хода несёт открытое обсуждение с шагами плана."""
+    from apps.orchestrator.discovery import DiscoveryReply
+
+    person = "2885110"
+    _person_shell(tenant, person)
+    seen: dict[str, Any] = {}
+
+    def _model(text: str, *, bot_user: Any, conversation: Any, **kw: Any) -> Any:
+        seen["block"] = card.render_plan_discussion_block(conversation)
+        seen["removable"] = card.discussion_allows_removal(conversation)
+        return DiscoveryReply(text="ок")
+
+    _concierge.side_effect = _model
+    settings.SYNTHETIC_TEST_TRIGGER_ACCOUNTS = (f"max:{person}",)
+    _ask(client, card.TRIGGER, as_user=person)
+
+    opened = _ask(client, f"cb:plan:discuss:{TOKEN}", as_user=person)
+    assert opened.status_code == 200, opened.content[:300]
+    assert opened.json()["answer"] == "Давай обсудим твой план. Что хочешь изменить или уточнить?"
+
+    _ask(client, "а зачем мне прогулка?", as_user=person)
+
+    assert "1. Режим сна" in seen["block"]
+    assert seen["removable"] is True

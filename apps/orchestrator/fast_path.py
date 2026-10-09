@@ -638,6 +638,18 @@ FAST_PATH_TOOL_CLAIMS: tuple[ToolClaim, ...] = (
             "составь мне программу на месяц",
         ),
     ),
+    ToolClaim(
+        tool="plan_remove_step",
+        claimed=False,
+        why=(
+            "Dropping a step from the plan under discussion names no service "
+            "to search masters for (DRF-2885)."
+        ),
+        sample_turns=(
+            "убери второй шаг из плана",
+            "прогулку из плана убери",
+        ),
+    ),
 )
 
 #: Tool name -> claim. Convenience for the guard test and for anyone reading
