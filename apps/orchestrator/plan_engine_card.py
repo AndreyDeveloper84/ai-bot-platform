@@ -58,6 +58,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 import re
 from collections.abc import Callable
 from typing import Any
@@ -797,6 +798,7 @@ def try_handle_saved_plan(*, text: str, bot_user: Any, trace_id: str) -> SkillRe
     from apps.integrations.ayla import external_user_id_for
     from apps.integrations.ayla.plan_engine_client import PlanEngineError, PlanEngineHttpClient
     from apps.orchestrator.next_steps import menu_button, next_step_action_data
+    from apps.orchestrator.plan_step_card import step_buttons
 
     client = PlanEngineHttpClient()
     external_user_id = external_user_id_for(bot_user)
@@ -827,6 +829,9 @@ def try_handle_saved_plan(*, text: str, bot_user: Any, trace_id: str) -> SkillRe
         reply_text="\n".join([*lines, "", f"{PLAN_CURRENT} · {TEST_MARK}"]),
         action_type=kind,
         action_data=next_step_action_data(
+            # DRF-2885 — от шага к услуге и записи: кнопка на каждый шаг,
+            # подпись — слова каталога.
+            *step_buttons(plan, labels),
             {"label": BUTTON_DISCUSS, "callback": f"{CB_DISCUSS_PREFIX}{DISCUSS_SAVED}"},
             menu_button(),
         ),
@@ -871,6 +876,157 @@ def save_command(
     return command
 
 
+@dataclass(frozen=True, slots=True)
+class SaveOutcome:
+    """Чем кончилось сохранение того, что ждало подтверждения.
+
+    ``name`` — имя исхода (``PLAN_SAVED`` или имя отказа). ``question`` —
+    вопрос о замене, если каталог сохранил ПРЕДЛОЖЕНИЕ рядом с действующим
+    планом; чат отвечает им вместо «сохранено», экран его не показывает — он
+    перечитывает сохранённое и видит предложение сам.
+    """
+
+    name: str
+    question: SkillResult | None = None
+
+    @property
+    def saved(self) -> bool:
+        return self.name == PLAN_SAVED
+
+
+def save_pending(
+    *, bot_user: Any, conversation: Any, token: str, safety: Any, trace_id: str
+) -> SaveOutcome:
+    """Сохранить предложение, которое ждёт подтверждения в этом разговоре.
+
+    Одно ядро на два входа: тап «Сохранить» в чате и «Сохранить» на экране
+    Mini App (задание владельца §9: экран сохраняет без сообщения в чат).
+    Предложение у них общее — оно лежит в состоянии разговора.
+
+    ``safety`` — тройка вердикта: у чата — хода нажатия, у экрана — последнего
+    хода разговора. ``None`` — каталог не спрашивается.
+
+    Гейт согласия (DRF-2967) — ПЕРВЫМ, до чтения того, что ждёт
+    подтверждения: человек без основания с чужим или старым опознавателем
+    получает отказ гейта, а не «устарело». Вызывающие ставят его и у себя —
+    у чата и у экрана отказ выглядит по-разному; двойная проверка намеренна.
+    Основание для каталога вычисляется здесь, в момент сохранения, а не
+    берётся из предложения: согласие могло смениться между сборкой и нажатием.
+    """
+    from apps.integrations.ayla import external_user_id_for
+    from apps.integrations.ayla.plan_engine_client import (
+        PlanCapabilityNotConfirmedError,
+        PlanConsentRequiredError,
+        PlanDeletionInProgressError,
+        PlanEngineContractError,
+        PlanEngineError,
+        PlanEngineHttpClient,
+        PlanGoalNotFoundError,
+        PlanIdempotencyConflictError,
+        PlanSaveSafetyBlockedError,
+    )
+    from apps.orchestrator.plan_gate import (
+        PLAN_CONSENT_REQUIRED,
+        PLAN_DELETION_REQUESTED,
+        plan_processing_refusal,
+    )
+
+    refused = plan_processing_refusal(bot_user)
+    if refused is not None:
+        return SaveOutcome(refused)
+    pending = _read_pending(conversation)
+    if pending is None or _token(pending["decision"]) != token:
+        return SaveOutcome(PLAN_PROPOSAL_EXPIRED)
+
+    if safety is None:
+        return SaveOutcome(SAFETY_INPUT_UNAVAILABLE)
+
+    shown_at = pending.get("shown_at_revision")
+    if not isinstance(shown_at, int) or isinstance(shown_at, bool):
+        return SaveOutcome(PLAN_PROPOSAL_EXPIRED)
+    try:
+        command = save_command(pending["decision"], safety, shown_at_revision=shown_at)
+    except KeyError:
+        return SaveOutcome(PLAN_PROPOSAL_EXPIRED)
+    basis = _consent_basis(bot_user)
+    if basis is not None:
+        # В ключ идемпотентности каталога не входит: повторное нажатие с тем
+        # же согласием шлёт ту же команду.
+        command["consent"] = basis
+    try:
+        saved = PlanEngineHttpClient().save_plan(
+            external_user_id=external_user_id_for(bot_user), command=command
+        )
+    except PlanDeletionInProgressError:
+        return SaveOutcome(PLAN_DELETION_REQUESTED)
+    except PlanConsentRequiredError:
+        return SaveOutcome(PLAN_CONSENT_REQUIRED)
+    except PlanSaveSafetyBlockedError:
+        return SaveOutcome("PLAN_SAVE_SAFETY_BLOCKED")
+    except PlanIdempotencyConflictError:
+        return SaveOutcome("PLAN_IDEMPOTENCY_CONFLICT")
+    except PlanGoalNotFoundError:
+        return SaveOutcome("GOAL_NOT_FOUND")
+    except PlanCapabilityNotConfirmedError:
+        # Шаг стоит на способности, которой для этого человека больше нет в
+        # знании: предложение устарело — собирать заново, а не «недоступно».
+        _write_pending(conversation, None)
+        return SaveOutcome("PLAN_CAPABILITY_NOT_CONFIRMED")
+    except PlanEngineContractError as exc:
+        logger.error(
+            "orchestrator.plan_engine_card.save_contract_violation trace=%s reason=%s",
+            trace_id,
+            exc.reason,
+        )
+        return SaveOutcome("PLAN_CONTRACT_VIOLATION")
+    except PlanEngineError as exc:
+        logger.warning(
+            "orchestrator.plan_engine_card.save_failed trace=%s class=%s",
+            trace_id,
+            type(exc).__name__,
+        )
+        return SaveOutcome(PLAN_ENGINE_UNAVAILABLE)
+
+    # Предложение оставляем: повторное нажатие шлёт ТУ ЖЕ команду, и каталог
+    # узнаёт её сам — второго плана не будет. Уходит оно со следующей сборкой.
+    # Обсуждение закрыто: обсуждали предложение, а оно стало планом.
+    # Пометка «сохранено» — для показа вне чата: экран не предлагает
+    # сохранить то, что уже сохранено (см. ``pending_proposal_view``).
+    _write_pending(conversation, {**pending, "saved": True})
+    _write_discussion(conversation, None)
+    asked = _replacement_question(conversation, saved)
+    if asked is None:
+        _write_replace(conversation, None)
+    return SaveOutcome(PLAN_SAVED, question=asked)
+
+
+def pending_proposal_view(conversation: Any) -> dict[str, Any] | None:
+    """Несохранённое предложение этого разговора — для показа вне чата.
+
+    Только слова каталога: подписи шагов и «зачем», и опознаватель карточки.
+    Ключей способностей и идентификаторов решения здесь нет. ``None`` —
+    предложения нет, его нечем показать (шаг без подписи) или оно уже
+    сохранено: сохранённое показывается как план, а не как предложение.
+    """
+    if not engine_enabled():
+        return None
+    pending = _read_pending(conversation)
+    labels = _proposal_labels(conversation)
+    if pending is None or not labels or pending.get("saved") is True:
+        return None
+    token = _token(pending["decision"])
+    if len(token) != 8:
+        return None
+    effects = _proposal_effects(conversation)
+    return {
+        "token": token,
+        "steps": [
+            {"label": label, "why": effects[i] if i < len(effects) else None}
+            for i, label in enumerate(labels)
+        ],
+    }
+
+
 def try_handle_plan_save(
     *,
     text: str,
@@ -885,86 +1041,24 @@ def try_handle_plan_save(
     if match is None or not engine_enabled():
         return None
 
-    from apps.integrations.ayla import external_user_id_for
-    from apps.integrations.ayla.plan_engine_client import (
-        PlanCapabilityNotConfirmedError,
-        PlanConsentRequiredError,
-        PlanDeletionInProgressError,
-        PlanEngineContractError,
-        PlanEngineError,
-        PlanEngineHttpClient,
-        PlanGoalNotFoundError,
-        PlanIdempotencyConflictError,
-        PlanSaveSafetyBlockedError,
-    )
-    from apps.orchestrator.plan_gate import PLAN_CONSENT_REQUIRED, PLAN_DELETION_REQUESTED
-
     refusal = _basis_refusal(bot_user)
     if refusal is not None:
         return refusal
+    # Тройка читается, только когда предложение опознано: иначе ход открыл бы
+    # ревизию ради устаревшей карточки.
     pending = _read_pending(conversation)
     if pending is None or _token(pending["decision"]) != match.group(1):
         return _named(PLAN_PROPOSAL_EXPIRED)
-
-    safety = turn_safety() if turn_safety is not None else None
-    if safety is None:
-        return _named(SAFETY_INPUT_UNAVAILABLE)
-
-    shown_at = pending.get("shown_at_revision")
-    if not isinstance(shown_at, int) or isinstance(shown_at, bool):
-        return _named(PLAN_PROPOSAL_EXPIRED)
-    try:
-        command = save_command(pending["decision"], safety, shown_at_revision=shown_at)
-    except KeyError:
-        return _named(PLAN_PROPOSAL_EXPIRED)
-    basis = _consent_basis(bot_user)
-    if basis is not None:
-        # В ключ идемпотентности каталога не входит: повторное нажатие с тем
-        # же согласием шлёт ту же команду.
-        command["consent"] = basis
-    try:
-        saved = PlanEngineHttpClient().save_plan(
-            external_user_id=external_user_id_for(bot_user), command=command
-        )
-    except PlanDeletionInProgressError:
-        return _named(PLAN_DELETION_REQUESTED)
-    except PlanConsentRequiredError:
-        return _named(PLAN_CONSENT_REQUIRED)
-    except PlanSaveSafetyBlockedError:
-        return _named("PLAN_SAVE_SAFETY_BLOCKED")
-    except PlanIdempotencyConflictError:
-        return _named("PLAN_IDEMPOTENCY_CONFLICT")
-    except PlanGoalNotFoundError:
-        return _named("GOAL_NOT_FOUND")
-    except PlanCapabilityNotConfirmedError:
-        # Шаг стоит на способности, которой для этого человека больше нет в
-        # знании: предложение устарело — собирать заново, а не «недоступно».
-        _write_pending(conversation, None)
-        return _named("PLAN_CAPABILITY_NOT_CONFIRMED")
-    except PlanEngineContractError as exc:
-        logger.error(
-            "orchestrator.plan_engine_card.save_contract_violation trace=%s reason=%s",
-            trace_id,
-            exc.reason,
-        )
-        return _named("PLAN_CONTRACT_VIOLATION")
-    except PlanEngineError as exc:
-        logger.warning(
-            "orchestrator.plan_engine_card.save_failed trace=%s class=%s",
-            trace_id,
-            type(exc).__name__,
-        )
-        return _named(PLAN_ENGINE_UNAVAILABLE)
-
-    # Предложение оставляем: повторное нажатие шлёт ТУ ЖЕ команду, и каталог
-    # узнаёт её сам — второго плана не будет. Уходит оно со следующей сборкой.
-    # Обсуждение закрыто: обсуждали предложение, а оно стало планом.
-    _write_discussion(conversation, None)
-    asked = _replacement_question(conversation, saved)
-    if asked is not None:
-        return asked
-    _write_replace(conversation, None)
-    return _named(PLAN_SAVED)
+    outcome = save_pending(
+        bot_user=bot_user,
+        conversation=conversation,
+        token=match.group(1),
+        safety=turn_safety() if turn_safety is not None else None,
+        trace_id=trace_id,
+    )
+    if outcome.question is not None:
+        return outcome.question
+    return _named(outcome.name)
 
 
 # ─── предложение и замена действующего плана ─────────────────────────────
@@ -1157,10 +1251,13 @@ __all__ = [
     "BUTTON_SAVE",
     "QUESTION_SAVE",
     "TRIGGER",
+    "SaveOutcome",
     "compose_for_request",
     "discussed_plan",
     "discussion_allows_removal",
     "is_discuss_callback",
+    "pending_proposal_view",
+    "save_pending",
     "is_replace_callback",
     "try_handle_plan_replace",
     "remove_step_for_request",
