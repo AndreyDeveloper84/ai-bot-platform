@@ -389,7 +389,13 @@ export function MasterWorkingHoursScreen() {
     try {
       const data = await getWorkingHours();
       setWeek(weekFrom(data.schedule));
-      setScheduleSet(data.schedule.length > 0);
+      setScheduleSet(
+        data.schedule.some(
+          (day) =>
+            day.is_working_day ||
+            Boolean(day.start_time || day.end_time || day.break_start || day.break_end),
+        ),
+      );
       if (!isSolo) {
         try {
           const lifecycle = await getPendingAvailability();
@@ -687,10 +693,9 @@ export function MasterWorkingHoursScreen() {
           onEditRejected={(item) => {
             const startIso = item.requested_start;
             const endIso = item.requested_end;
-            const raw = startIso ? new Date(startIso) : null;
             const weekday =
-              raw && !Number.isNaN(raw.getTime())
-                ? (raw.getDay() + 6) % 7
+              startIso && /^\d{4}-\d{2}-\d{2}T/.test(startIso)
+                ? weekdayFromYmd(startIso.slice(0, 10))
                 : todayWeekday();
             openUnavailable(weekday, null);
             if (startIso && /^\d{4}-\d{2}-\d{2}T/.test(startIso)) {
@@ -863,20 +868,39 @@ function AvailabilityLifecycle({
 
 function availabilityWindowText(item: PendingAvailabilityItem): string {
   if (!item.requested_start || !item.requested_end) return "Период не указан";
-  const start = new Date(item.requested_start);
-  const end = new Date(item.requested_end);
-  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) {
-    return `${item.requested_start} — ${item.requested_end}`;
-  }
-  const pad = (n: number) => String(n).padStart(2, "0");
+  // wall-clock-ok: requested_* comes from the salon schedule contract with
+  // its offset; display the wall-clock that the server sent, never the
+  // browser/device timezone projection.
+  const start = item.requested_start.match(
+    /^(\d{4})-(\d{2})-(\d{2})T(\d{2}:\d{2})/,
+  );
+  const end = item.requested_end.match(
+    /^(\d{4})-(\d{2})-(\d{2})T(\d{2}:\d{2})/,
+  );
+  if (!start || !end) return `${item.requested_start} — ${item.requested_end}`;
   const sameDay =
-    start.getFullYear() === end.getFullYear() &&
-    start.getMonth() === end.getMonth() &&
-    start.getDate() === end.getDate();
-  const day = `${start.getDate()} ${MONTHS_GENITIVE[start.getMonth()] ?? ""}`;
-  const startHm = `${pad(start.getHours())}:${pad(start.getMinutes())}`;
-  const endHm = `${pad(end.getHours())}:${pad(end.getMinutes())}`;
-  return sameDay ? `${day} · ${startHm}–${endHm}` : `${item.requested_start} — ${item.requested_end}`;
+    start[1] === end[1] && start[2] === end[2] && start[3] === end[3];
+  if (!sameDay) return `${item.requested_start} — ${item.requested_end}`;
+  const month = MONTHS_GENITIVE[Number(start[2]) - 1] ?? "";
+  return `${Number(start[3])} ${month} · ${start[4]}–${end[4]}`;
+}
+
+function weekdayFromYmd(ymd: string): number {
+  const match = ymd.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) return todayWeekday();
+  let year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  if (!year || month < 1 || month > 12 || day < 1 || day > 31) return todayWeekday();
+
+  // Sakamoto's algorithm: 0=Sunday…6=Saturday, then convert to Monday-first.
+  const offsets = [0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4] as const;
+  if (month < 3) year -= 1;
+  const sundayFirst =
+    (year + Math.floor(year / 4) - Math.floor(year / 100) + Math.floor(year / 400) +
+      (offsets[month - 1] ?? 0) + day) %
+    7;
+  return (sundayFirst + 6) % 7;
 }
 
 /**
