@@ -57,6 +57,7 @@ from django.core.cache import cache
 from django.utils.dateparse import parse_datetime
 
 from apps.catalog.models import CatalogMaster, CatalogService, MasterService, sellable_edge_q
+from apps.catalog.rating import public_rating
 from apps.integrations.ayla.edge_duration import duration_from_edge
 from apps.integrations.ayla.offer_refusal import (
     OFFER_NOT_SELLABLE_SLUG,
@@ -65,6 +66,7 @@ from apps.integrations.ayla.offer_refusal import (
     reason_from_refusal,
 )
 from apps.identity.models import BotUser
+from apps.consent import ai_food_estimation
 from apps.nutrition_proactive.prefs import get_prefs, numbers_hidden_for, write_prefs
 from apps.nutrition_proactive.prefs import numbers_hidden as numbers_hidden_by_choice
 from apps.tenancy.models import Tenant
@@ -822,7 +824,10 @@ def _master_to_dict(m: CatalogMaster) -> dict[str, Any]:
         "specialization": m.specialization,
         "bio": m.bio,
         "experience": m.experience,
-        "rating": str(m.rating) if m.rating is not None else None,
+        # DRF-2875 — оценка без отзывов клиенту не уходит (п.20 листа 07.10).
+        "rating": (
+            str(shown) if (shown := public_rating(m.rating, m.review_count)) is not None else None
+        ),
         "photo_url": master_photo_path(m.id, m.photo_url),
         # DRF-1778 — trust signal только из данных: число отзывов из
         # зеркала (`reviews_count` фида). 0 — экран скобок не рисует.
@@ -3255,6 +3260,59 @@ def customer_preference_inference_consent(request: HttpRequest) -> HttpResponse:
 @require_http_methods(["POST", "DELETE"])
 @require_init_data
 @with_request_tenant
+def customer_ai_food_estimation_consent(request: HttpRequest) -> HttpResponse:
+    """Согласие на ИИ-оценку еды — выдать и отозвать (DRF-2867).
+
+    Решение владельца 07.10 (лист решений, п.17): согласие выдаётся и
+    отзывается на одном экране Mini App; отдельного механизма выдачи
+    сообщением в чате нет.
+
+    ``POST`` — выдать; тело ``{"document_version": "<версия>"}`` — под каким
+    текстом человек нажал. Незнакомая версия — 409 ``stale_disclosure``,
+    клиенту нужно перечитать ``GET /me/consents/``. Текст ещё не утверждён —
+    409 ``consent_text_not_approved``: показать человеку нечего, выдачи нет.
+    ``DELETE`` — отозвать; работает всегда, в том числе пока механизм
+    выключен. Оба перехода идемпотентны и отвечают свежим документом.
+
+    Добровольное: отказ и отзыв не закрывают ни справочник, ни дневник.
+    После отзыва блюдо наружу не уходит: предикат перед отправкой читается
+    заново на каждом вызове (``ai_food_estimation.estimate_permitted``).
+    """
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    if request.method == "POST":
+        body = _json_object_body(request)
+        if isinstance(body, HttpResponse):
+            return body
+        try:
+            ai_food_estimation.grant_from_screen(
+                bot_user, document_version=str(body.get("document_version", ""))
+            )
+        except ai_food_estimation.TextNotApprovedError:
+            return _error(
+                "consent_text_not_approved",
+                "the AI food estimation consent text is not approved yet",
+                409,
+            )
+        except ai_food_estimation.UnknownDisclosureVersionError:
+            return _error(
+                "stale_disclosure",
+                "document_version does not match the current AI food estimation text",
+                409,
+            )
+    else:
+        ai_food_estimation.withdraw(bot_user, source=ai_food_estimation.MINIAPP_SOURCE)
+    logger.info(
+        "miniapp_api.consents.ai_food_estimation bot_user=%s granted=%s",
+        bot_user.id,
+        request.method == "POST",
+    )
+    return JsonResponse(_consents_document(bot_user))
+
+
+@csrf_exempt
+@require_http_methods(["POST", "DELETE"])
+@require_init_data
+@with_request_tenant
 def customer_marketing_consent(request: HttpRequest) -> HttpResponse:
     """Маркетинговое согласие: ``POST`` — выдать, ``DELETE`` — отозвать.
 
@@ -4934,24 +4992,35 @@ def customer_food_estimate(request: HttpRequest) -> HttpResponse:
     try:
         estimate = asyncio.run(
             get_nutrition_client().estimate_dish(
-                external_user_id=external_id, dish_name=parsed.dish, portion_g=grams
+                external_user_id=external_id,
+                dish_name=parsed.dish,
+                portion_g=grams,
+                ai_estimate_allowed=ai_food_estimation.estimate_permitted(bot_user),
             )
         )
     except NutritionAPIError as exc:
         return _food_text_catalog_refusal(exc, external_id=external_id, step="estimate")
 
+    # DRF-2844 — «Без чисел» (решение владельца 04.10: на всех экранах). Экран
+    # текстового ввода режима не знает и рисует всё, что пришло, поэтому числа
+    # в этом режиме не едут вовсе: блюдо и порция остаются, калории, БЖУ,
+    # оценка ИИ и причина её отсутствия (DRF-2822) — нет. Запись от этого не
+    # меняется: экран шлёт в неё блюдо и граммы, а не числа.
+    hidden = numbers_hidden_for(bot_user)
     return JsonResponse(
         {
             "matched_dish": estimate.matched_dish,
             "portion_g": estimate.portion_g,
             "portion_estimated": estimate.portion_estimated,
-            "kcal": estimate.kcal,
-            "protein_g": estimate.protein_g,
-            "fat_g": estimate.fat_g,
-            "carbs_g": estimate.carbs_g,
+            "kcal": None if hidden else estimate.kcal,
+            "protein_g": None if hidden else estimate.protein_g,
+            "fat_g": None if hidden else estimate.fat_g,
+            "carbs_g": None if hidden else estimate.carbs_g,
             # DRF-2761 — оценка калорий ИИ, своим ключом: ``kcal`` при ней
             # null. Экран показывает её только с пометкой «Оценка ИИ».
-            "kcal_ai_estimate": getattr(estimate, "kcal_ai_estimate", None),
+            "kcal_ai_estimate": None if hidden else getattr(estimate, "kcal_ai_estimate", None),
+            # DRF-2822 — почему оценки нет: экран называет сбой и «выключена».
+            "kcal_ai_status": None if hidden else getattr(estimate, "kcal_ai_status", None),
         }
     )
 
@@ -5070,6 +5139,7 @@ def _customer_food_log(request: HttpRequest) -> HttpResponse:
                 portion_multiplier=round(float(portion) / _FOOD_TEXT_BASELINE_G, 3),
                 idempotency_key=f"food-text-ma:{external_id}:{key.strip()}",
                 entry_origin=origin,
+                ai_estimate_allowed=ai_food_estimation.estimate_permitted(bot_user),
             )
         )
     except NutritionAPIError as exc:
@@ -5259,7 +5329,10 @@ def _customer_food_log_scan(bot_user: BotUser, body: dict[str, Any]) -> HttpResp
     try:
         log = asyncio.run(
             get_nutrition_client().log_meal(
-                scan_id=kwargs.pop("scan_id"), entry_origin=entry_origin, **kwargs
+                scan_id=kwargs.pop("scan_id"),
+                entry_origin=entry_origin,
+                ai_estimate_allowed=ai_food_estimation.estimate_permitted(bot_user),
+                **kwargs,
             )
         )
     except NutritionAPIError as exc:

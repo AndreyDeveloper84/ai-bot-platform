@@ -56,7 +56,7 @@ from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 
-from apps.admin_api.auth import RoleContext, require_admin_role
+from apps.admin_api.auth import RoleContext, require_admin_role, require_booking_desk
 from apps.audit.models import AuditLog
 from apps.audit.services import write_audit
 from apps.catalog.models import CatalogMaster, CatalogService, MasterService
@@ -303,7 +303,7 @@ def _detail_payload(master: CatalogMaster, *, include_audit: bool = False) -> di
 
 
 @require_http_methods(["GET"])
-@require_admin_role
+@require_booking_desk
 def masters_list(request: HttpRequest) -> HttpResponse:
     """Roster list — filters, search, opaque cursor pagination.
 

@@ -110,6 +110,7 @@ import { CustomerNotificationSettingsScreen } from "./screens/CustomerNotificati
 import { CustomerCardsScreen } from "./screens/CustomerCardsScreen";
 import { CustomerRecordsScreen } from "./screens/CustomerRecordsScreen";
 import { CustomerSlotsScreen } from "./screens/CustomerSlotsScreen";
+import { CustomerAylaScreen } from "./screens/CustomerAylaScreen";
 import { CustomerWellnessDashboardScreen } from "./screens/CustomerWellnessDashboardScreen";
 import { GoalSelectScreen } from "./screens/GoalSelectScreen";
 import { PlanLiteScreen } from "./screens/PlanLiteScreen";
@@ -1262,6 +1263,10 @@ export function CustomerRoutes() {
         path="/customer/main"
         element={<CustomerWellnessDashboardScreen />}
       />
+      {/* DRF-2799 — разговор с Ayla внутри Mini App (решение владельца 06.10:
+          «диалог продолжается там, где начат»). Сюда ведут обе кнопки блока
+          «Продолжить разговор с Ayla» на Главной. */}
+      <Route path="/customer/ayla" element={<CustomerAylaScreen />} />
       {/*
         DRF-1190 — the goal surface. Registered by the main window at the
         conversation window's request: the screen is theirs, App.tsx is

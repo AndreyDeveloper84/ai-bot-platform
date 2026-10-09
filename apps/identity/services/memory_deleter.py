@@ -107,6 +107,14 @@ def soft_delete_green_entries(
         )
 
     if deleted:
+        # DRF-2700 — стёрто по просьбе человека: переписка до этого момента
+        # модели больше не отдаётся (решение владельца 07.10, п.23). «Забудь
+        # всё» идёт своим путём — обезличиванием переписки.
+        from apps.identity.services import model_history_cutoff
+
+        if reason in model_history_cutoff.PIECEWISE_REQUEST_REASONS:
+            model_history_cutoff.stamp(user_id, at=now)
+
         write_audit(
             "memory.forget_entry",
             target="MemoryEntry",
@@ -164,6 +172,96 @@ def soft_delete_inferences_for_withdrawal(user_id: uuid.UUID) -> int:
             target="MemoryEntry",
             payload={
                 "user_id": str(user_id),
+                "count": deleted,
+                "reason": MemoryEntry.DELETION_REASON_WITHDRAWAL,
+            },
+        )
+    return deleted
+
+
+#: Зоны, чьи строки живут на отдельном согласии зоны и уходят с его отзывом.
+#: Зелёная сюда не входит: её основание — ``personal_data``, и его отзыв идёт
+#: каскадом через «забудь всё».
+WITHDRAWABLE_ZONES = frozenset({MemoryEntry.SENSITIVITY_YELLOW, MemoryEntry.SENSITIVITY_RED})
+
+ZONE_WITHDRAWAL_ACTOR = "consent_withdrawal"
+
+
+def soft_delete_zone_for_withdrawal(
+    user_id: uuid.UUID,
+    zone: str,
+    *,
+    request_id: uuid.UUID,
+) -> int:
+    """Снять живые строки жёлтой или красной зоны человека, отозвавшего её согласие.
+
+    DRF-2542 §5. Причина ``withdrawal`` объявлена в модели как «Consent
+    withdrawn for yellow/red entry», но до этого листа её не ставил никто:
+    отзыв согласия зоны снимал согласие, а строки оставались живыми. Читатель
+    их уже не отдаёт (согласие проверяется в точке использования), но «не
+    используется» — не «удалено».
+
+    Устройство то же, что у «забудь всё»
+    (:func:`soft_delete_all_zones_for_forget_all`) и по тем же причинам: отбор
+    и надгробие под GUC красной зоны, журнал на каждую красную строку в той же
+    транзакции. Физически строки уйдут через сутки
+    (``WITHDRAWAL_TOMBSTONE_RETENTION``). Идемпотентно.
+
+    Raises:
+      ValueError: зона не из :data:`WITHDRAWABLE_ZONES`.
+    """
+    if zone not in WITHDRAWABLE_ZONES:
+        raise ValueError(f"zone {zone!r} is not withdrawn by a zone consent")
+
+    now = timezone.now()
+    red_ids: list[uuid.UUID] = []
+    with transaction.atomic():
+        _set_red_zone_guc(request_id)
+        try:
+            live = MemoryEntry.objects.filter(
+                user_id=user_id,
+                sensitivity_zone=zone,
+                soft_deleted_at__isnull=True,
+                delete_requested_at__isnull=True,
+            )
+            if zone == MemoryEntry.SENSITIVITY_RED:
+                # До UPDATE: после него «живых» уже нет.
+                red_ids = list(live.values_list("id", flat=True))
+            deleted = live.update(
+                delete_requested_at=now,
+                soft_deleted_at=now,
+                deletion_reason=MemoryEntry.DELETION_REASON_WITHDRAWAL,
+                status=MemoryEntry.STATUS_DELETED,
+                updated_at=now,
+            )
+            if red_ids:
+                principal = red_zone_principal(
+                    RedZoneAccessLog.ACCESSOR_SYSTEM_JOB, ZONE_WITHDRAWAL_ACTOR
+                )
+                RedZoneAccessLog.objects.bulk_create(
+                    [
+                        RedZoneAccessLog(
+                            memory_entry_id=entry_id,
+                            user_id=user_id,
+                            accessor_role=RedZoneAccessLog.ACCESSOR_SYSTEM_JOB,
+                            accessor_principal=principal,
+                            access_type=RedZoneAccessLog.ACCESS_WITHDRAWAL,
+                            request_id=request_id,
+                            purpose="consent withdrawal — согласие зоны отозвано субъектом",
+                        )
+                        for entry_id in red_ids
+                    ]
+                )
+        finally:
+            _reset_red_zone_guc()
+
+    if deleted:
+        write_audit(
+            "memory.zone_withdrawn",
+            target="MemoryEntry",
+            payload={
+                "user_id": str(user_id),
+                "zone": zone,
                 "count": deleted,
                 "reason": MemoryEntry.DELETION_REASON_WITHDRAWAL,
             },
@@ -310,6 +408,64 @@ def _log_red_zone_erasure(
     )
 
 
+ACCOUNT_RESET_ACTOR = "account_reset"
+
+
+def hard_delete_memory_for_account_reset(user_ids: list[uuid.UUID]) -> dict[str, int]:
+    """Физически снять память тестового аккаунта при сбросе — включая красную зону.
+
+    DRF-2542 §7. Сброс (``account_reset.apply``, только аккаунты из allowlist)
+    удалял память каскадом от ``UserPersonalContext`` без GUC красной зоны.
+    Под суперпользователем это работает: RLS на него не действует. Под обычной
+    ролью (замер 07.10 на ``d62e07bd``) политика прячет красные строки от
+    сборщика каскада: он их не удаляет, сверка полноты их не видит и
+    рапортует «чисто», а транзакция падает на внешнем ключе при фиксации —
+    сброс откатывается целиком, с успешным отчётом на руках.
+
+    Поэтому каскад идёт под GUC, а на каждую красную строку пишется строка
+    журнала ``purge`` — то же правило, что у остальных путей этого модуля:
+    доступ к красной строке оставляет след. Журнал и удаление — одна
+    транзакция.
+
+    Returns:
+      Счётчики удалённого по моделям, как их отдаёт ``QuerySet.delete()``.
+    """
+    if not user_ids:
+        return {}
+    request_id = uuid.uuid4()
+    with transaction.atomic():
+        _set_red_zone_guc(request_id)
+        try:
+            # До удаления: после него спрашивать не у кого.
+            red = list(
+                MemoryEntry.objects.filter(
+                    user_id__in=user_ids, sensitivity_zone=MemoryEntry.SENSITIVITY_RED
+                ).values_list("id", "user_id")
+            )
+            _, per_model = UserPersonalContext.objects.filter(user_id__in=user_ids).delete()
+            if red:
+                principal = red_zone_principal(
+                    RedZoneAccessLog.ACCESSOR_SYSTEM_JOB, ACCOUNT_RESET_ACTOR
+                )
+                RedZoneAccessLog.objects.bulk_create(
+                    [
+                        RedZoneAccessLog(
+                            memory_entry_id=entry_id,
+                            user_id=owner_id,
+                            accessor_role=RedZoneAccessLog.ACCESSOR_SYSTEM_JOB,
+                            accessor_principal=principal,
+                            access_type=RedZoneAccessLog.ACCESS_PURGE,
+                            request_id=request_id,
+                            purpose="account_reset — сброс тестового аккаунта из allowlist",
+                        )
+                        for entry_id, owner_id in red
+                    ]
+                )
+        finally:
+            _reset_red_zone_guc()
+    return dict(per_model)
+
+
 def request_forget_all(user_id: uuid.UUID) -> bool:
     """Record the user's «forget everything» intent on their UPC.
 
@@ -432,7 +588,16 @@ def _expired(now: datetime):
     (``deletion_requested_at``): у этих стираний свои пути, свои причины в
     надгробии и свой журнал, и TTL не должен перебивать их ответ аудиту на
     вопрос «почему снята строка».
+
+    DRF-2774: категория, чьи сроки владелец утвердил
+    (``memory_term.approved_categories``), судится по одной дате
+    ``expires_at`` — её продлевает только использование до предела, и
+    скользящее окно поверх неё держало бы строку за пределом. Остальные — то
+    же пересечение (fail-safe). Пока сроки не утверждены, список пуст и свип
+    прежний.
     """
+    from apps.identity.services.memory_term import F4_CONSENT_SCOPE, approved_categories
+
     ttls = list(
         _live_rows_with_a_term()
         .filter(expires_at__lte=now)
@@ -446,6 +611,8 @@ def _expired(now: datetime):
     for ttl in ttls:
         cutoff = now - timedelta(days=ttl)
         window |= Q(ttl_days=ttl, last_used_at__lte=cutoff) & ~Q(consent_at__gt=cutoff)
+    for zone, kind in approved_categories():
+        window |= Q(sensitivity_zone=zone, kind=kind) & ~Q(consent_scope=F4_CONSENT_SCOPE)
     held = UserPersonalContext.objects.filter(user_id=OuterRef("user_id")).filter(
         Q(forget_all_requested_at__isnull=False) | Q(deletion_requested_at__isnull=False)
     )
