@@ -47,6 +47,12 @@ from apps.integrations.ayla.plan_engine_client import (
     PlanEngineHttpClient,
 )
 from apps.miniapp_api.views import _error, require_init_data
+from apps.orchestrator.plan_gate import (
+    PLAN_BASIS_UNAVAILABLE,
+    PLAN_CONSENT_REQUIRED,
+    PLAN_DELETION_REQUESTED,
+    plan_processing_refusal,
+)
 from apps.planning_rules.registry import PlanningRegistryError, load_registry
 from apps.planning_rules.wire import registry_wire_body
 
@@ -124,6 +130,13 @@ def customer_plan_decision(request: HttpRequest) -> HttpResponse:
 
     if not plan_engine_enabled():
         return _error("plan_engine_disabled", "plan engine is not enabled", 404)
+
+    # DRF-2967 — основание раньше всего остального: без согласия на
+    # хранение или при живой заявке на удаление каталог о человеке не
+    # спрашивается вовсе.
+    refused = _basis_refusal(request.bot_user)  # type: ignore[attr-defined]
+    if refused is not None:
+        return refused
 
     excluded = _excluded_refs(request)
     if isinstance(excluded, JsonResponse):
@@ -254,6 +267,24 @@ def customer_plan_current(request: HttpRequest) -> HttpResponse:
         sum(1 for key in keys if key not in effects),
     )
     return JsonResponse({"plan": payload})
+
+
+#: Имя отказа гейта → (код ошибки, HTTP). 423 при заявке на удаление — как
+#: у полки (``customer_shelf``) и у каталога.
+_BASIS_REFUSALS: dict[str, tuple[str, int]] = {
+    PLAN_DELETION_REQUESTED: ("deletion_requested", 423),
+    PLAN_CONSENT_REQUIRED: ("plan_consent_required", 403),
+    PLAN_BASIS_UNAVAILABLE: ("plan_basis_unavailable", 503),
+}
+
+
+def _basis_refusal(bot_user: BotUser) -> JsonResponse | None:
+    outcome = plan_processing_refusal(bot_user)
+    if outcome is None:
+        return None
+    error, status = _BASIS_REFUSALS[outcome]
+    logger.info("customer_plan_decision.refused bot_user=%s reason=%s", bot_user.pk, outcome)
+    return _error(error, "the plan is not processed for this person", status)
 
 
 def _refusal(exc: Exception) -> JsonResponse:

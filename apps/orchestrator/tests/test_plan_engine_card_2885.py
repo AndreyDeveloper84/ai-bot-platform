@@ -194,13 +194,26 @@ def _on(settings) -> None:
     settings.SYNTHETIC_TEST_TRIGGER_ACCOUNTS = (ACCOUNT,)
 
 
+@pytest.fixture(autouse=True)
+def _basis_proven(monkeypatch: pytest.MonkeyPatch) -> None:
+    """DRF-2967: человек этих узлов — с основанием; база им не нужна.
+
+    Сам гейт (три отказа и близнец) держит
+    ``apps/miniapp_api/tests/test_plan_basis_gate_2967.py`` на настоящих
+    строках согласия.
+    """
+    from apps.orchestrator import plan_gate
+
+    monkeypatch.setattr(plan_gate, "plan_processing_refusal", lambda bot_user: None)
+
+
 def _bot_user(account: str = ACCOUNT) -> SimpleNamespace:
     channel, channel_user_id = account.split(":")
     return SimpleNamespace(pk=1, id=1, channel=channel, channel_user_id=channel_user_id)
 
 
 def _conversation() -> SimpleNamespace:
-    return SimpleNamespace(id="conv-2885", skill_state={})
+    return SimpleNamespace(id="conv-2885", skill_state={}, bot_user=_bot_user())
 
 
 def _safety(state: str = "NORMAL", revision: int = 7) -> PlanTurnSafety:

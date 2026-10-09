@@ -18,6 +18,7 @@ import pytest
 from django.test import Client
 
 from apps.integrations.ayla import plan_engine_client as client_mod
+from apps.consent.services import record_global_consent
 from apps.miniapp_api.tests.test_customer_assistant_2799 import (  # noqa: F401 — fixtures
     _ask,
     _bot_token,
@@ -25,10 +26,12 @@ from apps.miniapp_api.tests.test_customer_assistant_2799 import (  # noqa: F401 
     _global_threads,
     _no_ayla_link,
     _no_intent_llm,
-    _person_shell,
     _redis,
     tenant,
     wire,
+)
+from apps.miniapp_api.tests.test_customer_assistant_2799 import (
+    _person_shell as _bare_person_shell,
 )
 from apps.orchestrator import plan_engine_card as card
 from apps.orchestrator.decision_readiness import state as state_mod
@@ -41,6 +44,13 @@ pytestmark = pytest.mark.django_db
 #: соседним набором аккаунт выбирал бы его лимит.
 PERSON = "2885100"
 FREE_ASKER = "2885106"
+
+
+def _person_shell(tenant, channel_user_id: str = PERSON):
+    """Человек с согласием на хранение: без него план не обрабатывается (DRF-2967)."""
+    shell = _bare_person_shell(tenant, channel_user_id)
+    record_global_consent(shell, source="test")
+    return shell
 
 
 @pytest.fixture(autouse=True)
