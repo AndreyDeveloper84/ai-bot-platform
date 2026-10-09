@@ -37,10 +37,10 @@ interface ErrorBody {
   details?: Record<string, unknown>;
 }
 
-export async function request<T>(
+async function fetchMaster(
   path: string,
   init: RequestInit = {},
-): Promise<T> {
+): Promise<Response> {
   const headers = new Headers(init.headers);
   applyIdentityHeaders(headers);
   // Don't auto-set Content-Type for FormData (the browser writes the
@@ -51,8 +51,14 @@ export async function request<T>(
   if (body && !isFormData && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
   }
+  return fetch(`${MASTER_API_BASE}${path}`, { ...init, headers });
+}
 
-  const res = await fetch(`${MASTER_API_BASE}${path}`, { ...init, headers });
+export async function request<T>(
+  path: string,
+  init: RequestInit = {},
+): Promise<T> {
+  const res = await fetchMaster(path, init);
   if (!res.ok) {
     let parsed: ErrorBody = { error: "http_error", detail: res.statusText };
     try {
@@ -362,14 +368,10 @@ export const actOnMasterBooking = async (
   id: string,
   body: MasterBookingActionBody,
 ): Promise<MasterBookingActionResult> => {
-  const headers = new Headers({ "Content-Type": "application/json" });
-  applyIdentityHeaders(headers);
-
   let res: Response;
   try {
-    res = await fetch(`${MASTER_API_BASE}/bookings/${encodeURIComponent(id)}/action`, {
+    res = await fetchMaster(`/bookings/${encodeURIComponent(id)}/action`, {
       method: "POST",
-      headers,
       body: JSON.stringify(body),
     });
   } catch {
