@@ -1020,6 +1020,7 @@ def try_handle_structured_nutrition_turn(
             try_handle_plan_trigger,
         )
         from apps.orchestrator.plan_lite_card import try_handle_plan_callback
+        from apps.orchestrator.plan_step_card import is_step_callback, try_handle_plan_step
 
         if text.strip() == CB_COMPOSE:
             # DRF-2885 — кнопка «Составить план»: настоящий вход.
@@ -1050,6 +1051,22 @@ def try_handle_structured_nutrition_turn(
             except Exception:  # noqa: BLE001 — план не должен ломать глобальный ход
                 logger.exception(
                     "orchestrator.nutrition_global.plan_engine_save_failed trace=%s", trace_id
+                )
+                return None
+
+        if is_step_callback(text):
+            # DRF-2885 — шаг → услуга → время → запись.
+            try:
+                return try_handle_plan_step(
+                    text=text,
+                    bot_user=bot_user,
+                    conversation=conversation,
+                    trace_id=trace_id,
+                    turn_safety=plan_turn_safety,
+                )
+            except Exception:  # noqa: BLE001 — план не должен ломать глобальный ход
+                logger.exception(
+                    "orchestrator.nutrition_global.plan_engine_step_failed trace=%s", trace_id
                 )
                 return None
 
