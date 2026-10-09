@@ -353,7 +353,12 @@ function BookingActions({
       setPendingTarget(null);
       setMode("idle");
     }
-    if (mode === "stale" && attemptedVersion !== null && data.appointment_version !== attemptedVersion) {
+    if (
+      mode === "stale" &&
+      (attemptedVersion === null
+        ? data.appointment_version !== null
+        : data.appointment_version !== attemptedVersion)
+    ) {
       setMode("idle");
       setAttemptedVersion(null);
     }
