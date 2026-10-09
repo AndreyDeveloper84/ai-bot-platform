@@ -18,7 +18,7 @@
  */
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { primeDisplayName } from "../components/CustomerAvatarEntry";
 
 vi.mock("../lib/plan-engine", () => ({
@@ -28,6 +28,7 @@ vi.mock("../lib/plan-engine", () => ({
   saveDraft: vi.fn(),
   stepOffers: vi.fn(),
   chooseStepOption: vi.fn(),
+  chooseStepDay: vi.fn(),
   bookStepSlot: vi.fn(),
 }));
 vi.mock("../lib/plan-lite", async (importOriginal) => {
@@ -57,6 +58,7 @@ import { ApiError } from "../lib/api";
 import { fetchDecisionContext, type DecisionContext } from "../lib/customer-goals";
 import {
   bookStepSlot,
+  chooseStepDay,
   chooseStepOption,
   getSavedPlanState,
   stepOffers,
@@ -72,6 +74,7 @@ const mockedState = vi.mocked(getSavedPlanState);
 const mockedOffers = vi.mocked(stepOffers);
 const mockedChoose = vi.mocked(chooseStepOption);
 const mockedBook = vi.mocked(bookStepSlot);
+const mockedDay = vi.mocked(chooseStepDay);
 const mockedLite = vi.mocked(getPlanLite);
 const mockedLiteProposal = vi.mocked(getPlanLiteProposal);
 const mockedDoc = vi.mocked(fetchDecisionContext);
@@ -112,6 +115,7 @@ const OLGA: StepOption = {
 const SEARCH = "c0ffee00";
 const SLOT_A = "2026-10-12T10:00:00+03:00";
 const SLOT_B = "2026-10-12T11:30:00+03:00";
+const SLOT_C = "2026-10-17T12:00:00+03:00";
 
 function renderScreen() {
   return render(
@@ -131,6 +135,11 @@ async function openSecondStep() {
 }
 
 beforeEach(() => {
+  // Подпись дня зависит от «сегодня» (сегодняшний день подписан словом), а
+  // дни в узлах названы датами — часы закреплены. Подменяется только Date:
+  // таймеры настоящие, ожидания экрана работают как обычно.
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(new Date("2026-10-09T12:00:00+03:00"));
   vi.clearAllMocks();
   primeDisplayName("Тест Тестов");
   mockedDoc.mockResolvedValue(DOC);
@@ -138,8 +147,25 @@ beforeEach(() => {
   mockedLiteProposal.mockRejectedValue(new ApiError(404, "no_template", "none"));
   mockedState.mockResolvedValue({ plan: PLAN, proposal: null, draft: null });
   mockedOffers.mockResolvedValue({ token: SEARCH, options: [ANNA, OLGA] });
-  mockedChoose.mockResolvedValue({ token: SEARCH, option: OLGA, slots: [SLOT_A, SLOT_B] });
+  mockedChoose.mockResolvedValue({
+    token: SEARCH,
+    option: OLGA,
+    days: ["2026-10-12", "2026-10-14", "2026-10-17"],
+    day: "2026-10-12",
+    slots: [SLOT_A, SLOT_B],
+  });
+  mockedDay.mockResolvedValue({
+    token: SEARCH,
+    option: OLGA,
+    days: ["2026-10-12", "2026-10-14", "2026-10-17"],
+    day: "2026-10-17",
+    slots: [SLOT_C],
+  });
   mockedBook.mockResolvedValue(SLOT_B);
+});
+
+afterEach(() => {
+  vi.useRealTimers();
 });
 
 describe("«Мой план»: от шага к услуге, времени и записи", () => {
@@ -204,8 +230,70 @@ describe("«Мой план»: от шага к услуге, времени и 
     expect(within(slots).getAllByRole("button").map((b) => b.textContent)).toEqual([
       "12 октября в 10:00",
       "12 октября в 11:30",
+      // Остальные дни со свободным временем — датами; показанного дня среди них нет.
+      "14 октября, ср",
+      "17 октября, сб",
     ]);
     expect(mockedBook).not.toHaveBeenCalled();
+  });
+
+  it("другой день: шлёт номер нажатого дня и показывает его время; запись — на него", async () => {
+    const offers = await openSecondStep();
+    fireEvent.click(within(offers).getByRole("button", { name: "Консультация по режиму · Ольга" }));
+    const slots = await screen.findByTestId("plan-step-slots");
+
+    fireEvent.click(within(slots).getByRole("button", { name: "17 октября, сб" }));
+
+    const time = await screen.findByRole("button", { name: "17 октября в 12:00" });
+    expect(mockedDay).toHaveBeenCalledTimes(1);
+    expect(mockedDay).toHaveBeenCalledWith(SEARCH, 2);
+    expect(mockedChoose).toHaveBeenCalledTimes(1);
+    // Теперь на выбор — два других дня, показанный не дублируется.
+    expect(within(screen.getByTestId("plan-step-days")).getAllByRole("button").map((b) => b.textContent)).toEqual([
+      "12 октября, пн",
+      "14 октября, ср",
+    ]);
+    expect(screen.queryByRole("button", { name: "12 октября в 10:00" })).toBeNull();
+
+    fireEvent.click(time);
+    await waitFor(() => expect(mockedBook).toHaveBeenCalledWith(SEARCH, 0));
+  });
+
+  it("в выбранном дне времени уже нет — остальные дни остаются на выбор", async () => {
+    mockedDay.mockResolvedValue({
+      token: SEARCH,
+      option: OLGA,
+      days: ["2026-10-12", "2026-10-14", "2026-10-17"],
+      day: "2026-10-17",
+      slots: [],
+    });
+    const offers = await openSecondStep();
+    fireEvent.click(within(offers).getByRole("button", { name: "Консультация по режиму · Ольга" }));
+    const slots = await screen.findByTestId("plan-step-slots");
+
+    fireEvent.click(within(slots).getByRole("button", { name: "17 октября, сб" }));
+
+    await waitFor(() => expect(screen.queryByRole("button", { name: "12 октября в 10:00" })).toBeNull());
+    expect(within(screen.getByTestId("plan-step-days")).getAllByRole("button").map((b) => b.textContent)).toEqual([
+      "12 октября, пн",
+      "14 октября, ср",
+    ]);
+  });
+
+  it("свободный день один — кнопок других дней нет", async () => {
+    mockedChoose.mockResolvedValue({
+      token: SEARCH,
+      option: OLGA,
+      days: ["2026-10-12"],
+      day: "2026-10-12",
+      slots: [SLOT_A],
+    });
+    const offers = await openSecondStep();
+    fireEvent.click(within(offers).getByRole("button", { name: "Консультация по режиму · Ольга" }));
+
+    // Положительный контроль: время показано.
+    expect(await screen.findByRole("button", { name: "12 октября в 10:00" })).toBeTruthy();
+    expect(screen.queryByTestId("plan-step-days")).toBeNull();
   });
 
   it("нажатие времени записывает и перечитывает план — время записи приходит с сервера", async () => {

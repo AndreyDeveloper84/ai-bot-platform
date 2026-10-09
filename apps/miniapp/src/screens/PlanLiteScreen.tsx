@@ -48,9 +48,10 @@ import { useScreenBack } from "../hooks/useScreenBack";
 import { ApiError } from "../lib/api";
 import { fetchDecisionContext } from "../lib/customer-goals";
 import { fetchDiaryConsentGate } from "../lib/food-scanner";
-import { formatDayMonthTime, formatDuration, formatMoney } from "../lib/format";
+import { formatDateLabel, formatDayMonthTime, formatDuration, formatMoney } from "../lib/format";
 import {
   bookStepSlot,
+  chooseStepDay,
   chooseStepOption,
   getSavedPlanState,
   keepCurrentPlan,
@@ -409,7 +410,7 @@ export function PlanLiteScreen() {
       runStep(async () => {
         const found = await stepOffers(plan, stepIndex);
         const stepId = plan.steps[stepIndex]?.step_id ?? "";
-        return { stepId, token: found.token, options: found.options, chosen: null, slots: [] };
+        return { stepId, token: found.token, options: found.options, chosen: null, days: [], day: null, slots: [] };
       }, false),
     [runStep],
   );
@@ -418,8 +419,16 @@ export function PlanLiteScreen() {
     (path: StepPath, optionIndex: number) =>
       runStep(async () => {
         const found = await chooseStepOption(path.token, optionIndex);
-        return { ...path, token: found.token, chosen: found.option, slots: found.slots };
+        return slotsPath(path, found);
       }, false),
+    [runStep],
+  );
+
+  // Другой день: человек может выбрать не ближайший. Время этого дня сервер
+  // читает заново — экран его не помнит.
+  const chooseDay = useCallback(
+    (path: StepPath, dayIndex: number) =>
+      runStep(async () => slotsPath(path, await chooseStepDay(path.token, dayIndex)), false),
     [runStep],
   );
 
@@ -770,6 +779,7 @@ export function PlanLiteScreen() {
                   path={stepPath?.stepId === step.step_id ? stepPath : null}
                   onOpen={() => void openStep(status.plan, index)}
                   onChoose={(path, optionIndex) => void chooseOption(path, optionIndex)}
+                  onDay={(path, dayIndex) => void chooseDay(path, dayIndex)}
                   onBook={(path, slotIndex) => void bookSlot(path, slotIndex)}
                 />
               ))}
@@ -898,6 +908,7 @@ function SavedPlanStepRow({
   path = null,
   onOpen,
   onChoose,
+  onDay,
   onBook,
 }: {
   step: SavedPlanStep;
@@ -907,6 +918,7 @@ function SavedPlanStepRow({
   /** Нет обработчика — шаг только показывается (предложение, черновик). */
   onOpen?: () => void;
   onChoose?: (path: StepPath, optionIndex: number) => void;
+  onDay?: (path: StepPath, dayIndex: number) => void;
   onBook?: (path: StepPath, slotIndex: number) => void;
 }) {
   const [open, setOpen] = useState(false);
@@ -930,8 +942,15 @@ function SavedPlanStepRow({
             {why}
           </span>
         )}
-        {path && onChoose && onBook && (
-          <StepPathPanel label={step.label} path={path} busy={busy} onChoose={onChoose} onBook={onBook} />
+        {path && onChoose && onDay && onBook && (
+          <StepPathPanel
+            label={step.label}
+            path={path}
+            busy={busy}
+            onChoose={onChoose}
+            onDay={onDay}
+            onBook={onBook}
+          />
         )}
       </div>
       {(why || canOpen) && (
@@ -972,7 +991,25 @@ interface StepPath {
   options: StepOption[];
   /** Выбранный вариант; `null` — ещё выбирают услугу. */
   chosen: StepOption | null;
+  /** Дни со свободным временем и показанный из них. */
+  days: string[];
+  day: string | null;
   slots: string[];
+}
+
+/** Путь после ответа сервера о времени: выбранная услуга, дни и время дня. */
+function slotsPath(
+  path: StepPath,
+  found: { token: string; option: StepOption; days?: string[]; day?: string | null; slots: string[] },
+): StepPath {
+  return {
+    ...path,
+    token: found.token,
+    chosen: found.option,
+    days: found.days ?? [],
+    day: found.day ?? null,
+    slots: found.slots,
+  };
 }
 
 /** Вариант словами каталога — те же строки и в том же порядке, что в чате. */
@@ -1001,12 +1038,14 @@ function StepPathPanel({
   path,
   busy,
   onChoose,
+  onDay,
   onBook,
 }: {
   label: string;
   path: StepPath;
   busy: boolean;
   onChoose: (path: StepPath, optionIndex: number) => void;
+  onDay: (path: StepPath, dayIndex: number) => void;
   onBook: (path: StepPath, slotIndex: number) => void;
 }) {
   if (path.chosen) {
@@ -1030,6 +1069,25 @@ function StepPathPanel({
             </button>
           ))}
         </div>
+        {/* Остальные дни со свободным временем — датами; показанный день
+            кнопкой не дублируется. Слов владельца для этого места нет. */}
+        {path.days.some((day) => day !== path.day) && (
+          <div className="food-scanner-screen__cta-stack" data-testid="plan-step-days">
+            {path.days.map((day, index) =>
+              day === path.day ? null : (
+                <button
+                  key={day}
+                  type="button"
+                  className="food-scanner-diary__entry-action"
+                  disabled={busy}
+                  onClick={() => onDay(path, index)}
+                >
+                  {formatDateLabel(day)}
+                </button>
+              ),
+            )}
+          </div>
+        )}
       </div>
     );
   }

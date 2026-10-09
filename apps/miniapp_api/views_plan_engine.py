@@ -516,7 +516,7 @@ def customer_plan_save(request: HttpRequest) -> HttpResponse:
 
 
 #: Действие экрана с шагом → вид нажатия ядра.
-_STEP_ACTIONS = {"offers": "step", "choose": "offer", "book": "slot"}
+_STEP_ACTIONS = {"offers": "step", "choose": "offer", "day": "day", "book": "slot"}
 _STEP_TOKEN_RE = re.compile(r"^[0-9a-f]{8}$")
 
 #: Исход действия с шагом → отказ экрану; причины каталога идут своим именем.
@@ -547,6 +547,8 @@ def customer_plan_step(request: HttpRequest) -> HttpResponse:
       идентификатора плана, ``index`` — место шага в плане;
     * ``choose`` — выбор услуги: ``token`` — опознаватель подбора из ответа
       ``offers``, ``index`` — номер варианта;
+    * ``day`` — другой день: тот же ``token``, ``index`` — номер дня из
+      ``days``; ответ той же формы, что у ``choose``;
     * ``book`` — запись: тот же ``token``, ``index`` — номер времени.
 
     Тот же путь, что кнопками в чате (ядро общее, состояние разговора общее).
@@ -557,7 +559,8 @@ def customer_plan_step(request: HttpRequest) -> HttpResponse:
       ``plan_safety_unavailable``, каталог не спрашивается.
 
     Ответ 200 — состояние пути словами каталога: ``options`` (варианты),
-    ``slots`` (времена выбранного варианта), ``booked_at`` (время записи).
+    ``days`` и ``day`` (дни со свободным временем и показанный из них),
+    ``slots`` (времена показанного дня), ``booked_at`` (время записи).
     Идентификаторы услуги и мастера экрану не уходят.
     """
     from apps.orchestrator.plan_step_card import option_view, step_action
@@ -614,9 +617,21 @@ def customer_plan_step(request: HttpRequest) -> HttpResponse:
     )
     if done.name == "PLAN_STEP_OFFERS":
         return JsonResponse({"token": done.token, "options": [option_view(o) for o in options]})
-    if done.name == "PLAN_STEP_SLOTS" and isinstance(chosen, int) and chosen < len(options):
+    days = [d for d in state.get("days") or [] if isinstance(d, str)]
+    # «В этом дне времени уже нет» при выборе дня — не отказ пути: остальные
+    # дни по-прежнему можно выбрать, и экран получает их тем же ответом.
+    shows_day = done.name == "PLAN_STEP_SLOTS" or (
+        done.name == "PLAN_STEP_NO_SLOTS" and action == "day"
+    )
+    if shows_day and isinstance(chosen, int) and chosen < len(options):
         return JsonResponse(
-            {"token": done.token, "option": option_view(options[chosen]), "slots": slots}
+            {
+                "token": done.token,
+                "option": option_view(options[chosen]),
+                "days": days,
+                "day": state.get("day") if isinstance(state.get("day"), str) else None,
+                "slots": slots,
+            }
         )
     if done.name == "PLAN_STEP_BOOKED" and index < len(slots):
         return JsonResponse({"booked_at": slots[index]})
