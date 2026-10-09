@@ -243,6 +243,7 @@ function DirectionSection({
                 ? `${formatPrice(service.offer.price)} ${COPY.priceUnit} · ${service.offer.duration_minutes} ${COPY.durationUnit} ✓`
                 : COPY.notConfigured}
             </span>
+            <span className="master-services__row-chevron" aria-hidden="true">›</span>
           </button>
         ))}
     </section>
@@ -651,7 +652,6 @@ export function MasterServicesScreen() {
           <h2 className="master-services__section-title">{COPY.pricesTitle}</h2>
           <div className="master-services__progress">
             <p>{`Настроено ${state.configured} из ${state.selected}`}</p>
-            <p>{`Осталось ${Math.max(state.selected - state.configured, 0)}`}</p>
           </div>
           {state.services.length === 0 ? (
             <p className="master-services__empty">{COPY.noServices}</p>
