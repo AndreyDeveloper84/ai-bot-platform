@@ -117,6 +117,31 @@ def test_b3_after_a_withdrawal_and_a_new_grant_the_new_grant_is_named(tenant) ->
     assert datetime.fromisoformat(basis["granted_at"]) == now - timedelta(days=1)
 
 
+def test_b3_of_two_active_grants_the_latest_is_named(tenant) -> None:
+    """Две оболочки человека: на одной согласие давнее и действует, на другой —
+    отозвано и дано снова. Каталог знает отзыв; раннее время он бы отверг,
+    хотя человек согласен. Называется самая поздняя действующая запись."""
+    from apps.tenancy.models import Tenant
+
+    now = timezone.now()
+    first_shell = _bare_person_shell(tenant, PERSON)
+    other = Tenant.objects.create(slug="plan-basis-2967-other", name="Other")
+    second_shell = BotUser.all_tenants.create(tenant=other, channel="max", channel_user_id=PERSON)
+    early = _grant(first_shell, version="privacy-v1.0")
+    _captured(early, now - timedelta(days=30))
+    withdrawn = _grant(second_shell, version="privacy-v1.0")
+    _captured(withdrawn, now - timedelta(days=20))
+    ConsentRecord.all_tenants.filter(pk=withdrawn.pk).update(withdrawn_at=now - timedelta(days=10))
+    late = _grant(second_shell, version="privacy-v2.0")
+    _captured(late, now - timedelta(days=1))
+
+    basis = plan_gate.plan_consent_basis(first_shell)
+
+    assert basis is not None
+    assert datetime.fromisoformat(basis["granted_at"]) == now - timedelta(days=1)
+    assert basis["document_version"] == "privacy-v2.0"
+
+
 def test_b4_no_grant_no_basis(tenant) -> None:
     shell = _bare_person_shell(tenant, PERSON)
     other = _bare_person_shell(tenant, "2967202")
