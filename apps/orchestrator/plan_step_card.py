@@ -89,6 +89,12 @@ MAX_SLOTS = 8
 #: На сколько дней вперёд ищется ближайший день со свободным временем.
 SLOT_HORIZON_DAYS = 14
 
+#: Отказ каталога по основанию обработки в ручке записи → имя гейта плана.
+_BASIS_REFUSALS = {
+    "DELETION_IN_PROGRESS": "PLAN_DELETION_REQUESTED",
+    "CONSENT_REQUIRED": "PLAN_CONSENT_REQUIRED",
+}
+
 TurnSafetyProvider = Callable[[], Any]
 
 
@@ -604,6 +610,11 @@ def _book_slot(
         # Отказ каталога — его именем: слот занят, котировка изменилась, шаг
         # не допущен, нужна проверка здоровья, гейт согласия.
         code = str(exc.code or PLAN_STEP_BOOKING_FAILED)
+        # Отказ по основанию обработки — тем же именем, что у остальных
+        # входов плана (DRF-2967): для человека это одна причина, и двух
+        # имён на один отказ быть не должно.
+        if code in _BASIS_REFUSALS:
+            return _named(_BASIS_REFUSALS[code])
         reason = (exc.details or {}).get("reason") if isinstance(exc.details, dict) else None
         logger.info(
             "orchestrator.plan_step_card.booking_refused trace=%s code=%s reason=%s",

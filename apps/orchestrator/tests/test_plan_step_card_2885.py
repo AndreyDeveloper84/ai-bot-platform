@@ -569,6 +569,43 @@ class TestFromATimeToABooking:
         assert result.reply_text == "PLAN_STEP_EXPIRED · тест"
         assert booking.created == []
 
+    @pytest.mark.parametrize(
+        ("code", "shown"),
+        [
+            ("DELETION_IN_PROGRESS", "PLAN_DELETION_REQUESTED"),
+            ("CONSENT_REQUIRED", "PLAN_CONSENT_REQUIRED"),
+        ],
+    )
+    def test_b9_a_refusal_on_the_basis_of_processing_has_the_gates_name(
+        self, booking: FakeBooking, code: str, shown: str
+    ) -> None:
+        """Одна причина для человека — одно имя: то же, что у гейта плана."""
+        conversation = _at_slots()
+        booking.error = booking_mod.BookingBadRequestError(
+            "refused", status_code=423, code=code, details={"reason": "withdrawn"}
+        )
+
+        result = _tap(SLOT0, conversation)
+
+        assert result.reply_text == f"{shown} · тест"
+        assert plan_gate.PLAN_DELETION_REQUESTED == "PLAN_DELETION_REQUESTED"
+        assert plan_gate.PLAN_CONSENT_REQUIRED == "PLAN_CONSENT_REQUIRED"
+
+    @pytest.mark.parametrize("tap", [OFFER0, SLOT0])
+    def test_b10_a_tap_with_no_state_at_all_is_stale_and_asks_no_one(
+        self, plan: FakePlan, booking: FakeBooking, tap: str
+    ) -> None:
+        """Состояние стёрто (например, отзывом согласия) — старая кнопка
+        услуги или времени ничего не делает."""
+        conversation = _at_slots()
+        before = (len(plan.resolved), len(booking.slot_calls), len(booking.created))
+        conversation.skill_state.pop(step.STATE_KEY)
+
+        result = _tap(tap, conversation)
+
+        assert result.reply_text == "PLAN_STEP_EXPIRED · тест"
+        assert (len(plan.resolved), len(booking.slot_calls), len(booking.created)) == before
+
 
 # ─── кнопки под планом и семейство нажатий ───────────────────────────────
 
