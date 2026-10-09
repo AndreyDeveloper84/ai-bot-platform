@@ -488,7 +488,7 @@ function BookingActions({
       <section className="booking-detail__actions" aria-label="Действия с записью">
         <DestructiveConfirmation
           title="Отменить запись?"
-          body="Запись клиента будет отменена. Это действие нельзя отменить."
+          body="Вы действительно хотите отменить запись клиента? Это действие нельзя отменить."
           confirmLabel="Отменить запись"
           busy={mutating}
           onConfirm={() => void cancel()}
