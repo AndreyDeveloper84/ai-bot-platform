@@ -23,6 +23,7 @@
 * p9 — настоящая услуга не записывается; услуга с расспросом не выбирается;
 * p10 — начатое на экране продолжается в чате;
 * p11 — повторное нажатие времени шлёт тот же ключ идемпотентности;
+* y1–y3 — выбор другого дня: его время, запись на него, день без времени;
 * b1–b3 — время действующей записи у шага в чтении плана.
 """
 
@@ -182,7 +183,13 @@ def test_p2_choose_then_book_each_call_with_the_last_turns_verdict_and_the_basis
     booked = _step(client, person, "book", SEARCH8, 0)
 
     assert chosen.status_code == 200, chosen.content[:300]
-    assert chosen.json() == {"token": SEARCH8, "option": OPTION, "slots": [SLOT]}
+    assert chosen.json() == {
+        "token": SEARCH8,
+        "option": OPTION,
+        "days": ["2026-10-12"],
+        "day": "2026-10-12",
+        "slots": [SLOT],
+    }
     assert booked.status_code == 200, booked.content[:300]
     assert booked.json() == {"booked_at": SLOT}
 
@@ -449,6 +456,81 @@ def test_p11_a_second_press_on_the_time_sends_the_same_idempotency_key(
     assert again.json() == {"booked_at": SLOT}
     assert len(booking.created) == 2
     assert booking.created[0]["idempotency_key"] == booking.created[1]["idempotency_key"]
+
+
+# ─── другой день ─────────────────────────────────────────────────────────
+
+LATER_DAY = "2026-10-14"
+LATER_SLOT = "2026-10-14T15:00:00+03:00"
+
+
+def _two_days(booking: Booking, monkeypatch: pytest.MonkeyPatch, later: list[str]) -> None:
+    free = {"2026-10-12": [SLOT], LATER_DAY: later}
+    monkeypatch.setattr(
+        booking,
+        "get_available_times",
+        lambda **kwargs: [SimpleNamespace(datetime=iso) for iso in free.get(kwargs["date"], [])],
+    )
+
+
+def test_y1_another_day_is_shown_with_its_times_and_then_booked(
+    client: Client, tenant, wire, person: str, catalog: StepCatalog, booking: Booking, monkeypatch
+) -> None:
+    _two_days(booking, monkeypatch, [LATER_SLOT])
+    _turn(client, person)
+    _step(client, person, "offers", PLAN8, 0)
+    chosen = _step(client, person, "choose", SEARCH8, 0)
+    assert (chosen.json()["days"], chosen.json()["day"]) == (
+        ["2026-10-12", LATER_DAY],
+        "2026-10-12",
+    )
+
+    day = _step(client, person, "day", SEARCH8, 1)
+    booked = _step(client, person, "book", SEARCH8, 0)
+
+    assert day.status_code == 200, day.content[:300]
+    assert day.json() == {
+        "token": SEARCH8,
+        "option": OPTION,
+        "days": ["2026-10-12", LATER_DAY],
+        "day": LATER_DAY,
+        "slots": [LATER_SLOT],
+    }
+    assert booked.json() == {"booked_at": LATER_SLOT}
+    assert booking.created[0]["start_datetime"] == LATER_SLOT
+    assert len(catalog.resolved) == 1  # выбор услуги не повторялся
+
+
+def test_y2_a_day_whose_time_is_gone_still_offers_the_other_days(
+    client: Client, tenant, wire, person: str, catalog: StepCatalog, booking: Booking, monkeypatch
+) -> None:
+    _two_days(booking, monkeypatch, [LATER_SLOT])
+    _turn(client, person)
+    _step(client, person, "offers", PLAN8, 0)
+    _step(client, person, "choose", SEARCH8, 0)
+    _two_days(booking, monkeypatch, [])
+
+    day = _step(client, person, "day", SEARCH8, 1)
+
+    assert day.status_code == 200, day.content[:300]
+    assert (day.json()["day"], day.json()["slots"]) == (LATER_DAY, [])
+    assert day.json()["days"] == ["2026-10-12", LATER_DAY]
+
+
+def test_y3_a_day_action_is_gated_and_an_unknown_day_is_stale(
+    client: Client, tenant, wire, person: str, catalog: StepCatalog, booking: Booking, monkeypatch
+) -> None:
+    _two_days(booking, monkeypatch, [LATER_SLOT])
+    _turn(client, person)
+    _step(client, person, "offers", PLAN8, 0)
+    _step(client, person, "choose", SEARCH8, 0)
+
+    unknown = _step(client, person, "day", SEARCH8, 5)
+    _withdraw(person)
+    gated = _step(client, person, "day", SEARCH8, 1)
+
+    assert (unknown.status_code, unknown.json()["error"]) == (409, "plan_step_expired")
+    assert (gated.status_code, gated.json()["error"]) == (403, "plan_consent_required")
 
 
 # ─── время записи у шага в чтении плана ──────────────────────────────────
