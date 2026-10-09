@@ -364,6 +364,34 @@ def test_g11_keeping_the_current_plan_stays_open(
     assert catalog.replaced == []  # empty-assert-ok: строкой выше — архив, не замена
 
 
+# ─── шаг → услуга → время: все три нажатия закрыты ───────────────────────────
+
+STEP_TAPS = {
+    "step": "cb:plan:step:7c1d2e3f:0",
+    "offer": "cb:plan:offer:7c1d2e3f:0",
+    "slot": "cb:plan:slot:7c1d2e3f:0",
+}
+
+
+@pytest.mark.parametrize("tap", sorted(STEP_TAPS))
+@pytest.mark.parametrize("state", sorted(BLOCKED))
+def test_g12_no_step_tap_passes_without_a_basis(
+    state: str, tap: str, client: Client, tenant, wire, catalog: FakeCatalog
+) -> None:
+    """Гейт — первая проверка обработчика шага: отказ назван раньше, чем
+    читается состояние («устарело») и чем спрошен каталог."""
+    from apps.orchestrator import plan_step_card
+
+    person = _person_in(state, client, tenant, catalog)
+    composed, read = len(catalog.composed), catalog.read
+
+    answer = _answer(_ask(client, STEP_TAPS[tap], as_user=person))
+
+    assert answer == f"{BLOCKED[state]} · {card.TEST_MARK}"
+    assert answer != f"{plan_step_card.PLAN_STEP_EXPIRED} · {card.TEST_MARK}"
+    assert (len(catalog.composed), catalog.read) == (composed, read)
+
+
 # ─── обсуждение, открытое до отзыва ──────────────────────────────────────────
 
 
