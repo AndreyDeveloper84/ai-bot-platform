@@ -372,6 +372,7 @@ export function MasterWorkingHoursScreen() {
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
   const [reason, setReason] = useState("");
+  const [requestDate, setRequestDate] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [snack, setSnack] = useState<string | null>(null);
@@ -440,6 +441,7 @@ export function MasterWorkingHoursScreen() {
     setFrom("");
     setTo("");
     setReason("");
+    setRequestDate(null);
     // Ошибка принадлежала листу: оставить её на экране недели значило бы
     // показать «alert» без того, к чему он относится.
     setSaveError(null);
@@ -460,6 +462,7 @@ export function MasterWorkingHoursScreen() {
       start: row?.start_time ?? "",
       end: row?.end_time ?? "",
     });
+    setRequestDate(isoDate(nextDateFor(weekday)));
     setFrom(working ? (row.start_time as string) : "00:00");
     setTo(working ? (row.end_time as string) : "23:59");
     setReason("");
@@ -538,7 +541,7 @@ export function MasterWorkingHoursScreen() {
   const sendRequest = async (origin: "day" | "unavailable") => {
     if (!draft || busy) return;
     const wholeDay = origin === "day";
-    const date = isoDate(nextDateFor(draft.weekday));
+    const date = requestDate ?? isoDate(nextDateFor(draft.weekday));
     const startHm = wholeDay ? "00:00" : from;
     const endHm = wholeDay ? "23:59" : to;
     if (!startHm || !endHm || startHm >= endHm) {
@@ -682,12 +685,22 @@ export function MasterWorkingHoursScreen() {
           busy={busy}
           onRetry={() => void load()}
           onEditRejected={(item) => {
-            const raw = item.requested_start ? new Date(item.requested_start) : null;
+            const startIso = item.requested_start;
+            const endIso = item.requested_end;
+            const raw = startIso ? new Date(startIso) : null;
             const weekday =
               raw && !Number.isNaN(raw.getTime())
                 ? (raw.getDay() + 6) % 7
                 : todayWeekday();
             openUnavailable(weekday, null);
+            if (startIso && /^\d{4}-\d{2}-\d{2}T/.test(startIso)) {
+              setRequestDate(startIso.slice(0, 10));
+              setFrom(startIso.slice(11, 16));
+            }
+            if (endIso && /^\d{4}-\d{2}-\d{2}T/.test(endIso)) {
+              setTo(endIso.slice(11, 16));
+            }
+            setReason(item.reason_text ?? "");
           }}
         />
       ) : null}
@@ -747,6 +760,7 @@ export function MasterWorkingHoursScreen() {
       {sheet?.kind === "unavailable" && draft && (
         <UnavailableSheet
           weekday={draft.weekday}
+          dateIso={requestDate}
           from={from}
           to={to}
           reason={reason}
@@ -1046,6 +1060,7 @@ function DaySheet({
 /** Экран 3 макета — «Недоступно (часть дня)». */
 function UnavailableSheet({
   weekday,
+  dateIso,
   from,
   to,
   reason,
@@ -1059,6 +1074,7 @@ function UnavailableSheet({
   onClose,
 }: {
   weekday: number;
+  dateIso: string | null;
   from: string;
   to: string;
   reason: string;
@@ -1071,7 +1087,7 @@ function UnavailableSheet({
   onSave: () => void;
   onClose: () => void;
 }) {
-  const date = nextDateFor(weekday);
+  const date = dateIso ? new Date(`${dateIso}T12:00:00`) : nextDateFor(weekday);
   return (
     <SheetChrome
       headlineId="working-hours-unavailable-headline"
