@@ -52,6 +52,7 @@ import {
   CONTINUE_LATER_LABEL,
   SAVED_MESSAGE,
   SEMANTIC_NOTE,
+  availabilityWindowText,
   conflictsFrom,
   dayError,
   defaultInterval,
@@ -303,6 +304,33 @@ describe("правила §13.3 и чистые помощники", () => {
     expect(
       conflictsFrom(new ApiError(409, "x", "y", { conflicts: [noDuration] })),
     ).toEqual([]);
+  });
+
+  it("availability lifecycle formats salon wall-clock without raw ISO/device conversion", () => {
+    const item = {
+      request_id: "r-1",
+      requested_start: "2026-10-12T10:00:00+03:00",
+      requested_end: "2026-10-12T14:00:00+03:00",
+      reason_class: "personal",
+      reason_text: "",
+      status: "pending",
+      decided_at: null,
+      decided_by_name: null,
+      rejection_reason: null,
+    };
+    expect(availabilityWindowText(item)).toBe("12 октября · 10:00–14:00");
+    expect(
+      availabilityWindowText({
+        ...item,
+        requested_end: "2026-10-13T09:30:00+03:00",
+      }),
+    ).toBe("12 октября · 10:00 — 13 октября · 09:30");
+    expect(
+      availabilityWindowText({
+        ...item,
+        requested_start: "broken",
+      }),
+    ).toBe("Период не удалось прочитать");
   });
 
   it("horizonFrom называет горизонт, когда сервер его прислал", () => {
