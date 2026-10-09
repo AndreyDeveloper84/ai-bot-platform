@@ -32,6 +32,8 @@ logger = logging.getLogger(__name__)
 _DECISION_PATH = "internal/me/plan/decision/"
 _PLAN_PATH = "internal/me/plan/"
 _LABELS_PATH = "internal/me/plan/capability-labels/"
+_REPLACE_PATH = "internal/me/plan/replace/"
+_STATE_PATH = "internal/me/plan/state/"
 DEFAULT_TIMEOUT_S = 10.0
 
 
@@ -76,6 +78,20 @@ class PlanGoalNotFoundError(PlanEngineError):
 
 class PlanCapabilityNotConfirmedError(PlanEngineError):
     """409 ``PLAN_CAPABILITY_NOT_CONFIRMED`` — способность шага больше не в знании."""
+
+
+class PlanReplacementTargetChangedError(PlanEngineError):
+    """409 ``PLAN_REPLACEMENT_TARGET_CHANGED`` — действующим стал другой план
+    (или никакой): «да» человека относилось не к нему."""
+
+
+class PlanTransitionRefusedError(PlanEngineError):
+    """409 ``PLAN_TRANSITION_REFUSED`` — план уже не в том состоянии: это не
+    предложение (замещено новым или отклонено), либо переход не разрешён."""
+
+
+class PlanNotFoundError(PlanEngineError):
+    """404 ``plan_not_found`` — план не этого человека или его нет."""
 
 
 class PlanEngineContractError(PlanEngineError):
@@ -175,9 +191,62 @@ class PlanEngineHttpClient:
         правок, подтверждение, тройка хода подтверждения, ограничения. Ответ —
         ``{"plan": <документ>, "created": bool}``; повтор той же команды каталог
         узнаёт сам (``created=False``), второго плана не будет.
+
+        У цели уже есть действующий план — каталог сохраняет новый как
+        ПРЕДЛОЖЕНИЕ (``plan.status == "proposed"``) и называет, какой план оно
+        заменит: ``replaces.plan_id``. Действующим его делает только
+        :meth:`replace_plan` — отдельным подтверждением человека.
         """
         data = self._post(_PLAN_PATH, external_user_id=external_user_id, body=command, op="save")
         if not isinstance(data.get("plan"), dict) or not isinstance(data.get("created"), bool):
+            raise PlanEngineUnavailableError("plan_missing")
+        return data
+
+    def replace_plan(
+        self,
+        *,
+        external_user_id: str,
+        plan_id: str,
+        replaces_plan_id: str,
+        safety_state: str,
+        safety_policy_version: str,
+        evaluated_at_revision: int,
+    ) -> dict[str, Any]:
+        """``POST internal/me/plan/replace/`` — подтверждённая замена плана.
+
+        ``replaces_plan_id`` — план, о замене которого человек сказал «да».
+        Ответ ``{"plan": <документ>, "replaced": bool}``; ``replaced=False`` —
+        замена уже выполнена (повторное нажатие), не ошибка.
+        """
+        data = self._post(
+            _REPLACE_PATH,
+            external_user_id=external_user_id,
+            body={
+                "plan_id": plan_id,
+                "replaces_plan_id": replaces_plan_id,
+                "safety_state": safety_state,
+                "safety_policy_version": safety_policy_version,
+                "evaluated_at_revision": evaluated_at_revision,
+            },
+            op="replace",
+        )
+        if not isinstance(data.get("plan"), dict) or not isinstance(data.get("replaced"), bool):
+            raise PlanEngineUnavailableError("plan_missing")
+        return data
+
+    def archive_plan(self, *, external_user_id: str, plan_id: str) -> dict[str, Any]:
+        """``POST internal/me/plan/state/`` c ``archived`` — отказ от предложения.
+
+        Действующий план при этом не меняется. Повтор — не ошибка: каталог
+        отвечает тем же планом.
+        """
+        data = self._post(
+            _STATE_PATH,
+            external_user_id=external_user_id,
+            body={"plan_id": plan_id, "state": "archived"},
+            op="state",
+        )
+        if not isinstance(data.get("plan"), dict):
             raise PlanEngineUnavailableError("plan_missing")
         return data
 
@@ -330,8 +399,14 @@ def _refusal(response: httpx.Response) -> PlanEngineError:
         return PlanIdempotencyConflictError("plan_idempotency_conflict")
     if response.status_code == 409 and code == "PLAN_CAPABILITY_NOT_CONFIRMED":
         return PlanCapabilityNotConfirmedError("plan_capability_not_confirmed")
+    if response.status_code == 409 and code == "PLAN_REPLACEMENT_TARGET_CHANGED":
+        return PlanReplacementTargetChangedError("plan_replacement_target_changed")
+    if response.status_code == 409 and code == "PLAN_TRANSITION_REFUSED":
+        return PlanTransitionRefusedError("plan_transition_refused")
     if response.status_code == 404 and reason == "goal_not_found":
         return PlanGoalNotFoundError("goal_not_found")
+    if response.status_code == 404 and (reason == "plan_not_found" or code == "NOT_FOUND"):
+        return PlanNotFoundError("plan_not_found")
     return PlanEngineUnavailableError(f"unexpected 4xx: HTTP {response.status_code} {code}")
 
 

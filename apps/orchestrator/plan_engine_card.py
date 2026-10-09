@@ -84,6 +84,21 @@ CB_DISCUSS_PREFIX = "cb:plan:discuss:"
 #: ``saved`` — обсуждают сохранённый план; восемь знаков — предложение.
 DISCUSS_SAVED = "saved"
 DISCUSS_CALLBACK_RE = re.compile(r"^cb:plan:discuss:(saved|[0-9a-f]{8})$")
+#: Замена действующего плана предложением: восемь знаков — начало id предложения.
+CB_REPLACE_PREFIX = "cb:plan:replace:"
+CB_KEEP_PREFIX = "cb:plan:keep:"
+REPLACE_CALLBACK_RE = re.compile(r"^cb:plan:(replace|keep):([0-9a-f]{8})$")
+
+#: Слова владельца — лист решений 07.10, п.15 («Полная замена»).
+QUESTION_REPLACE = "Заменить текущий план новым? Прежний останется в истории"
+BUTTON_REPLACE = "Заменить план"
+BUTTON_KEEP = "Оставить текущий"
+
+#: Предложение, ждущее ответа о замене, — свой ключ в ``Conversation.skill_state``.
+REPLACE_KEY = "plan_engine_replace"
+#: Имена исходов замены — слов владельца для них нет.
+PLAN_REPLACED = "PLAN_REPLACED"
+PLAN_KEPT = "PLAN_KEPT"
 
 #: Слова владельца — лист решений 07.10, п.15.
 QUESTION_SAVE = "Сохранить выбранные шаги в мой план?"
@@ -160,6 +175,10 @@ def trigger_visible(bot_user: Any) -> bool:
 
 def is_save_callback(text: str) -> bool:
     return bool(SAVE_CALLBACK_RE.match((text or "").strip()))
+
+
+def is_replace_callback(text: str) -> bool:
+    return bool(REPLACE_CALLBACK_RE.match((text or "").strip()))
 
 
 def is_discuss_callback(text: str) -> bool:
@@ -878,7 +897,7 @@ def try_handle_plan_save(
     except KeyError:
         return _named(PLAN_PROPOSAL_EXPIRED)
     try:
-        PlanEngineHttpClient().save_plan(
+        saved = PlanEngineHttpClient().save_plan(
             external_user_id=external_user_id_for(bot_user), command=command
         )
     except PlanSaveSafetyBlockedError:
@@ -911,12 +930,187 @@ def try_handle_plan_save(
     # узнаёт её сам — второго плана не будет. Уходит оно со следующей сборкой.
     # Обсуждение закрыто: обсуждали предложение, а оно стало планом.
     _write_discussion(conversation, None)
+    asked = _replacement_question(conversation, saved)
+    if asked is not None:
+        return asked
+    _write_replace(conversation, None)
     return _named(PLAN_SAVED)
+
+
+# ─── предложение и замена действующего плана ─────────────────────────────
+#
+# У цели уже есть действующий план — каталог сохраняет новый как ПРЕДЛОЖЕНИЕ
+# и действующий не трогает. Действующим предложение делает только отдельное
+# «да» человека (решение владельца: «сохранённый черновик не вытесняет
+# действующий план без подтверждения замены»). «Да» относится к конкретному
+# плану: если за это время действующим стал другой, каталог откажет.
+
+
+def _hex8(plan_id: Any) -> str:
+    return str(plan_id or "").replace("-", "")[:8].lower()
+
+
+def _read_replace(conversation: Any) -> dict[str, Any] | None:
+    state = getattr(conversation, "skill_state", None)
+    row = state.get(REPLACE_KEY) if isinstance(state, dict) else None
+    if not isinstance(row, dict):
+        return None
+    if not isinstance(row.get("plan_id"), str) or not isinstance(row.get("replaces_plan_id"), str):
+        return None
+    return row
+
+
+def _write_replace(conversation: Any, value: dict[str, Any] | None) -> None:
+    from apps.orchestrator.open_question import write_conversation_state
+
+    if value is None and _read_replace(conversation) is None:
+        return
+    write_conversation_state(conversation, REPLACE_KEY, value)
+
+
+def _replacement_question(conversation: Any, saved: Any) -> SkillResult | None:
+    """Вопрос о замене, если сохранённое — предложение; иначе ``None``.
+
+    Предложение каталог опознаёт двумя полями сразу: статус ``proposed`` и
+    ``replaces.plan_id``. Одно без другого вопросом не становится: спрашивать
+    о замене плана, которого не назвали, нельзя.
+    """
+    from apps.orchestrator.discovery import keyboard_envelope
+
+    if not isinstance(saved, dict):
+        return None
+    plan = saved.get("plan")
+    replaces = saved.get("replaces")
+    if not isinstance(plan, dict) or plan.get("status") != "proposed":
+        return None
+    plan_id = plan.get("plan_id")
+    replaces_plan_id = replaces.get("plan_id") if isinstance(replaces, dict) else None
+    if (
+        not isinstance(plan_id, str)
+        or not isinstance(replaces_plan_id, str)
+        or not replaces_plan_id
+    ):
+        return None
+    token = _hex8(plan_id)
+    if len(token) != 8:
+        return None
+    _write_replace(conversation, {"plan_id": plan_id, "replaces_plan_id": replaces_plan_id})
+    kind = "plan_engine_replace_question"
+    return SkillResult(
+        reply_text=QUESTION_REPLACE,
+        action_type=kind,
+        action_data=keyboard_envelope(
+            [
+                {"label": BUTTON_REPLACE, "callback": f"{CB_REPLACE_PREFIX}{token}"},
+                {"label": BUTTON_KEEP, "callback": f"{CB_KEEP_PREFIX}{token}"},
+            ]
+        ),
+        meta={"reply_kind": kind, "plan_outcome": "PLAN_PROPOSED"},
+    )
+
+
+def try_handle_plan_replace(
+    *,
+    text: str,
+    bot_user: Any,
+    conversation: Any,
+    trace_id: str,
+    turn_safety: TurnSafetyProvider | None,
+) -> SkillResult | None:
+    """«Заменить план» и «Оставить текущий»; ``None`` — не наше (форма / нет входа).
+
+    * «Заменить план» — замена в каталоге с тройкой хода НАЖАТИЯ. Повторное
+      нажатие дубля не даёт: каталог отвечает «уже заменено».
+    * «Оставить текущий» — предложение уходит в архив; действующий план не
+      меняется. Вердикта не требует: это отказ, а не расширение действующего.
+      По той же причине открыт под гейтом согласия (DRF-2967), которым
+      закрыта замена.
+    """
+    match = REPLACE_CALLBACK_RE.match((text or "").strip())
+    if match is None or not engine_enabled():
+        return None
+
+    from apps.integrations.ayla import external_user_id_for
+    from apps.integrations.ayla.plan_engine_client import (
+        PlanEngineContractError,
+        PlanEngineError,
+        PlanEngineHttpClient,
+        PlanNotFoundError,
+        PlanReplacementTargetChangedError,
+        PlanSaveSafetyBlockedError,
+        PlanTransitionRefusedError,
+    )
+
+    action, token = match.group(1), match.group(2)
+    if action == "replace":
+        # DRF-2967 — замена делает предложение действующим планом: это запись.
+        # Под отзывом согласия или заявкой на удаление она закрыта — до чтения
+        # состояния и до каталога. «Оставить текущий» гейтом не закрыт
+        # намеренно: это отказ от предложения, данных о человеке после него
+        # становится меньше, и убрать висящее предложение ему надо дать.
+        refusal = _basis_refusal(bot_user)
+        if refusal is not None:
+            return refusal
+    waiting = _read_replace(conversation)
+    if waiting is None or _hex8(waiting["plan_id"]) != token:
+        return _named(PLAN_PROPOSAL_EXPIRED)
+
+    client = PlanEngineHttpClient()
+    external_user_id = external_user_id_for(bot_user)
+    try:
+        if action == "keep":
+            client.archive_plan(external_user_id=external_user_id, plan_id=waiting["plan_id"])
+            _write_replace(conversation, None)
+            return _named(PLAN_KEPT)
+
+        safety = turn_safety() if turn_safety is not None else None
+        if safety is None:
+            return _named(SAFETY_INPUT_UNAVAILABLE)
+        client.replace_plan(
+            external_user_id=external_user_id,
+            plan_id=waiting["plan_id"],
+            replaces_plan_id=waiting["replaces_plan_id"],
+            safety_state=safety.safety_state,
+            safety_policy_version=safety.safety_policy_version,
+            evaluated_at_revision=safety.evaluated_at_revision,
+        )
+    except PlanSaveSafetyBlockedError:
+        # Вопрос остаётся в силе: человек может ответить на следующем ходе.
+        return _named("PLAN_SAVE_SAFETY_BLOCKED")
+    except PlanReplacementTargetChangedError:
+        _write_replace(conversation, None)
+        return _named("PLAN_REPLACEMENT_TARGET_CHANGED")
+    except (PlanTransitionRefusedError, PlanNotFoundError):
+        # Это уже не предложение (замещено новым, отклонено) или его нет.
+        _write_replace(conversation, None)
+        return _named(PLAN_PROPOSAL_EXPIRED)
+    except PlanEngineContractError as exc:
+        logger.error(
+            "orchestrator.plan_engine_card.replace_contract_violation trace=%s reason=%s",
+            trace_id,
+            exc.reason,
+        )
+        return _named("PLAN_CONTRACT_VIOLATION")
+    except PlanEngineError as exc:
+        logger.warning(
+            "orchestrator.plan_engine_card.replace_failed trace=%s class=%s",
+            trace_id,
+            type(exc).__name__,
+        )
+        return _named(PLAN_ENGINE_UNAVAILABLE)
+
+    # Состояние вопроса оставляем: повторное «Заменить план» шлёт ТО ЖЕ
+    # подтверждение, и каталог сам отвечает «уже заменено». Уходит оно со
+    # следующим сохранением.
+    return _named(PLAN_REPLACED)
 
 
 __all__ = [
     "BUTTON_COMPOSE",
     "BUTTON_DISCUSS",
+    "BUTTON_KEEP",
+    "BUTTON_REPLACE",
+    "QUESTION_REPLACE",
     "DISCUSS_OPENING",
     "BUTTON_EDIT",
     "CB_COMPOSE",
@@ -927,6 +1121,8 @@ __all__ = [
     "discussed_plan",
     "discussion_allows_removal",
     "is_discuss_callback",
+    "is_replace_callback",
+    "try_handle_plan_replace",
     "remove_step_for_request",
     "render_plan_discussion_block",
     "try_handle_plan_discuss",
