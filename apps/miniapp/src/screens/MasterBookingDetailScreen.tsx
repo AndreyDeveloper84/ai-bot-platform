@@ -39,11 +39,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useLocation, useParams } from "react-router-dom";
 
-import { SystemState } from "../components/master/SystemState";
+import { DestructiveConfirmation, SystemState } from "../components/master/SystemState";
 import { MasterTabBar } from "../components/MasterTabBar";
 import { useScreenBack } from "../hooks/useScreenBack";
 import {
+  actOnMasterBooking,
   getMasterBooking,
+  getMasterBookingSlots,
   type BookingTemporalState,
   type MasterBookingDetail,
 } from "../lib/master-api";
@@ -159,7 +161,7 @@ export function MasterBookingDetailScreen() {
       ) : phase.kind === "error" ? (
         <SystemState kind="load_error" what="booking" err={phase.err} busy={busy} onRetry={reload} />
       ) : (
-        <DetailBody data={phase.data} busy={busy} onRecheck={reload} />
+        <DetailBody data={phase.data} busy={busy} onRecheck={reload} onReadback={load} />
       )}
       <MasterTabBar scheduleHasPendingChange={false} />
     </div>
@@ -174,10 +176,12 @@ function DetailBody({
   data,
   busy,
   onRecheck,
+  onReadback,
 }: {
   data: MasterBookingDetail;
   busy: boolean;
   onRecheck: () => void;
+  onReadback: () => Promise<void>;
 }) {
   // Ruling §61 (М-6 ж): длительность всегда минутами, «1 ч» не переводим.
   const duration = Number.isFinite(data.duration_min)
@@ -214,6 +218,8 @@ function DetailBody({
           onRecheck={onRecheck}
         />
       )}
+
+      <BookingActions data={data} onReadback={onReadback} />
     </main>
   );
 }
@@ -313,6 +319,233 @@ function StateBlock({
   );
 }
 
+type ActionMode = "idle" | "cancel" | "reschedule" | "pending" | "stale";
+type PendingTarget =
+  | { kind: "cancel" }
+  | { kind: "reschedule"; startAt: string }
+  | null;
+
+function BookingActions({
+  data,
+  onReadback,
+}: {
+  data: MasterBookingDetail;
+  onReadback: () => Promise<void>;
+}) {
+  const actionable = data.status === "confirmed" && data.temporal_state === "upcoming";
+  const [mode, setMode] = useState<ActionMode>("idle");
+  const [mutating, setMutating] = useState(false);
+  const [pendingTarget, setPendingTarget] = useState<PendingTarget>(null);
+  const [attemptedVersion, setAttemptedVersion] = useState<number | null>(null);
+  const [date, setDate] = useState(data.start_at.slice(0, 10));
+  const [slots, setSlots] = useState<Array<{ time: string; start_at: string | null }>>([]);
+  const [slotsBusy, setSlotsBusy] = useState(false);
+  const [slotsError, setSlotsError] = useState("");
+  const [selectedStart, setSelectedStart] = useState<string | null>(null);
+  const [actionError, setActionError] = useState("");
+
+  useEffect(() => {
+    if (pendingTarget?.kind === "cancel" && isCancelled(data)) {
+      setPendingTarget(null);
+      setMode("idle");
+    }
+    if (pendingTarget?.kind === "reschedule" && data.start_at === pendingTarget.startAt) {
+      setPendingTarget(null);
+      setMode("idle");
+    }
+    if (mode === "stale" && attemptedVersion !== null && data.appointment_version !== attemptedVersion) {
+      setMode("idle");
+      setAttemptedVersion(null);
+    }
+  }, [attemptedVersion, data.appointment_version, data.start_at, data.status, mode, pendingTarget]);
+
+  if (!actionable && mode === "idle") return null;
+
+  const readback = async () => {
+    await onReadback();
+  };
+
+  const handleResult = async (
+    result: Awaited<ReturnType<typeof actOnMasterBooking>>,
+    target: PendingTarget,
+    version: number | null,
+  ) => {
+    if (result.outcome === "committed") {
+      setPendingTarget(target);
+      setMode("pending");
+      await readback();
+      return;
+    }
+    if (result.outcome === "pending") {
+      setPendingTarget(target);
+      setMode("pending");
+      return;
+    }
+    if (result.outcome === "conflict") {
+      setAttemptedVersion(version);
+      setMode("stale");
+      await readback();
+      return;
+    }
+    setActionError("Не удалось выполнить действие. Обновите запись и попробуйте снова.");
+    setMode("idle");
+  };
+
+  const cancel = async () => {
+    if (mutating) return;
+    setMutating(true);
+    setActionError("");
+    try {
+      const result = await actOnMasterBooking(data.id, {
+        action: "cancel",
+        ...(data.appointment_version ? { expected_version: data.appointment_version } : {}),
+      });
+      await handleResult(result, { kind: "cancel" }, data.appointment_version);
+    } catch {
+      setActionError("Действие недоступно. Обновите запись.");
+      setMode("idle");
+    } finally {
+      setMutating(false);
+    }
+  };
+
+  const loadSlots = async () => {
+    if (!data.service.id) return;
+    setSlotsBusy(true);
+    setSlotsError("");
+    setSelectedStart(null);
+    try {
+      const result = await getMasterBookingSlots({ serviceId: data.service.id, date });
+      setSlots(result.slots);
+    } catch {
+      setSlots([]);
+      setSlotsError("Не удалось загрузить свободное время.");
+    } finally {
+      setSlotsBusy(false);
+    }
+  };
+
+  const reschedule = async () => {
+    if (mutating || !selectedStart) return;
+    const version = data.appointment_version;
+    if (version === null) {
+      setAttemptedVersion(null);
+      setMode("stale");
+      return;
+    }
+    setMutating(true);
+    setActionError("");
+    try {
+      const result = await actOnMasterBooking(data.id, {
+        action: "reschedule",
+        expected_version: version,
+        new_start_datetime: selectedStart,
+      });
+      await handleResult(result, { kind: "reschedule", startAt: selectedStart }, version);
+    } catch {
+      setActionError("Действие недоступно. Обновите запись.");
+      setMode("idle");
+    } finally {
+      setMutating(false);
+    }
+  };
+
+  if (mode === "pending") {
+    return (
+      <section className="booking-detail__actions" aria-label="Действия с записью">
+        <SystemState
+          kind="pending"
+          body="Не удалось подтвердить результат действия. Сначала проверьте актуальное состояние записи."
+          busy={mutating}
+          onRecheck={() => void readback()}
+        />
+      </section>
+    );
+  }
+
+  if (mode === "stale") {
+    return (
+      <section className="booking-detail__actions" aria-label="Действия с записью">
+        <SystemState
+          kind="pending"
+          body="Запись изменилась. Обновите данные перед новой попыткой."
+          busy={mutating}
+          onRecheck={() => void readback()}
+        />
+      </section>
+    );
+  }
+
+  if (!actionable) return null;
+
+  if (mode === "cancel") {
+    return (
+      <section className="booking-detail__actions" aria-label="Действия с записью">
+        <DestructiveConfirmation
+          title="Отменить запись?"
+          body="Запись клиента будет отменена. Это действие нельзя отменить."
+          confirmLabel="Отменить запись"
+          busy={mutating}
+          onConfirm={() => void cancel()}
+          onCancel={() => setMode("idle")}
+        />
+      </section>
+    );
+  }
+
+  if (mode === "reschedule") {
+    return (
+      <section className="booking-detail__actions booking-detail__reschedule" aria-label="Перенос записи">
+        <h2>Перенести запись</h2>
+        <label>
+          Дата
+          <input type="date" value={date} onChange={(e) => setDate(e.target.value)} />
+        </label>
+        <button type="button" className="btn-secondary" onClick={() => void loadSlots()} disabled={slotsBusy}>
+          {slotsBusy ? "Загружаем…" : "Показать свободное время"}
+        </button>
+        {slotsError ? <p role="alert">{slotsError}</p> : null}
+        {slots.length > 0 ? (
+          <div className="booking-detail__slot-list" aria-label="Свободное время">
+            {slots.filter((slot) => slot.start_at).map((slot) => (
+              <button
+                type="button"
+                key={slot.start_at ?? slot.time}
+                className={selectedStart === slot.start_at ? "btn-primary" : "btn-secondary"}
+                onClick={() => setSelectedStart(slot.start_at)}
+              >
+                {slot.time}
+              </button>
+            ))}
+          </div>
+        ) : null}
+        {selectedStart ? (
+          <div className="booking-detail__reschedule-confirm">
+            <p>Перенести запись на {formatTimeHM(selectedStart)}?</p>
+            <button type="button" className="btn-primary" onClick={() => void reschedule()} disabled={mutating}>
+              Подтвердить перенос
+            </button>
+          </div>
+        ) : null}
+        <button type="button" className="btn-secondary" onClick={() => setMode("idle")} disabled={mutating}>
+          Назад
+        </button>
+      </section>
+    );
+  }
+
+  return (
+    <section className="booking-detail__actions" aria-label="Действия с записью">
+      {actionError ? <p role="alert">{actionError}</p> : null}
+      <button type="button" className="btn-primary" onClick={() => setMode("reschedule")}>
+        Перенести
+      </button>
+      <button type="button" className="btn-secondary" onClick={() => setMode("cancel")}>
+        Отменить
+      </button>
+    </section>
+  );
+}
 // ----------------------------------------------------------------------------
 // Icons — line icons per mockup, decorative only
 // ----------------------------------------------------------------------------
