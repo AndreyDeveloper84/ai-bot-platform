@@ -239,6 +239,7 @@ def test_w6_a_real_withdrawal_drops_the_step_state(
     client: Client, tenant, wire, catalog: FakeCatalog, django_capture_on_commit_callbacks
 ) -> None:
     _step_in_progress(client, tenant)
+    assert step_card.STATE_KEY in _state_keys()  # до отзыва состояние шага лежит
 
     _withdraw(django_capture_on_commit_callbacks)
 
