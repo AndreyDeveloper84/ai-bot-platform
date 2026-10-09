@@ -34,6 +34,7 @@ import pytest
 from django.test import Client
 from django.urls import reverse
 
+from apps.consent.services import record_global_consent
 from apps.identity.models import BotUser
 from apps.integrations.ayla.plan_engine_client import (
     PlanEngineAuthError,
@@ -90,9 +91,12 @@ def _settings(settings):
 def bot_user(db, settings) -> BotUser:
     tenant = Tenant.objects.create(slug="plan-engine-2879", name="Plan Engine")
     settings.MAX_BOT_TENANT_SLUG = "plan-engine-2879"
-    return BotUser.all_tenants.create(
+    person = BotUser.all_tenants.create(
         tenant=tenant, channel="max", channel_user_id="28790", display_name="Анна"
     )
+    # DRF-2967: план собирается только человеку с согласием на хранение.
+    record_global_consent(person, source="test")
+    return person
 
 
 def _post(client: Client, body: Any = None):

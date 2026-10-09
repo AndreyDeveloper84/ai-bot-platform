@@ -209,6 +209,19 @@ def _named(outcome: str) -> SkillResult:
     )
 
 
+def _basis_refusal(bot_user: Any) -> SkillResult | None:
+    """DRF-2967 — отказ, когда план этому человеку обрабатывать нельзя.
+
+    Стоит на каждом входе, где план собирается, правится, обсуждается с
+    моделью или сохраняется. Показ сохранённого плана («мой план») им не
+    закрыт. Правило и причины — :mod:`apps.orchestrator.plan_gate`.
+    """
+    from apps.orchestrator.plan_gate import plan_processing_refusal
+
+    outcome = plan_processing_refusal(bot_user)
+    return None if outcome is None else _named(outcome)
+
+
 def _proposal(labels: list[str], token: str) -> SkillResult:
     from apps.orchestrator.discovery import keyboard_envelope
 
@@ -282,6 +295,9 @@ def _compose(
     from apps.planning_rules.registry import PlanningRegistryError, load_registry
     from apps.planning_rules.wire import registry_wire_body
 
+    refusal = _basis_refusal(bot_user)
+    if refusal is not None:
+        return refusal
     safety = turn_safety() if turn_safety is not None else None
     if safety is None:
         return _named(SAFETY_INPUT_UNAVAILABLE)
@@ -414,6 +430,9 @@ def try_handle_plan_edit(
     if (edit is None and drop is None) or not engine_enabled():
         return None
 
+    refusal = _basis_refusal(bot_user)
+    if refusal is not None:
+        return refusal
     token = (edit or drop).group(1)  # type: ignore[union-attr]
     pending = _pending_for(conversation, token)
     if pending is None:
@@ -518,6 +537,14 @@ def discussed_plan(conversation: Any) -> tuple[str, list[tuple[str, str | None]]
     row = _read_discussion(conversation)
     if row is None:
         return None
+    # DRF-2967 — обсуждение, открытое до отзыва согласия или заявки на
+    # удаление, план модели больше не отдаёт: ни абзаца подсказки, ни
+    # инструмента «убрать шаг» (оба читают отсюда). Нет человека — закрыто.
+    from apps.orchestrator.plan_gate import plan_processing_refusal
+
+    person = getattr(conversation, "bot_user", None)
+    if person is None or plan_processing_refusal(person) is not None:
+        return None
     if row.get("subject") == SUBJECT_PROPOSAL:
         labels = _proposal_labels(conversation)
         if not labels:
@@ -617,6 +644,9 @@ def try_handle_plan_discuss(
 
     from apps.orchestrator.next_steps import menu_button, next_step_action_data
 
+    refusal = _basis_refusal(bot_user)
+    if refusal is not None:
+        return refusal
     token = match.group(1)
     if token == DISCUSS_SAVED:
         saved_steps = _saved_plan_steps(bot_user, trace_id)
@@ -829,6 +859,9 @@ def try_handle_plan_save(
         PlanSaveSafetyBlockedError,
     )
 
+    refusal = _basis_refusal(bot_user)
+    if refusal is not None:
+        return refusal
     pending = _read_pending(conversation)
     if pending is None or _token(pending["decision"]) != match.group(1):
         return _named(PLAN_PROPOSAL_EXPIRED)
