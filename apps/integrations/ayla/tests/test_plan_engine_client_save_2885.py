@@ -172,3 +172,53 @@ class TestRead:
             _client(lambda r: httpx.Response(status, json={})).get_plan(
                 external_user_id="bot:max:1"
             )
+
+
+class TestCapabilityDetails:
+    """«Зачем шаг» — поле ``expected_effect`` рядом с подписью (DRF-2876)."""
+
+    @staticmethod
+    def _answer(**row: Any) -> Any:
+        return lambda r: _ok(
+            {"labels": {"cap.a": {"state": "labelled", "label": "Режим сна", **row}}}
+        )
+
+    def test_d1_the_effect_comes_with_the_label(self) -> None:
+        details = _client(
+            self._answer(expected_effect="  Помогает высыпаться.  ")
+        ).capability_details(external_user_id="bot:max:1", keys=["cap.a"])
+
+        assert details == {
+            "cap.a": {"label": "Режим сна", "expected_effect": "Помогает высыпаться."}
+        }
+
+    @pytest.mark.parametrize(
+        "row", [{}, {"expected_effect": None}, {"expected_effect": "  "}, {"expected_effect": 7}]
+    )
+    def test_d2_no_effect_is_none_and_the_label_stays(self, row: dict[str, Any]) -> None:
+        """Каталог ещё не отдаёт поле, или текста нет — подпись остаётся, «зачем» пусто."""
+        details = _client(self._answer(**row)).capability_details(
+            external_user_id="bot:max:1", keys=["cap.a"]
+        )
+
+        assert details == {"cap.a": {"label": "Режим сна", "expected_effect": None}}
+
+    def test_d3_a_capability_without_a_label_brings_no_effect_either(self) -> None:
+        """Каталог может прислать эффект и без подписи (``no_text``) — шаг без
+        подписи показать нечем, и его «зачем» не нужен."""
+        answer = {
+            "labels": {"cap.a": {"state": "no_text", "label": None, "expected_effect": "Текст."}}
+        }
+
+        details = _client(lambda r: _ok(answer)).capability_details(
+            external_user_id="bot:max:1", keys=["cap.a"]
+        )
+
+        assert details == {}
+
+    def test_d4_labels_are_the_same_call_without_the_effect(self) -> None:
+        labels = _client(self._answer(expected_effect="Помогает высыпаться.")).capability_labels(
+            external_user_id="bot:max:1", keys=["cap.a"]
+        )
+
+        assert labels == {"cap.a": "Режим сна"}

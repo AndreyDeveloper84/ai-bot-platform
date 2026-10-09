@@ -159,8 +159,14 @@ def customer_plan_decision(request: HttpRequest) -> HttpResponse:
     return JsonResponse(plan_decision_payload(document))
 
 
-def saved_plan_payload(plan: dict[str, Any], labels: dict[str, str]) -> dict[str, Any] | None:
-    """Сохранённый план → JSON экрана: идентификаторы и ПОДПИСИ шагов.
+def saved_plan_payload(
+    plan: dict[str, Any], labels: dict[str, str], effects: dict[str, str] | None = None
+) -> dict[str, Any] | None:
+    """Сохранённый план → JSON экрана: идентификаторы, ПОДПИСИ шагов и «зачем».
+
+    ``why`` — курируемый «ожидаемый эффект» способности из каталога (решение
+    владельца, лист 07.10, п.13: «Почему этот шаг?»). Нет текста — ``null``:
+    экран ссылку не показывает, текст не сочиняется.
 
     Ключ способности экрану не уходит — человеку его показывать нельзя, а
     экрану он для показа не нужен. ``None`` — план показать нельзя: шагов нет
@@ -170,13 +176,14 @@ def saved_plan_payload(plan: dict[str, Any], labels: dict[str, str]) -> dict[str
     raw_revision = plan.get("revision")
     revision: dict[str, Any] = raw_revision if isinstance(raw_revision, dict) else {}
     steps = [s for s in revision.get("steps") or [] if isinstance(s, dict)]
-    out: list[dict[str, str]] = []
+    out: list[dict[str, str | None]] = []
     for step in steps:
-        label = labels.get(str(step.get("capability_ref") or ""))
+        key = str(step.get("capability_ref") or "")
+        label = labels.get(key)
         step_id = step.get("step_id")
         if not label or not isinstance(step_id, str) or not step_id:
             return None
-        out.append({"step_id": step_id, "label": label})
+        out.append({"step_id": step_id, "label": label, "why": (effects or {}).get(key) or None})
     if not out:
         return None
     return {"plan_id": str(plan.get("plan_id") or ""), "steps": out}
@@ -219,13 +226,17 @@ def customer_plan_current(request: HttpRequest) -> HttpResponse:
             for s in (steps if isinstance(steps, list) else [])
             if isinstance(s, dict)
         ]
-        labels = (
-            client.capability_labels(external_user_id=external_user_id, keys=keys) if keys else {}
+        details = (
+            client.capability_details(external_user_id=external_user_id, keys=keys) if keys else {}
         )
     except Exception as exc:  # noqa: BLE001 — каждый класс назван в _refusal
         return _refusal(exc)
 
-    payload = saved_plan_payload(plan, labels)
+    labels = {key: row["label"] for key, row in details.items()}
+    effects = {
+        key: row["expected_effect"] for key, row in details.items() if row["expected_effect"]
+    }
+    payload = saved_plan_payload(plan, labels, effects)
     if payload is None:
         logger.error(
             "customer_plan_current.unlabelled bot_user=%s steps=%d labelled=%d",
@@ -234,7 +245,14 @@ def customer_plan_current(request: HttpRequest) -> HttpResponse:
             len(labels),
         )
         return _error("plan_step_unlabelled", "a plan step has no confirmed label", 502)
-    logger.info("customer_plan_current.done bot_user=%s steps=%d", bot_user.pk, len(keys))
+    # Шаг без «зачем» — пробел знания для куратора: человеку ссылка не
+    # показывается, а счёт таких шагов виден в журнале.
+    logger.info(
+        "customer_plan_current.done bot_user=%s steps=%d without_why=%d",
+        bot_user.pk,
+        len(keys),
+        sum(1 for key in keys if key not in effects),
+    )
     return JsonResponse({"plan": payload})
 
 
