@@ -357,7 +357,7 @@ function BookingActions({
       setMode("idle");
       setAttemptedVersion(null);
     }
-  }, [attemptedVersion, data.appointment_version, data.start_at, data.status, mode, pendingTarget]);
+  }, [attemptedVersion, data, mode, pendingTarget]);
 
   if (!actionable && mode === "idle") return null;
 
