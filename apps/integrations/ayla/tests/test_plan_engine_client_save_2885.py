@@ -222,3 +222,21 @@ class TestCapabilityDetails:
         )
 
         assert labels == {"cap.a": "Режим сна"}
+
+    @pytest.mark.parametrize("state", ["ambiguous", "unknown", "no_text"])
+    def test_d5_only_a_confirmed_label_counts_whatever_text_came_with_it(self, state: str) -> None:
+        """Состояние решает, а не наличие строки: подпись неподтверждённой
+        способности человеку не показывается, и её «зачем» — тоже."""
+        confirmed = _client(self._answer(expected_effect="Текст.")).capability_details(
+            external_user_id="bot:max:1", keys=["cap.a"]
+        )
+        assert "cap.a" in confirmed  # положительный контроль: с «labelled» строка есть
+
+        answer = {
+            "labels": {"cap.a": {"state": state, "label": "Режим сна", "expected_effect": "Текст."}}
+        }
+        details = _client(lambda r: _ok(answer)).capability_details(
+            external_user_id="bot:max:1", keys=["cap.a"]
+        )
+
+        assert details == {}
