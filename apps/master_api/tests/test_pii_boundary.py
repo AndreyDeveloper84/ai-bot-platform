@@ -920,10 +920,6 @@ NOT_SWEPT_ROUTES: dict[str, str] = {
         "DELETE proxy to the catalog's portfolio item (DRF-1814); response is {count, limit}"
     ),
     "availability_request": "POST mutation; response is the master's own request id/status",
-    "booking_action": (
-        "POST mutation (DRF-2943); response is lifecycle outcome/version only. "
-        "Own-booking guard runs before the outbound write; no customer record is returned."
-    ),
     "billing_status": "proxy to the external billing service; shape is the provider's",
     "billing_card_setup": "proxy to the external billing service",
     "billing_pay_debt": "proxy to the external billing service",

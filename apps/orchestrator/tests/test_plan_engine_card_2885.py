@@ -55,6 +55,10 @@ from apps.orchestrator.safety.plan_turn import PlanTurnSafety
 
 ACCOUNT = "max:770001"
 DECISION_ID = "0f3a9c2e-1111-4222-8333-444455556666"
+PROPOSAL_ID = "7c1d2e3f-aaaa-4bbb-8ccc-ddddeeeeffff"
+ACTIVE_ID = "5a5a5a5a-1111-4222-8333-999999999999"
+REPLACE = "cb:plan:replace:7c1d2e3f"
+KEEP = "cb:plan:keep:7c1d2e3f"
 TOKEN = "0f3a9c2e"
 POLICY_VERSIONS = {"plan_spec_version": "1", "safety_policy_version": "pre_check-abc"}
 STEP_A = {"step_id": "s-a", "capability_ref": "cap.sleep_routine", "level": "CAPABILITY"}
@@ -85,7 +89,15 @@ class FakeCatalog:
         self.saved: list[dict[str, Any]] = []
         self.outcome: dict[str, Any] = {"outcome": "PLAN", "decision": _decision()}
         self.labels: dict[str, str] = dict(LABELS)
+        #: «Зачем шаг» — ожидаемый эффект способности; по умолчанию каталог его не отдаёт.
+        self.effects: dict[str, str] = {}
         self.save_error: Exception | None = None
+        #: Действующий план цели: есть — сохранение создаёт предложение.
+        self.active_plan_id: str | None = None
+        self.replaced: list[dict[str, Any]] = []
+        self.replace_error: Exception | None = None
+        self.archived: list[str] = []
+        self.archive_error: Exception | None = None
         self.min_steps = 1
         self.read = 0
         self.saved_plan: dict[str, Any] | None = None
@@ -118,11 +130,44 @@ class FakeCatalog:
     def capability_labels(self, *, external_user_id: str, keys: list[str]) -> dict[str, str]:
         return {k: v for k, v in self.labels.items() if k in keys}
 
+    def capability_details(self, *, external_user_id: str, keys: list[str]) -> dict[str, Any]:
+        return {
+            k: {"label": v, "expected_effect": self.effects.get(k)}
+            for k, v in self.labels.items()
+            if k in keys
+        }
+
     def save_plan(self, *, external_user_id: str, command: dict[str, Any]) -> dict[str, Any]:
         self.saved.append(command)
         if self.save_error is not None:
             raise self.save_error
-        return {"plan": {}, "created": len(self.saved) == 1}
+        if self.active_plan_id is not None:
+            # Как каталог после #704: у цели уже есть действующий план —
+            # новый сохранён ПРЕДЛОЖЕНИЕМ и называет, какой план заменит.
+            return {
+                "plan": {"plan_id": PROPOSAL_ID, "status": "proposed"},
+                "replaces": {"plan_id": self.active_plan_id},
+                "created": len(self.saved) == 1,
+            }
+        return {
+            "plan": {"plan_id": PROPOSAL_ID, "status": "active"},
+            "created": len(self.saved) == 1,
+        }
+
+    def replace_plan(self, **kwargs: Any) -> dict[str, Any]:
+        self.replaced.append(kwargs)
+        if self.replace_error is not None:
+            raise self.replace_error
+        return {
+            "plan": {"plan_id": kwargs["plan_id"], "status": "active"},
+            "replaced": len(self.replaced) == 1,
+        }
+
+    def archive_plan(self, *, external_user_id: str, plan_id: str) -> dict[str, Any]:
+        self.archived.append(plan_id)
+        if self.archive_error is not None:
+            raise self.archive_error
+        return {"plan": {"plan_id": plan_id, "status": "archived"}}
 
 
 @pytest.fixture(autouse=True)
@@ -149,13 +194,26 @@ def _on(settings) -> None:
     settings.SYNTHETIC_TEST_TRIGGER_ACCOUNTS = (ACCOUNT,)
 
 
+@pytest.fixture(autouse=True)
+def _basis_proven(monkeypatch: pytest.MonkeyPatch) -> None:
+    """DRF-2967: человек этих узлов — с основанием; база им не нужна.
+
+    Сам гейт (три отказа и близнец) держит
+    ``apps/miniapp_api/tests/test_plan_basis_gate_2967.py`` на настоящих
+    строках согласия.
+    """
+    from apps.orchestrator import plan_gate
+
+    monkeypatch.setattr(plan_gate, "plan_processing_refusal", lambda bot_user: None)
+
+
 def _bot_user(account: str = ACCOUNT) -> SimpleNamespace:
     channel, channel_user_id = account.split(":")
     return SimpleNamespace(pk=1, id=1, channel=channel, channel_user_id=channel_user_id)
 
 
 def _conversation() -> SimpleNamespace:
-    return SimpleNamespace(id="conv-2885", skill_state={})
+    return SimpleNamespace(id="conv-2885", skill_state={}, bot_user=_bot_user())
 
 
 def _safety(state: str = "NORMAL", revision: int = 7) -> PlanTurnSafety:
@@ -254,6 +312,7 @@ class TestComposing:
         assert buttons == [
             {"label": "Сохранить", "callback": SAVE},
             {"label": "Изменить", "callback": f"cb:plan:edit:{TOKEN}"},
+            {"label": "Обсудить", "callback": f"cb:plan:discuss:{TOKEN}"},
         ]
 
     def test_s2_no_triple_no_request(self, catalog: FakeCatalog) -> None:
@@ -263,7 +322,7 @@ class TestComposing:
         assert result.reply_text == "SAFETY_INPUT_UNAVAILABLE · тест"
 
     @pytest.mark.parametrize(
-        "outcome", ["SAFETY_BLOCKED", "NO_GOAL", "NO_CURATED_DECOMPOSITION", "CLARIFY_PENDING"]
+        "outcome", ["SAFETY_BLOCKED", "NO_GOAL", "NO_CURATED_DECOMPOSITION", "PLAN_NOT_JUSTIFIED"]
     )
     def test_s3_an_outcome_without_a_plan_is_shown_by_name(
         self, catalog: FakeCatalog, outcome: str
@@ -775,3 +834,517 @@ class TestTheRealEntry:
 
         assert is_plan_callback(card.CB_COMPOSE) is True
         assert tap_history_text(card.CB_COMPOSE) == "Составить план"
+
+
+# ─── «Обсудить» ──────────────────────────────────────────────────────────
+
+DISCUSS = f"cb:plan:discuss:{TOKEN}"
+DISCUSS_SAVED = "cb:plan:discuss:saved"
+
+
+def _discuss(text: str, conversation: Any, *, bot_user: Any = None):
+    return card.try_handle_plan_discuss(
+        text=text, bot_user=bot_user or _bot_user(), conversation=conversation, trace_id="t"
+    )
+
+
+class TestDiscussingThePlan:
+    """Решение владельца 08.10: «Обсудить» на плане; первая реплика дословно;
+    в контекст модели — шаги плана; ответ модели план не меняет."""
+
+    def test_d1_the_tap_answers_with_the_owners_words_verbatim(self, catalog: FakeCatalog) -> None:
+        conversation = _conversation()
+        _proposed(conversation)
+
+        result = _discuss(DISCUSS, conversation)
+
+        assert result is not None
+        assert result.reply_text == "Давай обсудим твой план. Что хочешь изменить или уточнить?"
+        assert result.action_data["buttons"]  # §72: под ответом есть следующий шаг
+        assert len(catalog.composed) == 1  # обсуждение ничего не собирает
+
+    def test_d2_the_model_sees_the_steps_in_the_catalogs_words(self, catalog: FakeCatalog) -> None:
+        conversation = _conversation()
+        _proposed(conversation)
+        assert card.render_plan_discussion_block(conversation) == ""  # до нажатия блока нет
+
+        _discuss(DISCUSS, conversation)
+        block = card.render_plan_discussion_block(conversation)
+
+        assert "1. Режим сна" in block
+        assert "2. Вечерняя прогулка" in block
+        assert "ПРЕДЛОЖЕНИЕ" in block
+        assert "plan_remove_step" in block
+
+    def test_d3_no_keys_or_ids_go_into_the_prompt(self, catalog: FakeCatalog) -> None:
+        conversation = _conversation()
+        _proposed(conversation)
+        _discuss(DISCUSS, conversation)
+
+        block = card.render_plan_discussion_block(conversation)
+
+        assert "Режим сна" in block  # положительный контроль: блок с планом
+        assert "cap." not in block
+        assert DECISION_ID not in block
+        assert TOKEN not in block
+
+    def test_d4_a_stale_card_does_not_open_a_discussion(self, catalog: FakeCatalog) -> None:
+        conversation = _conversation()
+        _proposed(conversation)
+
+        result = _discuss("cb:plan:discuss:ffffffff", conversation)
+
+        assert result is not None and result.reply_text == "PLAN_PROPOSAL_EXPIRED · тест"
+        assert card.render_plan_discussion_block(conversation) == ""
+
+    def test_d5_the_engine_switched_off_is_silent(self, catalog: FakeCatalog, settings) -> None:
+        conversation = _conversation()
+        _proposed(conversation)
+        _discuss(DISCUSS, conversation)
+        assert card.render_plan_discussion_block(conversation) != ""
+        settings.PLAN_ENGINE_ENABLED = False
+
+        assert _discuss(DISCUSS, conversation) is None
+        assert card.render_plan_discussion_block(conversation) == ""
+        assert card.discussion_allows_removal(conversation) is False
+
+    def test_d6_removing_a_step_recomposes_and_shows_the_change_before_saving(
+        self, catalog: FakeCatalog
+    ) -> None:
+        from apps.orchestrator.safety.plan_turn import attach_turn_safety
+
+        conversation = _conversation()
+        _proposed(conversation)
+        _discuss(DISCUSS, conversation)
+        attach_turn_safety(conversation, lambda: _safety("NORMAL", 9))
+
+        result = card.remove_step_for_request(
+            bot_user=_bot_user(), conversation=conversation, trace_id="t", step_number=1
+        )
+
+        assert result is not None and result.action_type == "plan_engine_proposal"
+        assert result.reply_text.startswith("• Вечерняя прогулка")
+        assert catalog.composed[1]["excluded_capability_refs"] == ["cap.sleep_routine"]
+        assert catalog.saved == []  # показано, не сохранено
+        # Обсуждается уже новое предложение.
+        block = card.render_plan_discussion_block(conversation)
+        assert "1. Вечерняя прогулка" in block
+        assert "Режим сна" not in block
+
+    @pytest.mark.parametrize("number", [0, 3, -1, "1", None, True, 1.0])
+    def test_d7_a_number_outside_the_plan_removes_nothing(
+        self, catalog: FakeCatalog, number: Any
+    ) -> None:
+        from apps.orchestrator.safety.plan_turn import attach_turn_safety
+
+        conversation = _conversation()
+        _proposed(conversation)
+        _discuss(DISCUSS, conversation)
+        attach_turn_safety(conversation, lambda: _safety("NORMAL", 9))
+
+        result = card.remove_step_for_request(
+            bot_user=_bot_user(), conversation=conversation, trace_id="t", step_number=number
+        )
+
+        assert result is None
+        assert len(catalog.composed) == 1
+
+    def test_d8_without_an_open_discussion_nothing_is_removed(self, catalog: FakeCatalog) -> None:
+        from apps.orchestrator.safety.plan_turn import attach_turn_safety
+
+        conversation = _conversation()
+        _proposed(conversation)
+        attach_turn_safety(conversation, lambda: _safety("NORMAL", 9))
+
+        result = card.remove_step_for_request(
+            bot_user=_bot_user(), conversation=conversation, trace_id="t", step_number=1
+        )
+
+        assert result is None
+        assert len(catalog.composed) == 1
+
+    def test_d9_saving_closes_the_discussion(self, catalog: FakeCatalog) -> None:
+        conversation = _conversation()
+        _proposed(conversation)
+        _discuss(DISCUSS, conversation)
+        assert card.render_plan_discussion_block(conversation) != ""
+
+        saved = _turn(SAVE, conversation)
+
+        assert saved.reply_text == "PLAN_SAVED · тест"
+        assert card.render_plan_discussion_block(conversation) == ""
+
+    def test_d10_a_new_plan_does_not_inherit_the_old_discussion(self, catalog: FakeCatalog) -> None:
+        conversation = _conversation()
+        _proposed(conversation)
+        _discuss(DISCUSS, conversation)
+        assert card.render_plan_discussion_block(conversation) != ""
+
+        _turn(card.CB_COMPOSE, conversation)
+
+        assert card.render_plan_discussion_block(conversation) == ""
+
+    def test_d11_the_saved_plan_is_discussed_but_not_changed_here(
+        self, catalog: FakeCatalog
+    ) -> None:
+        catalog.saved_plan = _saved_plan()
+        conversation = _conversation()
+
+        result = _discuss(DISCUSS_SAVED, conversation)
+        block = card.render_plan_discussion_block(conversation)
+
+        assert result is not None
+        assert result.reply_text == "Давай обсудим твой план. Что хочешь изменить или уточнить?"
+        assert "СОХРАНЁННЫЙ" in block
+        assert "1. Режим сна" in block
+        assert card.discussion_allows_removal(conversation) is False
+        assert "plan_remove_step" not in block
+
+    def test_d12_no_saved_plan_opens_no_discussion(self, catalog: FakeCatalog) -> None:
+        conversation = _conversation()
+
+        result = _discuss(DISCUSS_SAVED, conversation)
+
+        assert result is not None and result.reply_text == "PLAN_PROPOSAL_EXPIRED · тест"
+        assert card.render_plan_discussion_block(conversation) == ""
+
+    def test_d13_the_saved_plan_card_offers_the_discussion(self, catalog: FakeCatalog) -> None:
+        catalog.saved_plan = _saved_plan()
+
+        shown = card.try_handle_saved_plan(text="мой план", bot_user=_bot_user(), trace_id="t")
+
+        assert shown is not None
+        assert (shown.action_data or {})["buttons"][0] == {
+            "label": "Обсудить",
+            "callback": DISCUSS_SAVED,
+        }
+
+    def test_d14_the_tap_goes_through_the_turn_and_into_history_as_the_buttons_words(
+        self, catalog: FakeCatalog
+    ) -> None:
+        from apps.orchestrator.plan_lite_card import is_plan_callback, tap_history_text
+
+        conversation = _conversation()
+        _proposed(conversation)
+
+        result = _turn(DISCUSS, conversation)
+
+        assert result.action_type == "plan_engine_discuss"
+        assert is_plan_callback(DISCUSS) is True
+        assert is_plan_callback(DISCUSS_SAVED) is True
+        assert tap_history_text(DISCUSS) == "Обсудить"
+
+
+# ─── «почему этот шаг»: слова каталога в обсуждении ──────────────────────
+
+EFFECT_SLEEP = "Помогает ложиться и вставать в одно время."
+
+
+class TestWhyThisStepInTheDiscussion:
+    """Решение владельца (лист 07.10, п.13) и главного окна 09.10: «зачем шаг»
+    — курируемый «ожидаемый эффект» способности из каталога. Модель приводит
+    его дословно; у шага без текста причину не сочиняет."""
+
+    def test_w1_the_catalogs_effect_reaches_the_model_next_to_its_step(
+        self, catalog: FakeCatalog
+    ) -> None:
+        catalog.effects = {"cap.sleep_routine": EFFECT_SLEEP}
+        conversation = _conversation()
+        _proposed(conversation)
+        _discuss(DISCUSS, conversation)
+
+        block = card.render_plan_discussion_block(conversation)
+
+        assert f"1. Режим сна — зачем: {EFFECT_SLEEP}" in block
+        # У второго шага текста нет — и в подсказке его нет.
+        assert "2. Вечерняя прогулка\n" in block
+        assert "дословно" in block
+
+    def test_w2_no_effect_from_the_catalog_no_reason_in_the_prompt(
+        self, catalog: FakeCatalog
+    ) -> None:
+        conversation = _conversation()
+        _proposed(conversation)
+        _discuss(DISCUSS, conversation)
+
+        block = card.render_plan_discussion_block(conversation)
+
+        assert "1. Режим сна\n" in block  # положительный контроль: шаг в подсказке есть
+        assert "— зачем:" not in block
+
+    def test_w3_the_effect_follows_the_step_after_another_is_removed(
+        self, catalog: FakeCatalog
+    ) -> None:
+        from apps.orchestrator.safety.plan_turn import attach_turn_safety
+
+        catalog.effects = {"cap.evening_walk": "Даёт спокойный вечер."}
+        conversation = _conversation()
+        _proposed(conversation)
+        _discuss(DISCUSS, conversation)
+        attach_turn_safety(conversation, lambda: _safety("NORMAL", 9))
+
+        card.remove_step_for_request(
+            bot_user=_bot_user(), conversation=conversation, trace_id="t", step_number=1
+        )
+        block = card.render_plan_discussion_block(conversation)
+
+        assert "1. Вечерняя прогулка — зачем: Даёт спокойный вечер." in block
+
+    def test_w4_the_saved_plan_carries_its_effects_into_the_discussion(
+        self, catalog: FakeCatalog
+    ) -> None:
+        catalog.saved_plan = _saved_plan()
+        catalog.effects = {"cap.sleep_routine": EFFECT_SLEEP}
+        conversation = _conversation()
+
+        _discuss(DISCUSS_SAVED, conversation)
+        block = card.render_plan_discussion_block(conversation)
+
+        assert f"1. Режим сна — зачем: {EFFECT_SLEEP}" in block
+        assert "2. Вечерняя прогулка\n" in block
+
+
+# ─── предложение и замена действующего плана ─────────────────────────────
+
+
+def _asked(conversation: Any, catalog: FakeCatalog):
+    """Собрать, сохранить при действующем плане — получить вопрос о замене."""
+    catalog.active_plan_id = ACTIVE_ID
+    _proposed(conversation)
+    return _turn(SAVE, conversation, safety=_safety("NORMAL", 8))
+
+
+class TestReplacingTheActivePlan:
+    """Решение владельца: сохранённый новый план не вытесняет действующий без
+    подтверждения замены; слова вопроса и кнопок — лист 07.10, п.15."""
+
+    def test_p1_saving_over_an_active_plan_asks_the_owners_question(
+        self, catalog: FakeCatalog
+    ) -> None:
+        result = _asked(_conversation(), catalog)
+
+        assert result.reply_text == "Заменить текущий план новым? Прежний останется в истории"
+        assert result.reply_text != "PLAN_SAVED · тест"
+        buttons = result.action_data["attachments"][0]["payload"]["buttons"]
+        assert buttons == [
+            {"label": "Заменить план", "callback": REPLACE},
+            {"label": "Оставить текущий", "callback": KEEP},
+        ]
+        assert catalog.replaced == []  # вопрос ничего не заменяет
+
+    def test_p2_saving_the_first_plan_asks_nothing(self, catalog: FakeCatalog) -> None:
+        conversation = _conversation()
+        _proposed(conversation)
+
+        result = _turn(SAVE, conversation)
+
+        assert result.reply_text == "PLAN_SAVED · тест"
+
+    def test_p3_replace_sends_the_named_plans_and_the_tapping_turns_triple(
+        self, catalog: FakeCatalog
+    ) -> None:
+        conversation = _conversation()
+        _asked(conversation, catalog)
+
+        result = _turn(REPLACE, conversation, safety=_safety("NORMAL", 11))
+
+        assert result.reply_text == "PLAN_REPLACED · тест"
+        sent = catalog.replaced[0]
+        assert (sent["plan_id"], sent["replaces_plan_id"]) == (PROPOSAL_ID, ACTIVE_ID)
+        assert (sent["safety_state"], sent["evaluated_at_revision"]) == ("NORMAL", 11)
+
+    def test_p4_a_second_tap_sends_the_same_confirmation_and_is_not_an_error(
+        self, catalog: FakeCatalog
+    ) -> None:
+        conversation = _conversation()
+        _asked(conversation, catalog)
+        _turn(REPLACE, conversation, safety=_safety("NORMAL", 11))
+
+        again = _turn(REPLACE, conversation, safety=_safety("NORMAL", 12))
+
+        assert again.reply_text == "PLAN_REPLACED · тест"
+        assert [r["replaces_plan_id"] for r in catalog.replaced] == [ACTIVE_ID, ACTIVE_ID]
+
+    def test_p5_keep_archives_the_proposal_and_replaces_nothing(self, catalog: FakeCatalog) -> None:
+        conversation = _conversation()
+        _asked(conversation, catalog)
+
+        result = _turn(KEEP, conversation, safety=None)
+
+        assert result.reply_text == "PLAN_KEPT · тест"
+        assert catalog.archived == [PROPOSAL_ID]
+        assert catalog.replaced == []
+        # Вопрос закрыт: старая кнопка «Заменить план» больше ничего не заменяет.
+        late = _turn(REPLACE, conversation, safety=_safety("NORMAL", 12))
+        assert late.reply_text == "PLAN_PROPOSAL_EXPIRED · тест"
+        assert catalog.replaced == []
+
+    def test_p6_no_triple_no_replacement(self, catalog: FakeCatalog) -> None:
+        conversation = _conversation()
+        _asked(conversation, catalog)
+
+        result = _turn(REPLACE, conversation, safety=None)
+
+        assert result.reply_text == "SAFETY_INPUT_UNAVAILABLE · тест"
+        assert catalog.replaced == []
+
+    def test_p7_a_foreign_or_stale_card_replaces_nothing(self, catalog: FakeCatalog) -> None:
+        conversation = _conversation()
+        _asked(conversation, catalog)
+
+        for tap in ("cb:plan:replace:ffffffff", "cb:plan:keep:ffffffff"):
+            result = _turn(tap, conversation, safety=_safety("NORMAL", 11))
+            assert result.reply_text == "PLAN_PROPOSAL_EXPIRED · тест"
+
+        assert catalog.replaced == [] and catalog.archived == []
+
+    def test_p8_without_a_question_the_buttons_do_nothing(self, catalog: FakeCatalog) -> None:
+        conversation = _conversation()
+        _proposed(conversation)
+        _turn(SAVE, conversation)  # первый план: вопроса не было
+
+        result = _turn(REPLACE, conversation, safety=_safety("NORMAL", 11))
+
+        assert result.reply_text == "PLAN_PROPOSAL_EXPIRED · тест"
+        assert catalog.replaced == []
+
+    def test_p9_a_blocking_verdict_keeps_the_question_open(self, catalog: FakeCatalog) -> None:
+        conversation = _conversation()
+        _asked(conversation, catalog)
+        catalog.replace_error = client_mod.PlanSaveSafetyBlockedError("blocked")
+
+        blocked = _turn(REPLACE, conversation, safety=_safety("STOP", 11))
+        catalog.replace_error = None
+        later = _turn(REPLACE, conversation, safety=_safety("NORMAL", 12))
+
+        assert blocked.reply_text == "PLAN_SAVE_SAFETY_BLOCKED · тест"
+        assert later.reply_text == "PLAN_REPLACED · тест"
+
+    @pytest.mark.parametrize(
+        ("error", "shown"),
+        [
+            (client_mod.PlanReplacementTargetChangedError("x"), "PLAN_REPLACEMENT_TARGET_CHANGED"),
+            (client_mod.PlanTransitionRefusedError("x"), "PLAN_PROPOSAL_EXPIRED"),
+            (client_mod.PlanNotFoundError("x"), "PLAN_PROPOSAL_EXPIRED"),
+        ],
+    )
+    def test_p10_a_refusal_that_cannot_be_retried_closes_the_question(
+        self, catalog: FakeCatalog, error: Exception, shown: str
+    ) -> None:
+        conversation = _conversation()
+        _asked(conversation, catalog)
+        catalog.replace_error = error
+
+        refused = _turn(REPLACE, conversation, safety=_safety("NORMAL", 11))
+        catalog.replace_error = None
+        again = _turn(REPLACE, conversation, safety=_safety("NORMAL", 12))
+
+        assert refused.reply_text == f"{shown} · тест"
+        assert again.reply_text == "PLAN_PROPOSAL_EXPIRED · тест"
+        assert len(catalog.replaced) == 1
+
+    def test_p11_a_catalog_failure_keeps_the_question_for_a_retry(
+        self, catalog: FakeCatalog
+    ) -> None:
+        conversation = _conversation()
+        _asked(conversation, catalog)
+        catalog.replace_error = client_mod.PlanEngineUnavailableError("down")
+
+        failed = _turn(REPLACE, conversation, safety=_safety("NORMAL", 11))
+        catalog.replace_error = None
+        retried = _turn(REPLACE, conversation, safety=_safety("NORMAL", 12))
+
+        assert failed.reply_text == "PLAN_ENGINE_UNAVAILABLE · тест"
+        assert retried.reply_text == "PLAN_REPLACED · тест"
+
+    def test_p12_the_engine_switched_off_is_not_answered(
+        self, catalog: FakeCatalog, settings
+    ) -> None:
+        conversation = _conversation()
+        _asked(conversation, catalog)
+        settings.PLAN_ENGINE_ENABLED = False
+
+        result = card.try_handle_plan_replace(
+            text=REPLACE,
+            bot_user=_bot_user(),
+            conversation=conversation,
+            trace_id="t",
+            turn_safety=_safety,
+        )
+
+        assert result is None
+        assert catalog.replaced == []
+
+    @pytest.mark.parametrize(
+        "saved",
+        [
+            {"plan": {"plan_id": PROPOSAL_ID, "status": "proposed"}, "created": True},
+            {
+                "plan": {"plan_id": PROPOSAL_ID, "status": "active"},
+                "replaces": {"plan_id": ACTIVE_ID},
+                "created": True,
+            },
+        ],
+    )
+    def test_p13_half_of_the_proposal_mark_is_not_a_question(
+        self, catalog: FakeCatalog, monkeypatch: pytest.MonkeyPatch, saved: dict[str, Any]
+    ) -> None:
+        """Статус без названного плана (и наоборот) — не вопрос о замене:
+        спрашивать о замене плана, которого не назвали, нельзя."""
+        conversation = _conversation()
+        _proposed(conversation)
+        monkeypatch.setattr(catalog, "save_plan", lambda **kw: saved)
+
+        result = _turn(SAVE, conversation)
+
+        assert result.reply_text == "PLAN_SAVED · тест"
+
+    def test_p14_the_taps_go_into_history_as_the_buttons_words(self) -> None:
+        from apps.orchestrator.plan_lite_card import is_plan_callback, tap_history_text
+
+        assert is_plan_callback(REPLACE) is True and is_plan_callback(KEEP) is True
+        assert tap_history_text(REPLACE) == "Заменить план"
+        assert tap_history_text(KEEP) == "Оставить текущий"
+
+
+class TestReplacingUnderTheConsentGate:
+    """DRF-2967: замена — запись, под отзывом согласия или заявкой на удаление
+    закрыта; отказ от предложения открыт."""
+
+    @pytest.mark.parametrize(
+        "refusal", ["PLAN_DELETION_REQUESTED", "PLAN_CONSENT_REQUIRED", "PLAN_BASIS_UNAVAILABLE"]
+    )
+    def test_q1_replace_is_refused_before_the_catalog_and_the_question_stays(
+        self, catalog: FakeCatalog, monkeypatch: pytest.MonkeyPatch, refusal: str
+    ) -> None:
+        from apps.orchestrator import plan_gate
+
+        conversation = _conversation()
+        _asked(conversation, catalog)
+        monkeypatch.setattr(plan_gate, "plan_processing_refusal", lambda bot_user: refusal)
+
+        closed = _turn(REPLACE, conversation, safety=_safety("NORMAL", 11))
+
+        assert closed.reply_text == f"{refusal} · тест"
+        assert catalog.replaced == []
+        # Основание вернулось — тот же вопрос ещё в силе.
+        monkeypatch.setattr(plan_gate, "plan_processing_refusal", lambda bot_user: None)
+        opened = _turn(REPLACE, conversation, safety=_safety("NORMAL", 12))
+        assert opened.reply_text == "PLAN_REPLACED · тест"
+
+    @pytest.mark.parametrize(
+        "refusal", ["PLAN_DELETION_REQUESTED", "PLAN_CONSENT_REQUIRED", "PLAN_BASIS_UNAVAILABLE"]
+    )
+    def test_q2_keep_is_open_the_proposal_can_always_be_dropped(
+        self, catalog: FakeCatalog, monkeypatch: pytest.MonkeyPatch, refusal: str
+    ) -> None:
+        from apps.orchestrator import plan_gate
+
+        conversation = _conversation()
+        _asked(conversation, catalog)
+        monkeypatch.setattr(plan_gate, "plan_processing_refusal", lambda bot_user: refusal)
+
+        result = _turn(KEEP, conversation, safety=None)
+
+        assert result.reply_text == "PLAN_KEPT · тест"
+        assert catalog.archived == [PROPOSAL_ID]

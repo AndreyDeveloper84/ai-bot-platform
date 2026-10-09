@@ -122,3 +122,91 @@ def test_t3_t4_the_model_sees_the_tool_only_with_the_engine_on(
     generate_concierge_reply("привет", bot_user=bot_user, conversation=_conversation(bot_user))
 
     assert ("compose_plan" in {t["name"] for t in captured["tools"]}) is enabled
+
+
+# ─── «убери шаг» в обсуждении ────────────────────────────────────────────
+
+
+def _picks_removal(step: Any) -> CompletionResult:
+    return CompletionResult(
+        text="", tool_calls=[ToolCall(id="t1", name="plan_remove_step", arguments={"step": step})]
+    )
+
+
+def test_t5_the_removal_tool_answers_with_the_recomposed_card_in_one_pass(
+    monkeypatch: pytest.MonkeyPatch, settings
+) -> None:
+    settings.PLAN_ENGINE_ENABLED = True
+    monkeypatch.setattr(concierge, "_plan_step_removable", lambda _conversation: True)
+    provider, _ = _model(monkeypatch, _picks_removal(2))
+    seen: dict[str, Any] = {}
+
+    def _remove(*, bot_user: Any, conversation: Any, trace_id: str, step_number: Any) -> Any:
+        seen["step"] = step_number
+        seen["conversation"] = conversation
+        return SkillResult(
+            reply_text="• Режим сна",
+            action_type="plan_engine_proposal",
+            action_data={"buttons": [{"label": "Сохранить", "callback": "cb:plan:save:0f3a9c2e"}]},
+        )
+
+    monkeypatch.setattr(card, "remove_step_for_request", _remove)
+    bot_user = _bot_user("plan-tool-5")
+    conversation = _conversation(bot_user)
+
+    reply = generate_concierge_reply(
+        "убери второй шаг", bot_user=bot_user, conversation=conversation
+    )
+
+    assert reply.text == "• Режим сна"
+    assert seen == {"step": 2, "conversation": conversation}
+    assert provider.complete.await_count == 1
+
+
+def test_t6_a_refused_removal_shows_no_plan_card(monkeypatch: pytest.MonkeyPatch, settings) -> None:
+    settings.PLAN_ENGINE_ENABLED = True
+    monkeypatch.setattr(concierge, "_plan_step_removable", lambda _conversation: True)
+    _model(monkeypatch, _picks_removal(9))
+    monkeypatch.setattr(card, "remove_step_for_request", lambda **kw: None)
+    bot_user = _bot_user("plan-tool-6")
+
+    reply = generate_concierge_reply(
+        "убери девятый шаг", bot_user=bot_user, conversation=_conversation(bot_user)
+    )
+
+    assert reply.text
+    assert not (reply.action_data or {}).get("buttons")
+
+
+@pytest.mark.parametrize("open_discussion", [True, False])
+def test_t7_the_model_sees_the_removal_tool_and_the_plan_only_in_a_discussion(
+    monkeypatch: pytest.MonkeyPatch, settings, open_discussion: bool
+) -> None:
+    settings.PLAN_ENGINE_ENABLED = True
+    monkeypatch.setattr(card, "discussion_allows_removal", lambda _conversation: open_discussion)
+    monkeypatch.setattr(
+        card,
+        "render_plan_discussion_block",
+        lambda _conversation: "ШАГИ-ПЛАНА-ДЛЯ-МОДЕЛИ" if open_discussion else "",
+    )
+    captured: dict[str, Any] = {}
+
+    async def _complete(messages: Any, model: str = "", tools: Any = None, **kw: Any) -> Any:
+        captured["tools"] = tools
+        captured["system"] = "\n".join(
+            str(getattr(m, "content", m.get("content") if isinstance(m, dict) else ""))
+            for m in messages
+        )
+        return CompletionResult(text="ok")
+
+    provider = AsyncMock()
+    provider.complete.side_effect = _complete
+    router = Mock()
+    router.get_provider.return_value = provider
+    monkeypatch.setattr(concierge, "get_router", lambda: router)
+    bot_user = _bot_user(f"plan-tool-7-{open_discussion}")
+
+    generate_concierge_reply("привет", bot_user=bot_user, conversation=_conversation(bot_user))
+
+    assert ("plan_remove_step" in {t["name"] for t in captured["tools"]}) is open_discussion
+    assert ("ШАГИ-ПЛАНА-ДЛЯ-МОДЕЛИ" in captured["system"]) is open_discussion

@@ -19,7 +19,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, TypedDict
 
 import httpx
 from django.conf import settings
@@ -32,7 +32,16 @@ logger = logging.getLogger(__name__)
 _DECISION_PATH = "internal/me/plan/decision/"
 _PLAN_PATH = "internal/me/plan/"
 _LABELS_PATH = "internal/me/plan/capability-labels/"
+_REPLACE_PATH = "internal/me/plan/replace/"
+_STATE_PATH = "internal/me/plan/state/"
 DEFAULT_TIMEOUT_S = 10.0
+
+
+class CapabilityDetails(TypedDict):
+    """Слова каталога о способности: подпись шага и «зачем» (если есть)."""
+
+    label: str
+    expected_effect: str | None
 
 
 class PlanEngineError(Exception):
@@ -69,6 +78,32 @@ class PlanGoalNotFoundError(PlanEngineError):
 
 class PlanCapabilityNotConfirmedError(PlanEngineError):
     """409 ``PLAN_CAPABILITY_NOT_CONFIRMED`` — способность шага больше не в знании."""
+
+
+class PlanDeletionInProgressError(PlanEngineError):
+    """423 ``DELETION_IN_PROGRESS`` — у человека открыта заявка на удаление (DRF-2967)."""
+
+
+class PlanConsentRequiredError(PlanEngineError):
+    """422 ``CONSENT_REQUIRED`` — основания для обработки плана каталог не видит.
+
+    Вторая линия правила бота: утверждения нет, оно старше известного
+    каталогу отзыва или не разбирается (DRF-2967).
+    """
+
+
+class PlanReplacementTargetChangedError(PlanEngineError):
+    """409 ``PLAN_REPLACEMENT_TARGET_CHANGED`` — действующим стал другой план
+    (или никакой): «да» человека относилось не к нему."""
+
+
+class PlanTransitionRefusedError(PlanEngineError):
+    """409 ``PLAN_TRANSITION_REFUSED`` — план уже не в том состоянии: это не
+    предложение (замещено новым или отклонено), либо переход не разрешён."""
+
+
+class PlanNotFoundError(PlanEngineError):
+    """404 ``plan_not_found`` — план не этого человека или его нет."""
 
 
 class PlanEngineContractError(PlanEngineError):
@@ -110,6 +145,7 @@ class PlanEngineHttpClient:
         safety_policy_version: str,
         rules_registry: dict[str, Any],
         excluded_capability_refs: list[str],
+        consent: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         """Собрать эфемерный план. Возвращает документ ответа каталога как есть."""
         try:
@@ -125,6 +161,10 @@ class PlanEngineHttpClient:
             "rules_registry": rules_registry,
             "excluded_capability_refs": list(excluded_capability_refs),
         }
+        if consent is not None:
+            # DRF-2967 — утверждение основания: вид согласия, версия текста,
+            # время выдачи действующей записи.
+            body["consent"] = dict(consent)
         try:
             response = self._client().post(
                 url,
@@ -168,9 +208,62 @@ class PlanEngineHttpClient:
         правок, подтверждение, тройка хода подтверждения, ограничения. Ответ —
         ``{"plan": <документ>, "created": bool}``; повтор той же команды каталог
         узнаёт сам (``created=False``), второго плана не будет.
+
+        У цели уже есть действующий план — каталог сохраняет новый как
+        ПРЕДЛОЖЕНИЕ (``plan.status == "proposed"``) и называет, какой план оно
+        заменит: ``replaces.plan_id``. Действующим его делает только
+        :meth:`replace_plan` — отдельным подтверждением человека.
         """
         data = self._post(_PLAN_PATH, external_user_id=external_user_id, body=command, op="save")
         if not isinstance(data.get("plan"), dict) or not isinstance(data.get("created"), bool):
+            raise PlanEngineUnavailableError("plan_missing")
+        return data
+
+    def replace_plan(
+        self,
+        *,
+        external_user_id: str,
+        plan_id: str,
+        replaces_plan_id: str,
+        safety_state: str,
+        safety_policy_version: str,
+        evaluated_at_revision: int,
+        consent: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        """``POST internal/me/plan/replace/`` — подтверждённая замена плана.
+
+        ``replaces_plan_id`` — план, о замене которого человек сказал «да».
+        Ответ ``{"plan": <документ>, "replaced": bool}``; ``replaced=False`` —
+        замена уже выполнена (повторное нажатие), не ошибка.
+        """
+        body: dict[str, Any] = {
+            "plan_id": plan_id,
+            "replaces_plan_id": replaces_plan_id,
+            "safety_state": safety_state,
+            "safety_policy_version": safety_policy_version,
+            "evaluated_at_revision": evaluated_at_revision,
+        }
+        if consent is not None:
+            # DRF-2967 — утверждение основания, как у сборки и сохранения.
+            body["consent"] = dict(consent)
+        data = self._post(_REPLACE_PATH, external_user_id=external_user_id, body=body, op="replace")
+        if not isinstance(data.get("plan"), dict) or not isinstance(data.get("replaced"), bool):
+            raise PlanEngineUnavailableError("plan_missing")
+        return data
+
+    def archive_plan(self, *, external_user_id: str, plan_id: str) -> dict[str, Any]:
+        """``POST internal/me/plan/state/`` c ``archived`` — отказ от предложения.
+
+        Действующий план при этом не меняется. Повтор — не ошибка: каталог
+        отвечает тем же планом.
+        """
+        data = self._post(
+            _STATE_PATH,
+            external_user_id=external_user_id,
+            body={"plan_id": plan_id, "state": "archived"},
+            op="state",
+        )
+        if not isinstance(data.get("plan"), dict):
             raise PlanEngineUnavailableError("plan_missing")
         return data
 
@@ -179,6 +272,16 @@ class PlanEngineHttpClient:
 
         ``None`` — штатный ответ каталога «плана нет» (в том числе при
         выключенном механизме), не ошибка.
+        """
+        return self.get_plan_and_proposal(external_user_id=external_user_id)[0]
+
+    def get_plan_and_proposal(
+        self, *, external_user_id: str
+    ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+        """``GET internal/me/plan/`` — действующий план и предложение, ждущее замены.
+
+        Одно другое не заслоняет: предложение не становится планом без
+        отдельного подтверждения человека (:meth:`replace_plan`).
         """
         try:
             url = AylaUrlBuilder(self._base_url).build(_PLAN_PATH)
@@ -215,7 +318,12 @@ class PlanEngineHttpClient:
         plan = data["plan"]
         if plan is not None and not isinstance(plan, dict):
             raise PlanEngineUnavailableError("plan_malformed")
-        return plan
+        # Предложение — рядом с планом (beautygo_backend#704). Ключа нет —
+        # каталог старше #704: предложения нет, и это не ошибка.
+        proposal = data.get("proposal")
+        if proposal is not None and not isinstance(proposal, dict):
+            raise PlanEngineUnavailableError("proposal_malformed")
+        return plan, proposal
 
     def capability_labels(self, *, external_user_id: str, keys: list[str]) -> dict[str, str]:
         """``POST …/capability-labels/`` → ``{ключ: подпись}`` только для подписанных.
@@ -223,13 +331,30 @@ class PlanEngineHttpClient:
         Способность без подтверждённой подписи в ответ не попадает: показывать
         человеку ключ вместо слов нельзя, а сочинять подпись — тем более.
         """
+        details = self.capability_details(external_user_id=external_user_id, keys=keys)
+        return {key: row["label"] for key, row in details.items()}
+
+    def capability_details(
+        self, *, external_user_id: str, keys: list[str]
+    ) -> dict[str, CapabilityDetails]:
+        """Тот же вызов, что :meth:`capability_labels`, — подпись и «зачем».
+
+        ``expected_effect`` — курируемый «ожидаемый эффект» способности из
+        знания каталога: ответ на «почему этот шаг» (решение главного окна
+        09.10 по выбору владельца «из обоснования»). Каталог начнёт отдавать
+        его отдельным PR; пока поля нет — ``None``, и это не ошибка: шаг без
+        текста «зачем» показывается без него, сочинять текст нельзя.
+
+        Способность без подтверждённой подписи в ответ не попадает вовсе —
+        и её «зачем» тоже: объяснение шага, который нечем назвать, не нужно.
+        """
         data = self._post(
             _LABELS_PATH, external_user_id=external_user_id, body={"keys": list(keys)}, op="labels"
         )
         labels = data.get("labels")
         if not isinstance(labels, dict):
             raise PlanEngineUnavailableError("labels_missing")
-        out: dict[str, str] = {}
+        out: dict[str, CapabilityDetails] = {}
         for key, item in labels.items():
             if (
                 isinstance(item, dict)
@@ -237,7 +362,13 @@ class PlanEngineHttpClient:
                 and isinstance(item.get("label"), str)
                 and item["label"].strip()
             ):
-                out[str(key)] = item["label"].strip()
+                effect = item.get("expected_effect")
+                out[str(key)] = {
+                    "label": item["label"].strip(),
+                    "expected_effect": effect.strip()
+                    if isinstance(effect, str) and effect.strip()
+                    else None,
+                }
         return out
 
     def _post(
@@ -300,8 +431,18 @@ def _refusal(response: httpx.Response) -> PlanEngineError:
         return PlanIdempotencyConflictError("plan_idempotency_conflict")
     if response.status_code == 409 and code == "PLAN_CAPABILITY_NOT_CONFIRMED":
         return PlanCapabilityNotConfirmedError("plan_capability_not_confirmed")
+    if response.status_code == 423 and code == "DELETION_IN_PROGRESS":
+        return PlanDeletionInProgressError("deletion_in_progress")
+    if response.status_code == 422 and code == "CONSENT_REQUIRED":
+        return PlanConsentRequiredError(reason or "consent_required")
+    if response.status_code == 409 and code == "PLAN_REPLACEMENT_TARGET_CHANGED":
+        return PlanReplacementTargetChangedError("plan_replacement_target_changed")
+    if response.status_code == 409 and code == "PLAN_TRANSITION_REFUSED":
+        return PlanTransitionRefusedError("plan_transition_refused")
     if response.status_code == 404 and reason == "goal_not_found":
         return PlanGoalNotFoundError("goal_not_found")
+    if response.status_code == 404 and (reason == "plan_not_found" or code == "NOT_FOUND"):
+        return PlanNotFoundError("plan_not_found")
     return PlanEngineUnavailableError(f"unexpected 4xx: HTTP {response.status_code} {code}")
 
 
@@ -321,6 +462,8 @@ def _error_code_and_reason(response: httpx.Response) -> tuple[str, str]:
 
 __all__ = [
     "PlanCapabilityNotConfirmedError",
+    "PlanConsentRequiredError",
+    "PlanDeletionInProgressError",
     "PlanEngineAuthError",
     "PlanEngineConfigError",
     "PlanEngineContractError",
