@@ -32,6 +32,7 @@ or any user-identifying string beyond `bot_user.id` (UUID). The
 from __future__ import annotations
 
 import logging
+import uuid
 from typing import TYPE_CHECKING
 
 from django.db import transaction
@@ -267,6 +268,73 @@ def record_global_consent(
     return record
 
 
+def _erase_zone_memory_on_withdrawal(bot_user: "BotUser", consent_type: str) -> int:
+    """Отозвано согласие жёлтой или красной зоны — её строки получают надгробие.
+
+    DRF-2542 §5. Стоит в :func:`withdraw`, самой нижней двери отзыва: так его
+    получает любой путь, а не те, кто вспомнил позвать.
+
+    Согласие зоны держится на человеке, а не на оболочке
+    (:func:`has_memory_consent`: достаточно действующего гранта на любой его
+    оболочке). Поэтому строки уходят, только когда действующего согласия зоны
+    не осталось ни на одной.
+
+    Сбой стирания отзыв НЕ откатывает (своя точка сохранения) — то же правило,
+    что у отзыва предположений: человек, отозвавший согласие, обязан остаться
+    без согласия, а использование строк уже остановлено читателем. Сбой
+    пишется в лог с исключением.
+    """
+    zone = next((z for z, ct in MEMORY_ZONE_CONSENT.items() if ct == consent_type), None)
+    ayla_user_id = getattr(bot_user, "ayla_user_id", None)
+    if zone is None or not ayla_user_id:
+        return 0
+    try:
+        from apps.identity.services.memory_deleter import (
+            WITHDRAWABLE_ZONES,
+            soft_delete_zone_for_withdrawal,
+        )
+
+        if zone not in WITHDRAWABLE_ZONES or has_memory_consent(ayla_user_id, zone):
+            return 0
+        with transaction.atomic():
+            return soft_delete_zone_for_withdrawal(ayla_user_id, zone, request_id=uuid.uuid4())
+    except Exception:  # noqa: BLE001 — стирание не откатывает отзыв; см. докстринг
+        logger.exception(
+            "consent.withdraw.zone_memory_erase_failed bot_user=%s type=%s",
+            bot_user.id,
+            consent_type,
+        )
+        return 0
+
+
+def _drop_plan_proposals_on_withdrawal(bot_user: "BotUser", consent_type: str) -> int:
+    """Отозвано согласие на хранение — несохранённое предложение плана уходит.
+
+    DRF-2967. Стоит в :func:`withdraw`, самой нижней двери отзыва, рядом со
+    стиранием зон: так его получает любой путь отзыва.
+
+    Согласие держится на человеке, а не на оболочке, и отзыв на любой
+    оболочке закрывает человека целиком (:func:`has_person_consent`: последний
+    отзыв позже любой действующей записи). Поэтому предложение уходит из
+    разговоров ВСЕХ его оболочек, а отдельной проверки «осталось ли согласие
+    где-то ещё» здесь нет — сразу после отзыва ответ на неё всегда «нет».
+    Сохранённый план отзыв не уничтожает (решение владельца) — он в каталоге
+    и сюда не относится.
+
+    Отзыв не откатывается и не падает из-за очистки: помощник сам никогда не
+    бросает, а использование предложения уже остановлено гейтом плана.
+    """
+    if consent_type != ConsentRecord.ConsentType.PERSONAL_DATA.value:
+        return 0
+    try:
+        from apps.conversations.model_history import clear_plan_proposals_for_person
+
+        return clear_plan_proposals_for_person(bot_user)
+    except Exception:  # noqa: BLE001 — очистка не откатывает отзыв; см. докстринг
+        logger.exception("consent.withdraw.plan_proposals_drop_failed bot_user=%s", bot_user.id)
+        return 0
+
+
 def withdraw(
     bot_user: "BotUser",
     *,
@@ -367,6 +435,9 @@ def withdraw(
                 bot_user.id,
                 consent_type,
             )
+
+    _erase_zone_memory_on_withdrawal(bot_user, consent_type)
+    _drop_plan_proposals_on_withdrawal(bot_user, consent_type)
 
     transaction.on_commit(_emit_withdraw)
     logger.info(
@@ -500,6 +571,51 @@ def last_personal_data_withdrawal(bot_user: "BotUser") -> datetime | None:
     return latest
 
 
+def model_history_cutoff(bot_user: "BotUser") -> datetime | None:
+    """Момент, не позже которого переписка модели не отдаётся; ``None`` — отсечки нет.
+
+    DRF-2700, решение владельца 07.10.2026 (п.23). Самое позднее из трёх:
+
+    * отзыв ``personal_data`` (:func:`last_personal_data_withdrawal`);
+    * отзыв согласия на предположения — «перестать … использовать такие
+      выводы, в том числе из прошлых ответов»;
+    * последнее поштучное «забудь X»
+      (:mod:`apps.identity.services.model_history_cutoff`).
+
+    Отделить ответы, где Ayla опиралась на стёртое или на предположение, от
+    остальных надёжно нельзя, поэтому закрывается вся переписка до момента —
+    это прямо сказано в решении. Строки переписки не меняются: человек видит
+    их как прежде.
+
+    По всем оболочкам человека, как у остальных проверок согласия. Новая
+    выдача согласия отсечку не снимает.
+    """
+    from apps.identity.services import model_history_cutoff as memory_cutoff
+
+    shells = list(person_channel_shells(bot_user))
+    moments: list[datetime] = []
+
+    withdrawn = last_personal_data_withdrawal(bot_user)
+    if withdrawn is not None:
+        moments.append(withdrawn)
+
+    inference_withdrawn: datetime | None = ConsentRecord.all_tenants.filter(
+        bot_user__in=shells,
+        consent_type=ConsentRecord.ConsentType.PREFERENCE_INFERENCE.value,
+        withdrawn_at__isnull=False,
+    ).aggregate(latest=Max("withdrawn_at"))["latest"]
+    if inference_withdrawn is not None:
+        moments.append(inference_withdrawn)
+
+    user_ids = {getattr(shell, "ayla_user_id", None) for shell in shells}
+    user_ids.add(getattr(bot_user, "ayla_user_id", None))
+    forgotten = memory_cutoff.latest(uid for uid in user_ids if uid)
+    if forgotten is not None:
+        moments.append(forgotten)
+
+    return max(moments) if moments else None
+
+
 def has_global_consent(
     bot_user: "BotUser",
     consent_type: str,
@@ -582,6 +698,8 @@ _PERSONAL_DATA_CASCADE = (
     ConsentRecord.ConsentType.MEMORY_RED,
     ConsentRecord.ConsentType.FOOD_DIARY_PROCESSING,
     ConsentRecord.ConsentType.PREFERENCE_INFERENCE,
+    # DRF-2845 — согласие на ИИ-оценку еды: та же надстройка над основанием.
+    ConsentRecord.ConsentType.AI_FOOD_ESTIMATION,
 )
 
 

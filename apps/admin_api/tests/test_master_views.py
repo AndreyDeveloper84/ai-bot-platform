@@ -101,11 +101,17 @@ class TestAdminAuth:
         resp = client.get(_list_url(), HTTP_AUTHORIZATION=init_data_header("5004"))
         assert resp.status_code == 403
 
-    def test_receptionist_role_forbidden(
-        self, client: Client, receptionist_bot_user: BotUser
+    def test_receptionist_reads_the_list_but_not_a_master_card(
+        self, client: Client, receptionist_bot_user: BotUser, master: CatalogMaster
     ) -> None:
-        resp = client.get(_list_url(), HTTP_AUTHORIZATION=init_data_header("5003"))
-        assert resp.status_code == 403
+        """DRF-2826: the booking desk picks a master to book with — the list
+        opens (``require_booking_desk``); the master card and its edits stay
+        with the owner/admin."""
+        listed = client.get(_list_url(), HTTP_AUTHORIZATION=init_data_header("5003"))
+        assert listed.status_code == 200
+
+        card = client.get(_detail_url(master.id), HTTP_AUTHORIZATION=init_data_header("5003"))
+        assert card.status_code == 403
 
     def test_admin_role_allowed(
         self,

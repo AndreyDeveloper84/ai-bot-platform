@@ -56,6 +56,7 @@ from typing import Any
 
 from django.http import HttpRequest, HttpResponse, JsonResponse
 from django.utils import timezone
+from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 
 from apps.catalog.models import CatalogMaster, MasterService
@@ -229,6 +230,7 @@ def profile_card(request: HttpRequest) -> HttpResponse:
     )
 
 
+@csrf_exempt
 @require_http_methods(["GET", "POST"])
 @require_master_init_data
 @_catalog_profile_required
@@ -274,6 +276,7 @@ def profile_portfolio(request: HttpRequest) -> HttpResponse:
     return JsonResponse(outward_portfolio_item(master.id, item), status=201)
 
 
+@csrf_exempt
 @require_http_methods(["DELETE"])
 @require_master_init_data
 @_catalog_profile_required

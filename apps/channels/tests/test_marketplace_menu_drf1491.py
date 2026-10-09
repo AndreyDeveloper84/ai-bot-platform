@@ -961,7 +961,7 @@ class TestUnfinishedFlowsOutrankTheMenu:
         _welcomed(70804)
         claimed: list[str] = []
 
-        def fake_nutrition(*, text, attachments, bot_user, conversation, trace_id):
+        def fake_nutrition(*, text, attachments, bot_user, conversation, trace_id, **_):
             claimed.append(text)
             return SkillResult(reply_text="Сколько вам лет?", action_type="nutrition_anketa")
 

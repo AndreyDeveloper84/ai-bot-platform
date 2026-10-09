@@ -7,8 +7,10 @@
  * surface) + memory `project_variant_b_wellness_mvp` (food scanner
  * P0 for pilot 2026-07-15).
  *
- * Hides numeric values when `health_flags.eating_disorder === true`
- * (per spec §10 Appendix ED Mode).
+ * Hides numeric values when the person chose «Без чисел»
+ * (`nutrition_numbers_hidden`, DRF-2766). Before the owner's decision of
+ * 04.10 this was derived from `health_flags.eating_disorder`; it no longer
+ * is — the mode is the person's own choice, not a profile flag.
  */
 
 import { DiaryEntryItem } from "../components/DiaryEntryPhoto";

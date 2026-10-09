@@ -241,6 +241,10 @@ class MemoryCommandResult:
     text: str
     action_type: str = ""
     action_data: dict | None = None
+    #: DRF-2700 — ход стёр факт по просьбе человека. Канал после записи своего
+    #: ответа закрывает переписку для модели: ответ «забыла, что ты …» сам
+    #: повторяет стёртое.
+    erased: bool = False
     #: DRF-2341 — см. ``apps.orchestrator.done_claims``.
     #: DRF-2341 — те же имена и та же форма, что у ``SkillResult``: булев
     #: признак плюс подтверждение «источник:что он ответил». ``meta`` у
@@ -254,6 +258,32 @@ def _normalise(text: str) -> str:
     """Lowercase, strip, collapse spaces, fold ё→е for robust matching."""
 
     return re.sub(r"\s+", " ", (text or "").strip().lower().replace("ё", "е"))
+
+
+#: DRF-2887 — знаки, которыми человек отделяет глагол команды от остального:
+#: «забудь, что я веган», «забудь: я веган», «удали; про бюджет». Тире и дефис
+#: не трогаются: тире между словами шаблоны и так переносят, а дефис стоит
+#: внутри слов («кето-диета»).
+_COMMAND_PUNCTUATION_RE = re.compile(r"[,;:]")
+_POLITENESS_RE = re.compile(r"\bпожалуйста\b")
+
+#: DRF-2887 — «не забудь, что я веган» — просьба ПОМНИТЬ. Замер на ``eac09fc6``:
+#: без запятой эта реплика стирала факт и получала ответ «забыла». Отрицание
+#: перед глаголом забывания — не команда, ни с запятой, ни без.
+_NEGATED_FORGET_RE = re.compile(r"\bне\s+(?:забудь|забывай|удали|удаляй|сотри|стирай)\b")
+
+
+def _spoken(norm: str) -> str:
+    """Нормализованная реплика без знаков и вежливости между глаголом и предметом.
+
+    Замер DRF-2887: «забудь, что я веган» — с запятой, как требует пунктуация —
+    командой не считалась: шаблоны ждут пробел сразу после глагола. Факт
+    оставался, реплика уходила модели, человек об этом не узнавал. То же с
+    «удали,», «сотри,», «забудь, пожалуйста, …», «покажи, что знаешь обо мне».
+    """
+
+    without_marks = _COMMAND_PUNCTUATION_RE.sub(" ", norm)
+    return re.sub(r"\s+", " ", _POLITENESS_RE.sub(" ", without_marks)).strip()
 
 
 def _fact_keywords(content: dict) -> tuple[str, ...]:
@@ -574,6 +604,14 @@ def handle_memory_command(
             )
         return None  # bare «удалить» with no pending prompt → not a command
 
+    # DRF-2887 — дальше команды ищутся в реплике без знаков между глаголом и
+    # предметом. Слово-подтверждение выше сверяется с исходной строкой: оно
+    # одно, и знаки в нём не разделители.
+    norm = _spoken(norm)
+    if _NEGATED_FORGET_RE.search(norm):
+        # «не забудь, что я веган» — просьба помнить, а не забыть.
+        return None
+
     # 2. «забудь всё» request → the confirmation prompt (does NOT delete yet).
     if _FORGET_ALL_RE.search(norm):
         return MemoryCommandResult(text=FORGET_ALL_PROMPT, action_type="memory_forget_all_prompt")
@@ -608,7 +646,7 @@ def handle_memory_command(
             _bridge_clear(bot_user, keys)
             label = describe_green_content(fact_matched[0].content) or "это"
             # Фраза факта — во 2-м лице (DRF-1292), поэтому «забыла, что ты …».
-            return MemoryCommandResult(text=f"Готово — забыла, что ты {label}.")
+            return MemoryCommandResult(text=f"Готово — забыла, что ты {label}.", erased=True)
 
         matched_domains: set[str] = set()
         for e in entries:
@@ -628,7 +666,9 @@ def handle_memory_command(
             soft_delete_green_entries(user_id, [e.id for e in doomed])
             _bridge_clear(bot_user, domain_keys)
             label = _DOMAIN_LABELS.get(domain_keys[0], domain_keys[0])
-            return MemoryCommandResult(text=f"Готово — забыла всё, что знала: {label}.")
+            return MemoryCommandResult(
+                text=f"Готово — забыла всё, что знала: {label}.", erased=True
+            )
 
         # 0 or several domains → clarify by showing what's remembered (DRF-1262:
         # the current view, so the clarification itself is not a contradiction).

@@ -14,7 +14,7 @@
  */
 
 import { applyIdentityHeaders } from "./auth-headers";
-import { ApiError } from "./api";
+import { ApiError, logApiDetail } from "./api";
 
 const MASTER_API_BASE = "/api/v1/master";
 
@@ -117,6 +117,11 @@ export interface DashboardMaster {
   name: string;
   specialization: string;
   photo_url: string;
+  /**
+   * DRF-2881 — сколько действующих услуг у мастера. Нет поля (ответ старого
+   * сервера) — число неизвестно, и «услуг нет» утверждать нельзя.
+   */
+  services_count?: number;
 }
 
 export interface DashboardSalon {
@@ -813,6 +818,9 @@ export const uploadMasterProfilePhoto = async (
     } catch {
       /* non-JSON 5xx */
     }
+    // DRF-2881: подробность отказа — в журнал, как у общего помощника
+    // `request`; этот самописный `fetch` её туда не писал.
+    logApiDetail(res.status, parsed.error, parsed.detail);
     // DRF-2439. Единственное из восьми мест, где потеря НЕ пустая: эта же
     // ручка отвечает через `_profile_refusal` (`master_api/views.py:849`) и
     // на 400 кладёт в `details` данные каталога о том, ЧТО ИМЕННО не так с

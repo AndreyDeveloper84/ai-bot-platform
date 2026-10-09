@@ -833,6 +833,21 @@ class UserPersonalContext(models.Model):
         "blocks future yellow/red writes via the writer guard. "
         "Reconciliation job tracked in issue #597.",
     )
+    model_history_cutoff_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="DRF-2700: момент последнего поштучного «забудь X». Реплики не "
+        "позже него модели не отдаются; человек их видит как прежде. Только "
+        "время, без содержания стёртого. Только растёт.",
+    )
+    declared_fields_withheld = models.JSONField(
+        default=list,
+        blank=True,
+        help_text="DRF-2700: имена полей анкеты Ayla, которые человек попросил "
+        "забыть, а очистить в анкете нельзя (у контракта нет значения «пусто» "
+        "для цены). Такое поле из анкеты не читается, пока человек не назовёт "
+        "его заново. Только имена, без значений.",
+    )
 
     # NOT TenantScopedManager — UPC is cross-tenant by design.
     objects = models.Manager()
@@ -1249,11 +1264,20 @@ class RedZoneAccessLog(models.Model):
     # «Что Ayla помнит». Не ops_admin с principal=user_id: аудит субъекта
     # под чужой ролью недопустим (152-ФЗ гл. 3 «кто обращался»).
     ACCESSOR_DATA_SUBJECT = "data_subject"
+    # DRF-2132 — два читателя периметра аллергий: фильтр рекомендаций и
+    # предупреждение сканера еды. Отдельные роли, а не ``ayla_llm``: в журнале
+    # должно быть видно, что факт ушёл в фильтр, а не в текст промпта. Сегодня
+    # ни одна из них не используется — читателей ещё нет, роли названы заранее,
+    # чтобы первый читатель не записался под чужой.
+    ACCESSOR_RECOMMENDATIONS = "recommendations"
+    ACCESSOR_SCANNER = "scanner"
     ACCESSOR_ROLE_CHOICES = [
         (ACCESSOR_AYLA_LLM, "Ayla LLM prompt construction"),
         (ACCESSOR_SYSTEM_JOB, "System job (TTL sweep, forget-all)"),
         (ACCESSOR_OPS_ADMIN, "Ops admin (break-glass)"),
         (ACCESSOR_DATA_SUBJECT, "Data subject (own memory, Mini App)"),
+        (ACCESSOR_RECOMMENDATIONS, "Recommendations filter (allergen exclusion)"),
+        (ACCESSOR_SCANNER, "Food scanner (allergen warning)"),
     ]
 
     ACCESS_READ = "read"
@@ -1267,6 +1291,10 @@ class RedZoneAccessLog(models.Model):
     ACCESS_WRITE_REJECTED_NO_CONSENT = "write_rejected_no_consent"
     # DRF-2133 — soft-delete по просьбе субъекта (tombstone, не purge).
     ACCESS_DELETE = "delete"
+    # DRF-2774 — факт процитирован в ответе / стал основанием рекомендации, и
+    # срок записи продлён (``memory_term.record_memory_use``). Не «read»:
+    # чтение в контекст срок не продлевает, и сторож различает их по значению.
+    ACCESS_USE = "use"
     ACCESS_TYPE_CHOICES = [
         (ACCESS_READ, "Read"),
         (ACCESS_WRITE, "Write"),
@@ -1281,6 +1309,7 @@ class RedZoneAccessLog(models.Model):
             ACCESS_WRITE_REJECTED_NO_CONSENT,
             "Write rejected — yellow/red without consent (DB CHECK)",
         ),
+        (ACCESS_USE, "Use — cited in an answer / recommendation, term extended"),
     ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)

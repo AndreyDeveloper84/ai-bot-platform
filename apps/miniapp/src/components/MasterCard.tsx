@@ -1,6 +1,6 @@
 import type { Master } from "../lib/api";
 import { formatDistance } from "../lib/nearby";
-import { publicRating, reviewCountLabel } from "../lib/rating";
+import { NO_REVIEWS_LABEL, publicRating, reviewCountLabel } from "../lib/rating";
 import { MasterPhoto } from "./MasterPhoto";
 
 interface Props {
@@ -32,7 +32,7 @@ function initials(name: string): string {
 
 export function MasterCard({ master, selected, onSelect, acceptsToday, categories }: Props) {
   // DRF-1224 — «0.00» is a truthy string and not a rating; see publicRating.
-  const rating = publicRating(master.rating);
+  const rating = publicRating(master.rating, master.review_count);
   return (
     <button
       type="button"
@@ -61,12 +61,15 @@ export function MasterCard({ master, selected, onSelect, acceptsToday, categorie
             ))}
           </ul>
         )}
-        {rating !== null && (
+        {/* DRF-2875 — оценка только вместе с числом отзывов; иначе слова владельца. */}
+        {rating !== null ? (
           <div className="master-card__rating" aria-label={`Рейтинг ${rating.toFixed(1)}`}>
             ★ {rating.toFixed(1)}
-            {reviewCountLabel(master.review_count) && (
-              <span className="master-card__reviews"> ({reviewCountLabel(master.review_count)})</span>
-            )}
+            <span className="master-card__reviews"> ({reviewCountLabel(master.review_count)})</span>
+          </div>
+        ) : (
+          <div className="master-card__reviews" data-testid="master-no-reviews">
+            {NO_REVIEWS_LABEL}
           </div>
         )}
         {/* DRF-1707 — расстояние с провода каталога; неизвестное не рисуется. */}

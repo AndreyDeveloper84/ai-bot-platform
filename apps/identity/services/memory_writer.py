@@ -46,6 +46,7 @@ behaviour.
 
 from __future__ import annotations
 
+import logging
 import os
 import socket
 import uuid
@@ -61,6 +62,8 @@ from apps.identity.services.exceptions import (
     MinorProtectionLookupFailed,
     ZonePromotionRequiresConsent,
 )
+
+logger = logging.getLogger(__name__)
 
 
 #: DRF-2542 — условия, которые обязаны быть закрыты ДО первого писателя жёлтой
@@ -80,9 +83,53 @@ ZONE_WRITER_CONDITIONS: dict[str, str] = {
 }
 
 #: Закрытые условия: исполнены или названы решением владельца как сознательно
-#: отложенные. ПУСТО по построению — закрывает их не сторож и не исполнитель
-#: сторожа. Имя, которого нет в ``ZONE_WRITER_CONDITIONS``, — ошибка записи.
-ZONE_WRITER_CONDITIONS_CLOSED: frozenset[str] = frozenset()
+#: отложенные. Закрывает их не сторож и не исполнитель сторожа. Имя, которого
+#: нет в ``ZONE_WRITER_CONDITIONS``, — ошибка записи.
+#:
+#: 07.10.2026, слово главного окна по замеру исполнением на ``d62e07bd``
+#: (запись в листе DRF-2542): §2 — отказ базы по согласию назван строкой аудита;
+#: §4 — красная строка с истёкшим сроком снята свипом с причиной ``ttl_purge``,
+#: задача стоит в расписании.
+#:
+#: 07.10.2026, подпись главного окна после слияния и сверки узлами: §1 —
+#: писатель читает журнал согласий зоны (#2343); §5 — отзыв согласия зоны
+#: ставит её строкам надгробие ``withdrawal`` (#2343); §7 — сброс аккаунта
+#: снимает красную зону под GUC, узел идёт под ролью без SUPERUSER и
+#: BYPASSRLS (#2341).
+#:
+#: Открыты два, оба — решения владельца: §3 (состав выгрузки 152-ФЗ для
+#: жёлтой и красной зоны) и §6 (``minor_lock`` и уже лежащие строки). Общий
+#: гейт ждёт всех семи: заглушка #597 не снимается, пока они открыты.
+ZONE_WRITER_CONDITIONS_CLOSED: frozenset[str] = frozenset(
+    {
+        "consent_check_in_write_entry",
+        "targeted_integrity_error",
+        "ttl_purge_sweep",
+        "withdrawal_deletes_zone_rows",
+        "account_reset_red_zone_rls",
+    }
+)
+
+
+def _zone_consent_active(user_id: uuid.UUID, zone: str) -> bool:
+    """Действует ли у человека согласие этой зоны — по журналу согласий.
+
+    DRF-2542 §1. ``consent_at`` — параметр вызывающего: он говорит «согласие
+    было», и до этой проверки писатель верил ему на слово — красная строка
+    ложилась и без единой записи согласия ``memory_red``. Читатель красной зоны
+    спрашивает тот же журнал в точке использования (DRF-2132), так что строка,
+    записанная без него, была бы ещё и непригодной.
+
+    Сбой чтения согласия — отказ: запись особой категории не открывается
+    ошибкой.
+    """
+    try:
+        from apps.consent.services import has_memory_consent
+
+        return has_memory_consent(user_id, zone)
+    except Exception:  # noqa: BLE001 — a failed consent read must not open the gate
+        logger.exception("identity.memory_writer.zone_consent_read_failed zone=%s", zone)
+        return False
 
 
 def _check_minor_protection(user_id: uuid.UUID) -> None:
@@ -249,6 +296,18 @@ def write_entry(
             _check_minor_protection(user_id)
         except MinorProtectionLookupFailed:
             _audit_write_rejected(user_id, request_id, purpose)
+            return None
+
+        # DRF-2542 §1 — согласие зоны по журналу, а не по параметру. После
+        # возраста: сначала «можно ли этому человеку вообще», потом «согласен
+        # ли он»; строка аудита называет причину отказа.
+        if not _zone_consent_active(user_id, sensitivity_zone):
+            _audit_write_rejected(
+                user_id,
+                request_id,
+                purpose,
+                access_type=RedZoneAccessLog.ACCESS_WRITE_REJECTED_NO_CONSENT,
+            )
             return None
 
     # Canonical §3.1 fields at write time (Migration Plan Step 3.5): stop
@@ -488,6 +547,20 @@ def promote_zone(
             request_id=request_id,
             purpose=purpose,
         )
+        # DRF-2542 §1 — тот же журнал согласий, что у `write_entry`: токен
+        # говорит «человек согласился сейчас», но строка зоны без действующего
+        # согласия зоны непригодна и неотзываема. Отказ назван строкой аудита.
+        if not _zone_consent_active(entry.user_id, new_zone):
+            _audit_write_rejected(
+                entry.user_id,
+                request_id,
+                purpose,
+                access_type=RedZoneAccessLog.ACCESS_WRITE_REJECTED_NO_CONSENT,
+            )
+            raise ZonePromotionRequiresConsent(
+                f"Cannot promote entry {entry.id} to {new_zone!r}: no active "
+                f"{new_zone}-zone memory consent on record (DRF-2542 §1)."
+            )
         # Same UPDATE — satisfies CHECK 2 (yellow/red require
         # consent_at NOT NULL).
         entry.sensitivity_zone = new_zone

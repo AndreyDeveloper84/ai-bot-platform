@@ -378,24 +378,31 @@ class TestBackendDeclaredContext:
         assert "ретинол" not in block
         assert "чувствительн" not in block.lower()
 
-    def test_single_fact_forget_also_skips_price_and_favorites(self, settings, ayla):
-        """«забудь про бюджет» / «забудь про мастера» clear nothing upstream."""
+    def test_forgetting_the_budget_clears_the_price_upstream_and_nothing_else(self, settings, ayla):
+        """FIXED (was GAP) — «забудь про бюджет» used to clear nothing upstream.
+
+        The contract had no clear value for the price, so the forget left
+        «3000» in the profile while the bot answered «забыла» (measured
+        07.10, DRF-2700). Since DRF-2886 the catalog resets a field on
+        ``value: null``, and the forget sends exactly that for the two price
+        fields — in a request of its own.
+        """
         bu = _bot_user("erase-decl-4")
         _consents(bu, settings)
         assert record_explicit_green_facts(bu, "комфортно до 3000 рублей") == 1
+        assert ayla.context["price_range_max"] == "3000.00"  # ушло наверх при записи
         ayla.calls.clear()
 
         res = handle_memory_command(user_id=bu.ayla_user_id, text="забудь мой бюджет", bot_user=bu)
 
         assert res is not None and "забыла" in res.text.lower()
         assert read_green_entries(bu.ayla_user_id) == []  # локально удалено
-        assert ayla.patched_fields == []  # наверх не ушло ничего
-        # The statement wrote 3000 upstream; the forget leaves it there.
-        assert ayla.context["price_range_max"] == "3000.00"
+        assert ayla.patched_fields == ["price_range_min", "price_range_max"]
+        assert ayla.context["price_range_max"] is None
         # And — the negative of DRF-1367 — a DOMAIN forget is still a domain
         # forget. It must NEVER reach for the whole-profile erasure verb.
         assert ayla.deleted is False
-        assert [c[0] for c in ayla.calls] == []
+        assert [c[0] for c in ayla.calls] == ["patch"]
 
     def test_domain_forget_clears_its_domain_and_only_its_domain(self, settings, ayla):
         """Negative control for DRF-1367 — «забудь это» was not widened.
@@ -779,7 +786,9 @@ class TestDialogueHistory:
             and p.name != "short_term.py"
             and pattern.search(p.read_text(encoding="utf-8"))
         )
-        assert callers == ["conversations/erasure.py"]
+        # DRF-2700 — второй названный вызывающий: окно очищается и при поштучном
+        # «забудь X», и при отзыве согласия на предположения.
+        assert callers == ["conversations/erasure.py", "conversations/model_history.py"]
 
 
 # ---------------------------------------------------------------------------
