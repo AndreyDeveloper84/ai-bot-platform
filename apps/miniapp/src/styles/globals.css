@@ -2630,6 +2630,39 @@ a {
   gap: 8px;
 }
 
+
+.booking-detail__actions {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  margin-top: var(--s-4);
+}
+
+.booking-detail__reschedule {
+  padding: var(--s-3);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-md);
+  background: var(--c-surface-1);
+}
+
+.booking-detail__reschedule label {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+}
+
+.booking-detail__slot-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-2);
+}
+
+.booking-detail__reschedule-confirm {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+
 /* ---- Solo «Скоро» placeholder screen (Tau §5.4 empty-state voice) ---- */
 
 .soon-screen {
