@@ -33,13 +33,18 @@ from django.utils import timezone
 from apps.identity.models import MemoryEntry, RedZoneAccessLog, UserPersonalContext
 from apps.identity.services.exceptions import TenantScopeViolation
 from apps.identity.services.red_zone_reader import RedZoneReader
+from apps.identity.tests._red_zone_consent import grant_red_zone_consent
 
 pytestmark = pytest.mark.django_db
 
 
 @pytest.fixture
 def upc():
-    return UserPersonalContext.objects.create(user_id=uuid.uuid4())
+    # DRF-2132: читатель отдаёт строку ради использования только при
+    # действующем согласии красной зоны.
+    context = UserPersonalContext.objects.create(user_id=uuid.uuid4())
+    grant_red_zone_consent(context.user_id)
+    return context
 
 
 @pytest.fixture

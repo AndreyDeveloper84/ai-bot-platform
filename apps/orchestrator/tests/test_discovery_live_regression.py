@@ -158,7 +158,8 @@ def test_live_turn_returns_a_master_not_the_fallback(
     # empty specialization is the common case on this very path. The resolved
     # service rides the line since DRF-962: the button carries it into
     # booking, so the user must see what they are tapping into.
-    assert "• Массажист Пилот · Спортивный массаж · Пенза" in reply.text
+    # DRF-2875 — у мастера без отзывов в строке стоят слова владельца.
+    assert "• Массажист Пилот · Спортивный массаж · Пока нет отзывов · Пенза" in reply.text
     assert " —  " not in reply.text
     assert reply.action_data is not None
     buttons = reply.action_data["attachments"][0]["payload"]["buttons"]

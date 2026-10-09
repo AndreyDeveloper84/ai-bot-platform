@@ -315,6 +315,56 @@ def read_consents(bot_user: "BotUser") -> dict[str, Any]:
             # выдача — клиент шлёт её обратно как доказательство показа.
             "regrant": {"document_version": DATA_STORAGE_REGRANT_DOCUMENT_VERSION},
         },
+        # DRF-2779 — умная память Ф4: добровольное согласие на предположения.
+        # ``grant`` — под какой версией текста выдаётся сейчас (клиент шлёт
+        # её обратно) и что текст ещё на юр-проверке (#947).
+        "preference_inference": {
+            **states[ConsentRecord.ConsentType.PREFERENCE_INFERENCE.value],
+            "grant": _preference_inference_grant_terms(),
+        },
+        # DRF-2867 — согласие на ИИ-оценку еды: выдача и отзыв из Mini App.
+        "ai_food_estimation": _ai_food_estimation_state(bot_user),
+    }
+
+
+def _ai_food_estimation_state(bot_user: "BotUser") -> dict[str, Any]:
+    """Согласие на ИИ-оценку еды — для экрана выдачи и для настроек (DRF-2867).
+
+    ``granted`` — тем же предикатом, что стоит перед отправкой блюда наружу
+    (:func:`apps.consent.ai_food_estimation.is_granted`): действует сейчас и
+    выдано под ТЕКУЩЕЙ версией текста. Общий ``consents[...]`` версию не
+    сверяет — экран, читающий его, показал бы «разрешено» человеку, которого
+    гейт уже не пускает.
+
+    ``required`` — включён ли механизм. Пока он выключен, оценка идёт всем,
+    и экрану нечего предлагать: согласие ничего бы не меняло.
+
+    ``grant.text`` — полный текст, под которым выдаётся согласие; ``None``,
+    пока владелец его не утвердил. Тогда выдача закрыта и на сервере: экран
+    не может показать человеку то, под чем он подписывается.
+    """
+    from apps.consent import ai_food_estimation as afe
+
+    return {
+        "granted": afe.is_granted(bot_user),
+        "required": afe.consent_required(),
+        "grant": {
+            "document_version": afe.AI_FOOD_ESTIMATION_DOCUMENT_VERSION,
+            "pending_legal": afe.PENDING_LEGAL,
+            "text": afe.AI_FOOD_ESTIMATION_TEXT,
+        },
+    }
+
+
+def _preference_inference_grant_terms() -> dict[str, Any]:
+    from apps.consent.preference_inference import (
+        PENDING_LEGAL,
+        PREFERENCE_INFERENCE_DOCUMENT_VERSION,
+    )
+
+    return {
+        "document_version": PREFERENCE_INFERENCE_DOCUMENT_VERSION,
+        "pending_legal": PENDING_LEGAL,
     }
 
 

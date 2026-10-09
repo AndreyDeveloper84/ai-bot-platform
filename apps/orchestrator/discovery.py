@@ -37,6 +37,7 @@ from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from apps.llm.router import get_router
+from apps.catalog.rating import rating_label
 from apps.marketplace.discovery import (
     clarification_material,
     discover_masters,
@@ -283,8 +284,9 @@ SHOW_MASTERS_TOOL_SPEC: dict[str, Any] = {
     "description": (
         "Show bookable beauty masters across all salons matching the user's "
         "request. Call this when the user wants to find, browse, or pick a "
-        "master. Requires at least a city or a specialization: with neither, "
-        "there is nothing to match on — use ask_clarification instead."
+        "master. Requires at least a city, a specialization or a master name: "
+        "with none of them, there is nothing to match on — use "
+        "ask_clarification instead."
     ),
     "parameters": {
         "type": "object",
@@ -335,6 +337,27 @@ SHOW_MASTERS_TOOL_SPEC: dict[str, Any] = {
                 "minimum": 1,
                 "maximum": _MAX_MASTER_CARDS,
                 "description": "How many masters to show.",
+            },
+            # DRF-2829 — предпочтение мастера (решение владельца 06.10). Кто
+            # это и что он делает, решает каталог; модель только передаёт имя
+            # и силу. «только / именно» в реплике делают силу жёсткой и без
+            # модели (``master_preference.is_hard``).
+            "master": {
+                "type": "string",
+                "description": (
+                    "Имя мастера, которого клиент предпочитает или к которому "
+                    "хочет только его, — как прозвучало («Анна», «к Анне»). "
+                    "Только имя: без услуги и без города."
+                ),
+            },
+            "master_strength": {
+                "type": "string",
+                "enum": ["soft", "hard"],
+                "description": (
+                    "hard — клиент хочет ТОЛЬКО этого мастера («только к Анне», "
+                    "«именно Анна»): других не показывать. soft — предпочитает, "
+                    "но готов к другим («лучше бы к Анне», «предпочитаю Анну»)."
+                ),
             },
         },
         "required": [],
@@ -1190,8 +1213,10 @@ def _render_master_cards(
         # all of them through as «★ 0.00», which reads as «bad master»
         # (DRF-1224). Same shape as the em-dash below: guard the value that
         # actually shows up, not the one the schema allows.
-        has_rating = card.rating is not None and card.rating >= 1
-        rating = f" · ★ {card.rating}" if has_rating else ""
+        #
+        # DRF-2875 (решение владельца 07.10, п.20): оценка — только вместе
+        # с числом отзывов; без отзывов — «Пока нет отзывов», без звезды.
+        rating = f" · {rating_label(card.rating, getattr(card, 'review_count', 0))}"
         # NOT ``city`` — that name holds the QUERY's city, which the
         # «Показать ещё» ref below has to carry. Rebinding it here made the
         # button search for « · Пенза» and find nobody (caught by

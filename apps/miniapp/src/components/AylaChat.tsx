@@ -45,7 +45,13 @@ import type {
   AylaDayOffDetails,
   AylaSelect,
 } from "../lib/master-api";
-import { hapticImpact, hapticSelection, signalReady } from "../lib/max-sdk";
+import {
+  hapticImpact,
+  hapticSelection,
+  openExternalLink,
+  parseStartRoute,
+  signalReady,
+} from "../lib/max-sdk";
 import {
   AylaCards,
   BookingCreatedCard,
@@ -115,6 +121,35 @@ export interface AylaChatConfirmResult {
   details?: AylaBookingDetails | AylaDayOffDetails | null;
 }
 
+/**
+ * Кнопка под ответом (DRF-2799, клиентский диалог): подпись и либо `payload`
+ * — тап уходит тем же `ask`, как тап кнопки в чате бота, — либо `url`,
+ * либо `open_app` (DRF-2885): слаг экрана, на который в чате бота вела бы
+ * кнопка «открыть Mini App». Здесь это переход внутри приложения.
+ * Стафф-ассистент кнопок не присылает, у него этот ряд пуст.
+ */
+export interface AylaQuickReply {
+  label: string;
+  payload?: string;
+  url?: string;
+  open_app?: string;
+}
+
+/**
+ * Куда ведёт кнопка `open_app` — или `null`, если вести некуда: слаг не
+ * знаком карте маршрутов. Такая кнопка не рисуется: нажатие без действия
+ * хуже отсутствия кнопки.
+ */
+export function quickReplyRoute(reply: AylaQuickReply): string | null {
+  return reply.open_app ? parseStartRoute(reply.open_app) : null;
+}
+
+/** Кнопку можно нажать: у неё есть действие, которое этот экран умеет исполнить. */
+function isActionable(reply: AylaQuickReply, canOpen: boolean): boolean {
+  if (reply.url || reply.payload) return true;
+  return canOpen && quickReplyRoute(reply) !== null;
+}
+
 export interface AylaChatApi {
   history: () => Promise<{ messages: AylaChatMessage[] }>;
   ask: (
@@ -124,6 +159,7 @@ export interface AylaChatApi {
     answer: string;
     pending_action: AylaChatPendingAction | null;
     cards?: AylaCard[];
+    buttons?: AylaQuickReply[];
   }>;
   confirm: (token: string) => Promise<AylaChatConfirmResult>;
 }
@@ -147,6 +183,8 @@ interface LocalMessage extends AylaChatMessage {
   pending?: boolean;
   /** Карточки под репликой (DRF-2153). */
   cards?: AylaCard[];
+  /** Быстрые ответы под репликой (DRF-2799). */
+  buttons?: AylaQuickReply[];
   /** Результат подтверждения — карточка ✓ «Запись создана» вместо пузыря. */
   created?: {
     details: AylaBookingDetails | null;
@@ -251,7 +289,7 @@ export function AylaChat({
   );
 
   const send = useCallback(
-    async (rawText: string, select?: AylaSelect) => {
+    async (rawText: string, select?: AylaSelect, shownAs?: string) => {
       const text = rawText.trim();
       if (!text || sending) return;
 
@@ -262,8 +300,10 @@ export function AylaChat({
       // на которую сверху лёг другой разговор, человек не должен.
       setPending(null);
       // DRF-2151: команда/токен на экране не рисуется и до перезахода.
-      if (!isHiddenTurn(text)) {
-        setMessages((prev) => [...prev, localMessage("user", text)]);
+      // DRF-2799: тап быстрого ответа уходит payload'ом, а на экране — подписью.
+      const shown = shownAs ?? text;
+      if (!isHiddenTurn(shown)) {
+        setMessages((prev) => [...prev, localMessage("user", shown)]);
       }
       lastQuestion.current = select ? { text, select } : { text };
       setSending(true);
@@ -279,6 +319,7 @@ export function AylaChat({
             {
               ...localMessage("assistant", res.answer),
               cards: res.cards ?? [],
+              buttons: res.buttons ?? [],
             },
           ]);
         }
@@ -383,6 +424,8 @@ export function AylaChat({
 
   const overLimit = draft.length > MAX_QUESTION_CHARS;
 
+  const lastId = messages.at(-1)?.id ?? null;
+
   return (
     <>
       <div className="ayla-list" role="log" aria-label={logLabel}>
@@ -426,6 +469,33 @@ export function AylaChat({
                     onSelect={(text, select) => void send(text, select)}
                     onRecheck={onRecheck}
                   />
+                ) : null}
+                {/* DRF-2799: кнопки — только под последним ответом, как
+                    клавиатура в чате бота; старые не жмутся заново. */}
+                {m.id === lastId &&
+                (m.buttons ?? []).some((b) => isActionable(b, onOpen !== undefined)) ? (
+                  <ul className="ayla-card__list" aria-label="Варианты ответа">
+                    {(m.buttons ?? [])
+                      .filter((b) => isActionable(b, onOpen !== undefined))
+                      .map((b) => (
+                      <li key={`${b.label}-${b.payload ?? b.url ?? b.open_app ?? ""}`}>
+                        <button
+                          type="button"
+                          className="ayla-card__option"
+                          disabled={sending}
+                          onClick={() => {
+                            if (b.url) return openExternalLink(b.url);
+                            if (b.payload) return void send(b.payload, undefined, b.label);
+                            // DRF-2885 — переход внутри Mini App, не новый ход.
+                            const route = quickReplyRoute(b);
+                            if (route && onOpen) onOpen(route);
+                          }}
+                        >
+                          <span className="ayla-card__row-main">{b.label}</span>
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
                 ) : null}
               </div>
             ),

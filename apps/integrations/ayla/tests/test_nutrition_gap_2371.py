@@ -77,7 +77,10 @@ class TestLogMealKeepsAbsence:
         _set_transport(transport)
 
         result = await client.log_meal(
-            external_user_id="bot:1", dish_name="ризотто с трюфелем", meal_type="dinner"
+            external_user_id="bot:1",
+            dish_name="ризотто с трюфелем",
+            meal_type="dinner",
+            ai_estimate_allowed=True,
         )
         # Утверждение о наличии — до утверждения об отсутствии: запись легла.
         assert result.log_id == "log-1"
@@ -109,7 +112,7 @@ class TestLogMealKeepsAbsence:
         _set_transport(transport)
 
         result = await client.log_meal(
-            external_user_id="bot:1", dish_name="вода", meal_type="other"
+            external_user_id="bot:1", dish_name="вода", meal_type="other", ai_estimate_allowed=True
         )
         assert result.calories == 0.0
 
@@ -139,7 +142,7 @@ class TestEstimateKeepsAbsence:
         _set_transport(transport)
 
         result = await client.estimate_dish(
-            external_user_id="bot:1", dish_name="ризотто с трюфелем"
+            external_user_id="bot:1", dish_name="ризотто с трюфелем", ai_estimate_allowed=True
         )
         assert result.matched_dish == "ризотто с трюфелем"
         assert result.portion_g == 250
@@ -204,7 +207,9 @@ class TestEstimateKeepsItsNumbers:
         client, transport = _client_with_handler(handler)
         _set_transport(transport)
 
-        result = await client.estimate_dish(external_user_id="bot:1", dish_name="борщ")
+        result = await client.estimate_dish(
+            external_user_id="bot:1", dish_name="борщ", ai_estimate_allowed=True
+        )
 
         assert result.kcal == 147.0
         assert result.portion_g == 300

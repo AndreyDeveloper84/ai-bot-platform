@@ -14,7 +14,6 @@ DEBT: dict[str, int] = {
     "apps/channels/max/global_onboarding.py::run_onboarding_turn": 1,
     "apps/channels/max/handler.py::_handle_global_max_event_inner": 10,
     "apps/orchestrator/concierge.py::_concierge_turn._reply": 1,
-    "apps/orchestrator/concierge.py::_execute_start_booking": 1,
     "apps/orchestrator/concierge.py::generate_concierge_reply": 1,
     "apps/orchestrator/discovery.py::_render_ask_clarification": 1,
     "apps/orchestrator/discovery.py::execute_catalog_callback": 1,

@@ -53,7 +53,8 @@ class TestTheRefusalNamesItsReasonAndMove:
         self, client: Client, receptionist_bot_user: BotUser
     ) -> None:
         reads_the_day = _get(client, "salon_day", "5003")
-        refused = _get(client, "masters_list", "5003")
+        # DRF-2826: masters_list ушёл к стойке записи — дверь только владельца/админа здесь staff_roster.
+        refused = _get(client, "staff_roster", "5003")
 
         assert reads_the_day.status_code == 200, reads_the_day.content
         assert refused.status_code == 403

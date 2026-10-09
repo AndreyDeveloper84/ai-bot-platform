@@ -50,6 +50,11 @@ class GreenFact:
     kind: str
     content: dict[str, Any]
     source: str = MemoryEntry.SOURCE_INFERRED
+    #: DRF-2830 — где факт записан (``MemoryEntry.source_tenant_id``, DRF-2544):
+    #: id салона, id сентинела ``global_bot`` или ``None`` — происхождение
+    #: неизвестно. Умолчание — неизвестно: читатель, собирающий память для
+    #: салона, такой факт не показывает (``UNKNOWN_ORIGIN_NEVER_CROSSES``).
+    source_tenant_id: uuid.UUID | None = None
 
 
 @dataclass(frozen=True)
@@ -166,6 +171,7 @@ def read_personal_context(user_id: uuid.UUID) -> PersonalContextView:
             # a future prompt consumer picking this one up would otherwise get
             # the conservative default and label every fact a guess.
             source=entry.source,
+            source_tenant_id=entry.source_tenant_id,
         )
         for entry in read_green_entries(user_id)
     ]

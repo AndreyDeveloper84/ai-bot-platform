@@ -86,6 +86,13 @@ _CONSENTS_DOCUMENT = own(
     "proactive_hints.enabled",
     "data_storage.revocation",
     "data_storage.regrant",
+    "preference_inference.granted",
+    "preference_inference.granted_at",
+    "preference_inference.document_version",
+    "preference_inference.grant",
+    "ai_food_estimation.granted",
+    "ai_food_estimation.required",
+    "ai_food_estimation.grant",
     via="apps.consent.customer:read_consents",
     note=(
         "the customer's own consent registry re-read from the database after the write; "
@@ -204,6 +211,10 @@ CUSTOMER_ROUTES: dict[str, Entry] = {
         ),
     ),
     "customer_marketing_consent": _CONSENTS_DOCUMENT,
+    # DRF-2779 — умная память Ф4: добровольное согласие на предположения.
+    "customer_preference_inference_consent": _CONSENTS_DOCUMENT,
+    # DRF-2867 — согласие на ИИ-оценку еды: выдача и отзыв, тот же документ.
+    "customer_ai_food_estimation_consent": _CONSENTS_DOCUMENT,
     "customer_data_storage_consent": own(
         "consents.*",
         "proactive_hints.enabled",
@@ -647,6 +658,74 @@ CUSTOMER_ROUTES: dict[str, Entry] = {
             "created, DELETE answers with the closed flag only"
         ),
     ),
+    # --- Plan Engine decision (DRF-2879, own) ---------------------------
+    "customer_plan_decision": own(
+        "outcome",
+        "decision.decision_id",
+        "decision.goal_ref",
+        "decision.steps[].step_id / role / level / capability_ref / assertions",
+        "decision.assertions[].kind / subject / value / provenance",
+        "decision.validation.status / step_validations",
+        "decision.policy_versions",
+        via="apps.miniapp_api.views_plan_engine:plan_decision_payload",
+        note=(
+            "the ephemeral plan the catalog composes for the caller's own active goal, "
+            "read under their external_user_id and saved nowhere: the goal id, capability "
+            "KEYS (curated catalog vocabulary, never free text) and rule assertions taken "
+            "from the planning-rules registry; no name, phone, health answers or goal text. "
+            "For every outcome other than PLAN the answer is the outcome name alone"
+        ),
+    ),
+    # --- Plan Engine saved plan (DRF-2876, own) -------------------------
+    "customer_plan_current": own(
+        "plan.plan_id",
+        "plan.steps[].step_id / label / why / booked_at",
+        "proposal.plan_id / replaces_plan_id",
+        "proposal.steps[].step_id / label / why",
+        "draft.token",
+        "draft.steps[].label / why",
+        via="apps.miniapp_api.views_plan_engine:saved_plan_payload",
+        note=(
+            "the caller's own saved plan, read from the catalog under their "
+            "external_user_id: the plan id and, per step, its id and the curated "
+            "client label of the step's capability (catalog vocabulary, one text for "
+            "everyone). No capability keys, no goal text, no name, phone or health "
+            "answers; `plan` is null when nothing is saved"
+        ),
+    ),
+    # --- Plan Engine: replace / keep (DRF-2876, none) --------------------
+    "customer_plan_replace": none(
+        "acknowledgement only — {'replaced': bool} after the catalog made the caller's own "
+        "proposal the plan in effect; the two plan ids from the body are not echoed",
+        via="apps.miniapp_api.views_plan_engine:customer_plan_replace",
+    ),
+    "customer_plan_step": own(
+        "token",
+        "options[].service_name / salon_name / salon_city / master_name / price / "
+        "duration_minutes / place_address / synthetic",
+        "option (the chosen one, same fields)",
+        "slots[]",
+        "booked_at",
+        via="apps.orchestrator.plan_step_card:option_view",
+        note=(
+            "the services the catalog offers for a step of the caller's own plan, the free "
+            "times of the option they picked and the time of the booking just made for them: "
+            "catalog vocabulary about salons and their staff (a master's public display "
+            "name, price, duration, the confirmed address of the place) plus the caller's "
+            "own booking time. No catalog ids of the service or the master, no client name, "
+            "phone or health answers"
+        ),
+    ),
+    "customer_plan_save": none(
+        "acknowledgement only — {'saved': true} after the caller's own unsaved proposal was "
+        "saved by the catalog; the card token from the body is not echoed",
+        via="apps.miniapp_api.views_plan_engine:customer_plan_save",
+    ),
+    "customer_plan_keep": none(
+        "acknowledgement only — {'kept': true} after the caller's own proposal was archived; "
+        "nothing about the plan or the person is returned",
+        via="apps.miniapp_api.views_plan_engine:customer_plan_keep",
+    ),
     # --- Plan Lite proposal (DRF-2123, План-A, own) ---------------------
     "customer_plan_lite_proposal": own(
         "proposal.goal_key",
@@ -674,6 +753,8 @@ CUSTOMER_ROUTES: dict[str, Entry] = {
         "green[].value",
         "green[].said_at",
         "green[].provenance",
+        "green[].state",
+        "green[].expires_at",
         "health[].id",
         "health[].kind",
         "health[].value",
@@ -703,6 +784,39 @@ CUSTOMER_ROUTES: dict[str, Entry] = {
             "RedZoneReader.soft_delete_for_subject with a delete-type access log"
         ),
     ),
+    # DRF-2781 — умная память Ф4: ответ человека на предложение Ayla.
+    "customer_memory_confirm": own(
+        "id",
+        "key",
+        "label",
+        "value",
+        "said_at",
+        "provenance",
+        "state",
+        "expires_at",
+        via="apps.miniapp_api.views_memory:customer_memory_confirm",
+        note=(
+            "the caller's own green memory entry after they confirmed Ayla's proposal: the "
+            "same row shape as customer_memory, now state=confirmed with a 180-day term; a "
+            "foreign, unknown or non-proposal id is refused with no record"
+        ),
+    ),
+    "customer_memory_correct": own(
+        "id",
+        "key",
+        "label",
+        "value",
+        "said_at",
+        "provenance",
+        "state",
+        "expires_at",
+        via="apps.miniapp_api.views_memory:customer_memory_correct",
+        note=(
+            "the caller's own new said fact written from their correction of Ayla's "
+            "proposal (the proposal is superseded as corrected): the same row shape as "
+            "customer_memory, state=said"
+        ),
+    ),
     "customer_memory_forget_all": own(
         "status",
         via="apps.miniapp_api.views_memory:customer_memory_forget_all",
@@ -714,6 +828,31 @@ CUSTOMER_ROUTES: dict[str, Entry] = {
         ),
     ),
     # --- «Продолжить разговор с Ayla» (DRF-2144, H01, own) ---------------
+    # DRF-2799 — разговор с Ayla внутри Mini App: тот же глобальный ход бота.
+    "customer_assistant_ask": own(
+        "answer",
+        "buttons",
+        "pending_action",
+        "cards",
+        via="apps.miniapp_api.views_customer_assistant:customer_assistant_ask",
+        note=(
+            "the reply the bot's own global turn produced for the caller's question, captured "
+            "from the MAX egress instead of sent: the same text, after the same inbound safety "
+            "gate, consent gates and outbound guard as in the chat; the person is the verified "
+            "init-data principal, never an id from the body; buttons are the reply's own "
+            "keyboard (label + callback payload or link)"
+        ),
+    ),
+    "customer_assistant_history": own(
+        "messages",
+        via="apps.miniapp_api.views_customer_assistant:customer_assistant_history",
+        note=(
+            "the caller's own dialogue with Ayla — user and assistant turns of the caller's "
+            "channel shells (person_channel_shells), the same thread the bot chat and "
+            "last-topic read; anonymised turns and turns before the last personal_data "
+            "withdrawal (DRF-2700) are excluded"
+        ),
+    ),
     "customer_last_topic": own(
         "last_topic.text",
         "last_topic.at",

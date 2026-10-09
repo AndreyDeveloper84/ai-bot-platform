@@ -428,6 +428,32 @@ class DishEstimate:
     #: число дала модель. ``kcal`` при ней ``None``; показывать только с
     #: пометкой «Оценка ИИ».
     kcal_ai_estimate: float | None = None
+    #: DRF-2822 — почему числа ИИ нет (или что оно есть): одно из
+    #: ``KCAL_AI_STATUSES``. ``None`` — каталог поля не прислал (старый) или
+    #: прислал незнакомое значение; карточка тогда говорит нейтрально.
+    kcal_ai_status: str | None = None
+
+
+#: DRF-2822 — статус оценки ИИ, как его ставит каталог в ``food-estimate``.
+KCAL_AI_ESTIMATED = "estimated"
+KCAL_AI_UNAVAILABLE = "unavailable"
+KCAL_AI_DISABLED = "disabled"
+KCAL_AI_STATUSES = frozenset(
+    {
+        KCAL_AI_ESTIMATED,
+        KCAL_AI_UNAVAILABLE,
+        KCAL_AI_DISABLED,
+        "not_attempted",
+        "not_permitted",
+        "not_applicable",
+        "declined",
+    }
+)
+
+
+def _kcal_ai_status(raw: Any) -> str | None:
+    """Знакомый статус — или ``None``: незнакомое значение причиной не называем."""
+    return raw if isinstance(raw, str) and raw in KCAL_AI_STATUSES else None
 
 
 def _float_or_none(raw: Any) -> float | None:
@@ -1152,8 +1178,14 @@ class NutritionClient:
         external_user_id: str,
         dish_name: str,
         portion_g: float | None = None,
+        ai_estimate_allowed: bool,
     ) -> DishEstimate:
         """POST ``/api/v1/nutrition/internal/food-estimate/`` — оценка без записи.
+
+        ``ai_estimate_allowed`` (DRF-2845) — можно ли каталогу отдать название
+        блюда внешней модели. Обязателен и без умолчания: каждое место вызова
+        решает это само, прямым вызовом
+        ``apps.consent.ai_food_estimation.estimate_permitted``.
 
         DRF-1837, §109 шаги 2–4: показать «Я распознала так» до того, как
         число стало данными человека. Каталог не пишет ничего.
@@ -1174,7 +1206,10 @@ class NutritionClient:
                 "X-External-User-ID": external_user_id,
             }
         )
-        body: dict[str, Any] = {"dish_name": dish_name}
+        body: dict[str, Any] = {
+            "dish_name": dish_name,
+            "ai_estimate_allowed": bool(ai_estimate_allowed),
+        }
         if portion_g is not None:
             body["portion_g"] = portion_g
 
@@ -1208,6 +1243,7 @@ class NutritionClient:
                 carbs_g=_float_or_none(data.get("carbs_g")),
                 raw=data,
                 kcal_ai_estimate=_float_or_none(data.get("kcal_ai_estimate")),
+                kcal_ai_status=_kcal_ai_status(data.get("kcal_ai_status")),
             )
         if resp.status_code >= 500:
             self._breaker(BreakerPurpose.NUTRITION).record_failure(now=now)
@@ -1230,10 +1266,15 @@ class NutritionClient:
         portion_multiplier: float = 1.0,
         idempotency_key: str | None = None,
         entry_origin: str | None = None,
+        ai_estimate_allowed: bool,
     ) -> FoodLogResponse:
         """POST ``/api/v1/nutrition/internal/food-log/``.
 
         At least one of ``scan_id`` / ``dish_name`` must be provided.
+
+        ``ai_estimate_allowed`` (DRF-2845) — можно ли записи взять сохранённую
+        оценку ИИ. Обязателен, как у :meth:`estimate_dish`: согласие могли
+        отозвать между показом карточки и записью.
         """
         now = time.monotonic()
         if self._breaker(BreakerPurpose.NUTRITION).is_open(now=now):
@@ -1251,6 +1292,7 @@ class NutritionClient:
         body: dict[str, Any] = {
             "meal_type": meal_type,
             "portion_multiplier": portion_multiplier,
+            "ai_estimate_allowed": bool(ai_estimate_allowed),
         }
         if scan_id:
             body["scan_id"] = scan_id
