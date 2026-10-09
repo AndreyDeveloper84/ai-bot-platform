@@ -65,6 +65,7 @@ import {
   type WorkingHoursDay,
   type WorkingHoursResponse,
 } from "../lib/master-api";
+import { parseSalonWallClock } from "../lib/format";
 import { signalReady } from "../lib/max-sdk";
 
 export const DAY_LABELS = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"] as const;
@@ -693,17 +694,18 @@ export function MasterWorkingHoursScreen() {
           onEditRejected={(item) => {
             const startIso = item.requested_start;
             const endIso = item.requested_end;
-            const weekday =
-              startIso && /^\d{4}-\d{2}-\d{2}T/.test(startIso)
-                ? weekdayFromYmd(startIso.slice(0, 10))
-                : todayWeekday();
+            const startWall = startIso ? parseSalonWallClock(startIso) : null;
+            const endWall = endIso ? parseSalonWallClock(endIso) : null;
+            const weekday = startWall
+              ? weekdayFromYmd(startWall.ymd)
+              : todayWeekday();
             openUnavailable(weekday, null);
-            if (startIso && /^\d{4}-\d{2}-\d{2}T/.test(startIso)) {
-              setRequestDate(startIso.slice(0, 10));
-              setFrom(startIso.slice(11, 16));
+            if (startWall) {
+              setRequestDate(startWall.ymd);
+              setFrom(startWall.hm);
             }
-            if (endIso && /^\d{4}-\d{2}-\d{2}T/.test(endIso)) {
-              setTo(endIso.slice(11, 16));
+            if (endWall) {
+              setTo(endWall.hm);
             }
             setReason(item.reason_text ?? "");
           }}
@@ -868,21 +870,14 @@ function AvailabilityLifecycle({
 
 function availabilityWindowText(item: PendingAvailabilityItem): string {
   if (!item.requested_start || !item.requested_end) return "Период не указан";
-  // wall-clock-ok: requested_* comes from the salon schedule contract with
-  // its offset; display the wall-clock that the server sent, never the
-  // browser/device timezone projection.
-  const start = item.requested_start.match(
-    /^(\d{4})-(\d{2})-(\d{2})T(\d{2}:\d{2})/,
-  );
-  const end = item.requested_end.match(
-    /^(\d{4})-(\d{2})-(\d{2})T(\d{2}:\d{2})/,
-  );
+  const start = parseSalonWallClock(item.requested_start);
+  const end = parseSalonWallClock(item.requested_end);
   if (!start || !end) return `${item.requested_start} — ${item.requested_end}`;
-  const sameDay =
-    start[1] === end[1] && start[2] === end[2] && start[3] === end[3];
-  if (!sameDay) return `${item.requested_start} — ${item.requested_end}`;
-  const month = MONTHS_GENITIVE[Number(start[2]) - 1] ?? "";
-  return `${Number(start[3])} ${month} · ${start[4]}–${end[4]}`;
+  if (start.ymd !== end.ymd) {
+    return `${item.requested_start} — ${item.requested_end}`;
+  }
+  const month = MONTHS_GENITIVE[start.month - 1] ?? "";
+  return `${start.day} ${month} · ${start.hm}–${end.hm}`;
 }
 
 function weekdayFromYmd(ymd: string): number {
