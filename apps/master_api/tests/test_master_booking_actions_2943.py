@@ -78,9 +78,7 @@ def stub_actions(monkeypatch):
     return install
 
 
-def test_detail_exposes_the_version_of_the_mirror_the_operator_saw(
-    client, accepted_master
-):
+def test_detail_exposes_the_version_of_the_mirror_the_operator_saw(client, accepted_master):
     row = _visit(accepted_master, version=7)
     body = _get(client, row.appointment_id).json()
     assert body["appointment_version"] == 7
@@ -204,9 +202,7 @@ def test_unknown_result_becomes_pending_not_a_retryable_failure(
 
 
 @pytest.mark.parametrize("action", ["delete", "", None, 123])
-def test_unknown_action_is_rejected_before_outbound(
-    client, accepted_master, stub_actions, action
-):
+def test_unknown_action_is_rejected_before_outbound(client, accepted_master, stub_actions, action):
     row = _visit(accepted_master)
     stub = stub_actions(StubActions())
 
