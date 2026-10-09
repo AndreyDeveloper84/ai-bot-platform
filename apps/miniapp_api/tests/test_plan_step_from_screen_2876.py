@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import json
 from datetime import date
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -213,6 +214,30 @@ def test_p2_choose_then_book_each_call_with_the_last_turns_verdict_and_the_basis
     assert expected is not None  # у человека настоящее согласие
     assert asked["consent"] == resolved["consent"] == created["consent"] == expected
     assert "consent" not in block
+
+
+def test_p2b_the_time_that_was_pressed_is_the_time_that_is_booked(
+    client: Client, tenant, wire, person: str, catalog: StepCatalog, booking: Booking, monkeypatch
+) -> None:
+    later = "2026-10-12T11:30:00+03:00"
+    monkeypatch.setattr(
+        booking,
+        "get_available_times",
+        lambda **kwargs: (
+            [SimpleNamespace(datetime=SLOT), SimpleNamespace(datetime=later)]
+            if kwargs["date"] == "2026-10-12"
+            else []
+        ),
+    )
+    _turn(client, person)
+    _step(client, person, "offers", PLAN8, 0)
+    chosen = _step(client, person, "choose", SEARCH8, 0)
+    assert chosen.json()["slots"] == [SLOT, later]
+
+    booked = _step(client, person, "book", SEARCH8, 1)
+
+    assert booked.json() == {"booked_at": later}
+    assert booking.created[0]["start_datetime"] == later
 
 
 def test_p3_without_a_chat_turn_the_catalog_is_not_asked(
