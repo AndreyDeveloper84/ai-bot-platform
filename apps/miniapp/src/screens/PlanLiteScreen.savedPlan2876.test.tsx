@@ -24,7 +24,7 @@ vi.mock("../lib/plan-engine", () => {
   const getSavedPlan = vi.fn();
   return {
     getSavedPlan,
-    getSavedPlanState: async () => ({ plan: await getSavedPlan(), proposal: null }),
+    getSavedPlanState: async () => ({ plan: await getSavedPlan(), proposal: null, draft: null }),
   };
 });
 vi.mock("../lib/plan-lite", async (importOriginal) => {

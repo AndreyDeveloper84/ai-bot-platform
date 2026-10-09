@@ -682,6 +682,8 @@ CUSTOMER_ROUTES: dict[str, Entry] = {
         "plan.steps[].step_id / label / why",
         "proposal.plan_id / replaces_plan_id",
         "proposal.steps[].step_id / label / why",
+        "draft.token",
+        "draft.steps[].label / why",
         via="apps.miniapp_api.views_plan_engine:saved_plan_payload",
         note=(
             "the caller's own saved plan, read from the catalog under their "
@@ -696,6 +698,11 @@ CUSTOMER_ROUTES: dict[str, Entry] = {
         "acknowledgement only — {'replaced': bool} after the catalog made the caller's own "
         "proposal the plan in effect; the two plan ids from the body are not echoed",
         via="apps.miniapp_api.views_plan_engine:customer_plan_replace",
+    ),
+    "customer_plan_save": none(
+        "acknowledgement only — {'saved': true} after the caller's own unsaved proposal was "
+        "saved by the catalog; the card token from the body is not echoed",
+        via="apps.miniapp_api.views_plan_engine:customer_plan_save",
     ),
     "customer_plan_keep": none(
         "acknowledgement only — {'kept': true} after the caller's own proposal was archived; "

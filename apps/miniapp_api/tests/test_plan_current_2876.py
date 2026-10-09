@@ -93,7 +93,7 @@ def test_c2_no_saved_plan_is_null_not_an_error(client, bot_user) -> None:
         resp = _get(client)
 
     assert resp.status_code == 200
-    assert resp.json() == {"plan": None, "proposal": None}
+    assert resp.json() == {"plan": None, "proposal": None, "draft": None}
     fake.capability_details.assert_not_called()
 
 
@@ -112,6 +112,7 @@ def test_c3_the_saved_plan_comes_as_ids_and_labels_in_catalog_order(client, bot_
             ],
         },
         "proposal": None,
+        "draft": None,
     }
     assert fake.capability_details.call_args.kwargs["keys"] == [
         "cap.sleep_routine",

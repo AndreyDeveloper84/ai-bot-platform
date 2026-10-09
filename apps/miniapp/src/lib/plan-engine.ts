@@ -49,18 +49,35 @@ export interface PlanProposal extends SavedPlan {
   replaces_plan_id: string;
 }
 
+/**
+ * Несохранённое предложение, собранное в чате: шаги словами каталога и
+ * опознаватель показанной карточки. Экран сохраняет именно показанное.
+ */
+export interface PlanDraft {
+  token: string;
+  steps: { label: string; why?: string | null }[];
+}
+
 export interface SavedPlanState {
   plan: SavedPlan | null;
   proposal: PlanProposal | null;
+  /** `null` — предложения нет (или сервер его не отдаёт). */
+  draft: PlanDraft | null;
 }
 
 /** Действующий план и предложение рядом с ним; то же правило `null`, что у `getSavedPlan`. */
 export async function getSavedPlanState(): Promise<SavedPlanState> {
   try {
-    const res = await request<{ plan: SavedPlan | null; proposal?: PlanProposal | null }>("/plan/current");
-    return { plan: res.plan ?? null, proposal: res.proposal ?? null };
+    const res = await request<{
+      plan: SavedPlan | null;
+      proposal?: PlanProposal | null;
+      draft?: PlanDraft | null;
+    }>("/plan/current");
+    return { plan: res.plan ?? null, proposal: res.proposal ?? null, draft: res.draft ?? null };
   } catch (e) {
-    if (e instanceof ApiError && e.slug === "plan_engine_disabled") return { plan: null, proposal: null };
+    if (e instanceof ApiError && e.slug === "plan_engine_disabled") {
+      return { plan: null, proposal: null, draft: null };
+    }
     throw e;
   }
 }
@@ -78,6 +95,19 @@ export async function replacePlan(proposal: PlanProposal): Promise<boolean> {
     body: JSON.stringify({ plan_id: proposal.plan_id, replaces_plan_id: proposal.replaces_plan_id }),
   });
   return res.replaced;
+}
+
+/**
+ * «Сохранить» несохранённое предложение — без сообщения в чат (задание
+ * владельца §9). Сервер сохраняет с оценкой безопасности последнего хода чата;
+ * отказы слагами: `plan_safety_unavailable`, `plan_safety_blocked`,
+ * `plan_proposal_expired` (карточка устарела), отказы гейта согласия.
+ */
+export async function saveDraft(draft: PlanDraft): Promise<void> {
+  await request<{ saved: boolean }>("/plan/save", {
+    method: "POST",
+    body: JSON.stringify({ token: draft.token }),
+  });
 }
 
 /** «Оставить текущий» — предложение уходит в архив, действующий план не меняется. */
