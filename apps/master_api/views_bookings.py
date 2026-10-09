@@ -46,7 +46,13 @@ from apps.admin_api.services.booking import (
     slot_payload,
 )
 from apps.catalog.models import CatalogMaster
+from apps.catalog.specialist_ref import CatalogSpecialistUnresolved, catalog_specialist_id
 from apps.identity.models import BotUser
+from apps.integrations.ayla.booking_client import (
+    BookingBadRequestError,
+    BookingUnavailableError,
+    get_ayla_booking_client,
+)
 from apps.integrations.ayla.user_proxy import external_user_id_for
 from apps.master_api.auth import require_master_init_data
 from apps.master_api.services.bookings import (
@@ -54,6 +60,7 @@ from apps.master_api.services.bookings import (
     booking_detail,
     enrich_customer_rows,
     looks_like_phone,
+    own_booking,
 )
 from apps.tenancy.timezones import salon_zone
 
@@ -91,6 +98,138 @@ def booking_detail_view(request: HttpRequest, appointment_id: uuid.UUID) -> Http
         return _error("not_found", "booking not found", 404)
     return JsonResponse(detail.to_dict(salon_zone(master.tenant)))
 
+
+# ─── POST bookings/<id>/action ───────────────────────────────────────────────
+
+MASTER_BOOKING_ACTIONS = frozenset({"acknowledge", "cancel", "complete", "no-show", "reschedule"})
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@require_master_init_data
+def booking_action(request: HttpRequest, appointment_id: uuid.UUID) -> HttpResponse:
+    """Действие мастера над СВОЕЙ записью через canonical specialist endpoint.
+
+    DRF-2943 поверх DRF-2785: Mini App не получает direct internal bearer.
+    expected_version приходит из detail, который оператор реально видел;
+    backend не заменяет её свежей версией перед write.
+    """
+
+    master: CatalogMaster = request.master  # type: ignore[attr-defined]
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+
+    if own_booking(master, appointment_id) is None:
+        return _error("not_found", "booking not found", 404)
+
+    try:
+        body = json.loads(request.body or b"{}")
+    except ValueError:
+        return _error("bad_request", "invalid JSON body", 400)
+    if not isinstance(body, dict):
+        return _error("bad_request", "body must be a JSON object", 400)
+
+    action = body.get("action")
+    if not isinstance(action, str) or action not in MASTER_BOOKING_ACTIONS:
+        return _error("bad_request", "unsupported action", 400)
+
+    expected_version = body.get("expected_version")
+    if action != "cancel":
+        if (
+            isinstance(expected_version, bool)
+            or not isinstance(expected_version, int)
+            or expected_version < 1
+        ):
+            return JsonResponse(
+                {"outcome": "conflict", "reason_code": "version_unknown"},
+                status=409,
+            )
+    elif expected_version is not None and (
+        isinstance(expected_version, bool)
+        or not isinstance(expected_version, int)
+        or expected_version < 1
+    ):
+        return _error("bad_request", "expected_version must be a positive integer", 400)
+
+    new_start_datetime = body.get("new_start_datetime")
+    if action == "reschedule":
+        if not isinstance(new_start_datetime, str) or not new_start_datetime.strip():
+            return _error("bad_request", "new_start_datetime is required", 400)
+        new_start_datetime = new_start_datetime.strip()
+    else:
+        new_start_datetime = None
+
+    reason = body.get("reason")
+    if reason is not None and not isinstance(reason, str):
+        return _error("bad_request", "reason must be a string", 400)
+
+    try:
+        result = get_ayla_booking_client().act_as_specialist(
+            external_user_id=external_user_id_for(bot_user),
+            specialist_id=catalog_specialist_id(master),
+            appointment_id=str(appointment_id),
+            action=action,
+            expected_version=expected_version,
+            reason=(reason.strip() if isinstance(reason, str) and reason.strip() else None),
+            new_start_datetime=new_start_datetime,
+        )
+    except CatalogSpecialistUnresolved:
+        logger.warning("master_api.booking_action.no_specialist_id master=%s", master.pk)
+        return JsonResponse(
+            {"outcome": "pending", "reason_code": "result_pending"},
+            status=202,
+        )
+    except BookingUnavailableError:
+        logger.warning(
+            "master_api.booking_action.unknown_result action=%s appointment=%s",
+            action,
+            appointment_id,
+        )
+        return JsonResponse(
+            {"outcome": "pending", "reason_code": "result_pending"},
+            status=202,
+        )
+    except BookingBadRequestError as exc:
+        code = str(getattr(exc, "code", "") or "")
+        status = int(getattr(exc, "status_code", 400) or 400)
+        if status == 404:
+            return _error("not_found", "booking not found", 404)
+        if status == 403:
+            return _error("forbidden", "action unavailable", 403)
+        if code == "STALE_VERSION":
+            return JsonResponse(
+                {"outcome": "conflict", "reason_code": "stale_version"},
+                status=409,
+            )
+        if code in {
+            "INVALID_STATUS",
+            "APPOINTMENT_TERMINAL",
+            "CANCELLATION_NOT_ALLOWED",
+        }:
+            return JsonResponse(
+                {"outcome": "conflict", "reason_code": "state_changed"},
+                status=409,
+            )
+        logger.info(
+            "master_api.booking_action.refused action=%s appointment=%s status=%s code=%s",
+            action,
+            appointment_id,
+            status,
+            code,
+        )
+        return JsonResponse(
+            {"outcome": "blocked", "reason_code": "action_unavailable"},
+            status=400,
+        )
+
+    return JsonResponse(
+        {
+            "outcome": "committed",
+            "appointment_id": result.appointment_id,
+            "status": result.status,
+            "version": result.version,
+            "start_at": result.start_at,
+        }
+    )
 
 # ─── POST bookings ──────────────────────────────────────────────────────────
 
@@ -294,4 +433,10 @@ def search_customers(request: HttpRequest, query: str) -> HttpResponse:
     return JsonResponse({"results": results})
 
 
-__all__ = ["booking_detail_view", "booking_slots", "create_booking", "search_customers"]
+__all__ = [
+    "booking_action",
+    "booking_detail_view",
+    "booking_slots",
+    "create_booking",
+    "search_customers",
+]
