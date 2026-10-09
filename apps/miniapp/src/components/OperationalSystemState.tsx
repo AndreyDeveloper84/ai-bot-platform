@@ -1,8 +1,10 @@
 /**
- * Универсальные системные состояния мастерских экранов — макет DRF-1181 п.10
- * (DRF-2157, М-6).
+ * Shared operational system states for Master / Salon / Client surfaces.
  *
- * Один компонент и один словарь текстов на все экраны `/master/*` и `/solo/*`:
+ * Основа контракта — проверенный Master DRF-1181/DRF-2157; DRF-2938
+ * поднимает presentation semantics в общий слой без переноса доменной логики.
+ *
+ * Один компонент и один словарь для одинаковых operational states:
  * первая загрузка · обновление · нет данных · нет интернета · данные могли
  * устареть · ошибка с данными · нет прав · результат неизвестен · конфликт.
  * Тексты — дословно из макета; сторог на дословность — `SystemState.test.tsx`,
@@ -205,7 +207,7 @@ export function DestructiveConfirmation({
   onCancel: () => void;
 }) {
   return (
-    <div className="system-state system-state--card system-state--danger" role="alertdialog" aria-modal="true">
+    <div className="system-state system-state--card system-state--danger" role="alert">
       <p className="system-state__title">{title}</p>
       {body ? <p className="system-state__body">{body}</p> : null}
       <button
