@@ -1985,6 +1985,16 @@ PLAN_LITE_ENABLED = os.environ.get("PLAN_LITE_ENABLED", "false").lower() in (
 # DRF-2879 — Plan Engine (сборка плана в каталоге): тот же ключ, что в
 # каталоге. Default CLOSED. Выключен → прокси customer/plan/decision отвечает
 # 404 plan_engine_disabled ДО чтения реестра правил и ДО вызова каталога.
+# DRF-2885 — кому отвечает временный вход сборки плана в разговоре (сквозная
+# проверка на подготовленных данных). ``канал:идентификатор`` через запятую,
+# например ``max:12345``. Пусто (умолчание) — входа нет ни у кого. Это только
+# ВИДИМОСТЬ команды: допуск синтетических данных решает каталог.
+SYNTHETIC_TEST_TRIGGER_ACCOUNTS = tuple(
+    item.strip()
+    for item in os.environ.get("SYNTHETIC_TEST_TRIGGER_ACCOUNTS", "").split(",")
+    if item.strip()
+)
+
 PLAN_ENGINE_ENABLED = os.environ.get("PLAN_ENGINE_ENABLED", "false").lower() in (
     "true",
     "1",

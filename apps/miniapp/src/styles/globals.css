@@ -2467,10 +2467,20 @@ a {
 
 .master-services__row {
   width: 100%;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: var(--s-2);
   color: inherit;
   font: inherit;
   text-align: left;
   cursor: pointer;
+}
+
+.master-services__row-chevron {
+  color: var(--c-text-secondary);
+  font-size: var(--font-size-200);
+  line-height: 1;
 }
 
 .master-services__row-pending {

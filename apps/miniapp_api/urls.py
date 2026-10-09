@@ -247,6 +247,25 @@ urlpatterns = [
         views_plan_engine.customer_plan_decision,
         name="customer_plan_decision",
     ),
+    # DRF-2876 — сохранённый план нового механизма для экрана «Мой план»:
+    # подписи шагов из каталога, ключи способностей экрану не уходят.
+    path(
+        "plan/current",
+        views_plan_engine.customer_plan_current,
+        name="customer_plan_current",
+    ),
+    # DRF-2876 — предложение рядом с действующим планом: заменить (запись,
+    # под гейтом согласия и с вердиктом последнего хода) или оставить текущий.
+    path(
+        "plan/replace",
+        views_plan_engine.customer_plan_replace,
+        name="customer_plan_replace",
+    ),
+    path(
+        "plan/keep",
+        views_plan_engine.customer_plan_keep,
+        name="customer_plan_keep",
+    ),
     # DRF-2099 — дневник за неделю: строка на день и записи одного дня;
     # границы суток считает каталог по поясу человека.
     path(

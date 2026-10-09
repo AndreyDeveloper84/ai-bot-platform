@@ -49,6 +49,14 @@ import { ApiError } from "../lib/api";
 import { fetchDecisionContext } from "../lib/customer-goals";
 import { fetchDiaryConsentGate } from "../lib/food-scanner";
 import {
+  getSavedPlanState,
+  keepCurrentPlan,
+  replacePlan,
+  type PlanProposal,
+  type SavedPlan,
+  type SavedPlanStep,
+} from "../lib/plan-engine";
+import {
   closePlanLite,
   createPlanLite,
   getPlanLite,
@@ -74,6 +82,12 @@ export const PLAN_LITE_COPY = {
   entryFromGoal: "Мой план",
   entryFromDashboard: "Мой план",
   loading: "Загружаю…",
+  /** Слова владельца — лист решений 07.10, п.13. */
+  whyThisStep: "Почему этот шаг?",
+  /** Слова владельца — лист решений 07.10, п.15 («Полная замена»). */
+  replaceQuestion: "Заменить текущий план новым? Прежний останется в истории",
+  replaceYes: "Заменить план",
+  replaceNo: "Оставить текущий",
   builderTitle: "Выбери 1–3 шага под свою цель",
   builderHint: "План — это действия, а не обещание результата: я буду показывать, сколько из них сделано.",
   chipBook: "Записаться на услугу под цель",
@@ -181,6 +195,8 @@ type Status =
   | { kind: "proposal"; proposal: PlanLiteProposal }
   | { kind: "need_goal" }
   | { kind: "card"; plan: PlanLite }
+  /** DRF-2876 — сохранённый план нового механизма: он основной (п.9 владельца). */
+  | { kind: "saved"; plan: SavedPlan; proposal: PlanProposal | null }
   | { kind: "unavailable" }
   | { kind: "error" };
 
@@ -243,6 +259,22 @@ export function PlanLiteScreen() {
   const load = useCallback(async () => {
     setStatus({ kind: "loading" });
     setNotice(null);
+    // DRF-2876 — сначала сохранённый план нового механизма: раздел один, и
+    // сохранённый новый план в нём основной. Нет его (или механизм выключен
+    // на сервере) — прежний путь ниже, без изменений. Не прочитался — честное
+    // «не получилось»: прежний план вместо него был бы неправдой.
+    try {
+      const saved = await getSavedPlanState();
+      if (!alive.current) return;
+      if (saved.plan) {
+        setStatus({ kind: "saved", plan: saved.plan, proposal: saved.proposal });
+        return;
+      }
+    } catch {
+      if (!alive.current) return;
+      setStatus({ kind: "error" });
+      return;
+    }
     let plan: PlanLite | null;
     try {
       plan = await getPlanLite();
@@ -278,6 +310,29 @@ export function PlanLiteScreen() {
       else setStatus({ kind: "error" });
     }
   }, []);
+
+  // DRF-2876 — ответ на вопрос о замене. После любого исхода экран
+  // перечитывает сохранённое: он показывает состояние сервера, а не своё.
+  // Слов владельца для отказов нет — показывается имя отказа с пометкой
+  // «тест», как в чате.
+  const answerProposal = useCallback(
+    async (proposal: PlanProposal, answer: "replace" | "keep") => {
+      setBusy(true);
+      setNotice(null);
+      let refusal: string | null = null;
+      try {
+        if (answer === "replace") await replacePlan(proposal);
+        else await keepCurrentPlan(proposal);
+      } catch (e) {
+        refusal = `${(refusalSlug(e) ?? "plan_engine_unavailable").toUpperCase()} · тест`;
+      }
+      if (!alive.current) return;
+      setBusy(false);
+      await load();
+      if (alive.current && refusal) setNotice(refusal);
+    },
+    [load],
+  );
 
   useEffect(() => {
     void load();
@@ -602,6 +657,49 @@ export function PlanLiteScreen() {
           </section>
         )}
 
+        {status.kind === "saved" && (
+          <section data-testid="plan-saved-card" aria-label={PLAN_LITE_COPY.title}>
+            <h2 className="food-scanner-diary__caption">{goalLabel || PLAN_LITE_COPY.title}</h2>
+            {/* Только подписи каталога: без номеров, счётчиков и шкал. */}
+            <ul className="food-scanner-diary__list">
+              {status.plan.steps.map((step) => (
+                <SavedPlanStepRow key={step.step_id} step={step} />
+              ))}
+            </ul>
+          </section>
+        )}
+
+        {/* DRF-2876 — предложение рядом с действующим планом: его шаги и
+            вопрос владельца. Нажатие кнопки — само подтверждение (п.15). */}
+        {status.kind === "saved" && status.proposal && (
+          <section data-testid="plan-proposal-card" aria-label={PLAN_LITE_COPY.replaceQuestion}>
+            <ul className="food-scanner-diary__list">
+              {status.proposal.steps.map((step) => (
+                <SavedPlanStepRow key={step.step_id} step={step} />
+              ))}
+            </ul>
+            <p className="food-scanner-diary__caption">{PLAN_LITE_COPY.replaceQuestion}</p>
+            <div className="food-scanner-screen__cta-stack">
+              <button
+                type="button"
+                className="btn-primary"
+                disabled={busy}
+                onClick={() => void answerProposal(status.proposal as PlanProposal, "replace")}
+              >
+                {PLAN_LITE_COPY.replaceYes}
+              </button>
+              <button
+                type="button"
+                className="btn-secondary"
+                disabled={busy}
+                onClick={() => void answerProposal(status.proposal as PlanProposal, "keep")}
+              >
+                {PLAN_LITE_COPY.replaceNo}
+              </button>
+            </div>
+          </section>
+        )}
+
         {status.kind === "card" && (
           <section data-testid="plan-lite-card" aria-label={PLAN_LITE_COPY.title}>
             <h2 className="food-scanner-diary__caption">
@@ -651,6 +749,42 @@ export function PlanLiteScreen() {
           состояние ошибки не убирает навигацию (#1918). */}
       <CustomerTabBar active="plan" />
     </div>
+  );
+}
+
+/**
+ * Шаг сохранённого плана. «Почему этот шаг?» раскрывает слова каталога
+ * (лист решений 07.10, п.13); у шага без текста ссылки нет — объяснение не
+ * придумывается.
+ */
+function SavedPlanStepRow({ step }: { step: SavedPlanStep }) {
+  const [open, setOpen] = useState(false);
+  const why = typeof step.why === "string" ? step.why.trim() : "";
+  const whyId = `plan-step-why-${step.step_id}`;
+  return (
+    <li className="food-scanner-diary__entry">
+      <div className="food-scanner-diary__entry-main">
+        <span className="food-scanner-diary__entry-dish">{step.label}</span>
+        {why && open && (
+          <span id={whyId} className="food-scanner-diary__entry-time">
+            {why}
+          </span>
+        )}
+      </div>
+      {why && (
+        <div className="food-scanner-diary__entry-actions">
+          <button
+            type="button"
+            className="food-scanner-diary__entry-action"
+            aria-expanded={open}
+            aria-controls={whyId}
+            onClick={() => setOpen((value) => !value)}
+          >
+            {PLAN_LITE_COPY.whyThisStep}
+          </button>
+        </div>
+      )}
+    </li>
   );
 }
 

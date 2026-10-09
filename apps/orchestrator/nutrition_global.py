@@ -81,6 +81,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass
+from collections.abc import Callable
 from typing import Any
 
 from apps.identity.services.global_tenant import get_global_bot_tenant
@@ -893,8 +894,13 @@ def try_handle_structured_nutrition_turn(
     bot_user: Any,
     conversation: Any,
     trace_id: str,
+    plan_turn_safety: Callable[[], Any] | None = None,
 ) -> SkillResult | None:
     """Dispatch a structured turn to the owning nutrition skill, unchanged.
+
+    ``plan_turn_safety`` (DRF-2885) — ленивый источник тройки безопасности
+    этого хода для действий с планом нового механизма; ``None`` — у
+    вызывающего её нет, и такие действия не выполняются.
 
     Returns the skill's :class:`SkillResult`, or ``None`` when no skill
     claims the turn (caller continues its normal ladder). Never raises:
@@ -926,6 +932,40 @@ def try_handle_structured_nutrition_turn(
         )
         if diary is not None:
             return diary
+        # DRF-2885 — временный вход сборки плана нового механизма (сквозная
+        # проверка на подготовленных данных). Отвечает только аккаунтам из
+        # серверного списка; остальным текст идёт дальше как обычный.
+        if not has_attachments:
+            from apps.orchestrator.plan_engine_card import try_handle_plan_trigger
+
+            try:
+                engine_plan = try_handle_plan_trigger(
+                    text=text,
+                    bot_user=bot_user,
+                    conversation=conversation,
+                    trace_id=trace_id,
+                    turn_safety=plan_turn_safety,
+                )
+            except Exception:  # noqa: BLE001 — план не должен ломать глобальный ход
+                logger.exception(
+                    "orchestrator.nutrition_global.plan_engine_trigger_failed trace=%s", trace_id
+                )
+                engine_plan = None
+            if engine_plan is not None:
+                return engine_plan
+            # «мой план» — сохранённый план нового механизма раньше прежней
+            # карточки; нет такого плана — фраза идёт дальше.
+            from apps.orchestrator.plan_engine_card import try_handle_saved_plan
+
+            try:
+                saved_plan = try_handle_saved_plan(text=text, bot_user=bot_user, trace_id=trace_id)
+            except Exception:  # noqa: BLE001 — план не должен ломать глобальный ход
+                logger.exception(
+                    "orchestrator.nutrition_global.plan_engine_read_failed trace=%s", trace_id
+                )
+                saved_plan = None
+            if saved_plan is not None:
+                return saved_plan
         # DRF-2101 — «мой план»: карточка Plan Lite из wellness-context, тем же
         # приёмом, что чтение дневника; под флагом, иначе текст — модели.
         if not has_attachments:
@@ -967,7 +1007,95 @@ def try_handle_structured_nutrition_turn(
         # разбор рядом с самой карточкой. Выключенный флаг — честный ответ
         # там же («кнопка не действует»); неверная форма — ``None``, и ход
         # идёт дальше, как у остальных семейств (fallback канала).
+        from apps.orchestrator.plan_engine_card import (
+            CB_COMPOSE,
+            is_discuss_callback,
+            is_edit_callback,
+            is_replace_callback,
+            is_save_callback,
+            try_handle_plan_discuss,
+            try_handle_plan_edit,
+            try_handle_plan_replace,
+            try_handle_plan_save,
+            try_handle_plan_trigger,
+        )
         from apps.orchestrator.plan_lite_card import try_handle_plan_callback
+
+        if text.strip() == CB_COMPOSE:
+            # DRF-2885 — кнопка «Составить план»: настоящий вход.
+            try:
+                return try_handle_plan_trigger(
+                    text=text,
+                    bot_user=bot_user,
+                    conversation=conversation,
+                    trace_id=trace_id,
+                    turn_safety=plan_turn_safety,
+                )
+            except Exception:  # noqa: BLE001 — план не должен ломать глобальный ход
+                logger.exception(
+                    "orchestrator.nutrition_global.plan_engine_compose_failed trace=%s", trace_id
+                )
+                return None
+
+        if is_save_callback(text):
+            # DRF-2885 — «Сохранить» под предложением нового механизма.
+            try:
+                return try_handle_plan_save(
+                    text=text,
+                    bot_user=bot_user,
+                    conversation=conversation,
+                    trace_id=trace_id,
+                    turn_safety=plan_turn_safety,
+                )
+            except Exception:  # noqa: BLE001 — план не должен ломать глобальный ход
+                logger.exception(
+                    "orchestrator.nutrition_global.plan_engine_save_failed trace=%s", trace_id
+                )
+                return None
+
+        if is_replace_callback(text):
+            # DRF-2885 — «Заменить план» / «Оставить текущий» под предложением.
+            try:
+                return try_handle_plan_replace(
+                    text=text,
+                    bot_user=bot_user,
+                    conversation=conversation,
+                    trace_id=trace_id,
+                    turn_safety=plan_turn_safety,
+                )
+            except Exception:  # noqa: BLE001 — план не должен ломать глобальный ход
+                logger.exception(
+                    "orchestrator.nutrition_global.plan_engine_replace_failed trace=%s", trace_id
+                )
+                return None
+
+        if is_discuss_callback(text):
+            # DRF-2885 — «Обсудить»: первая реплика владельца, дальше — модель.
+            try:
+                return try_handle_plan_discuss(
+                    text=text, bot_user=bot_user, conversation=conversation, trace_id=trace_id
+                )
+            except Exception:  # noqa: BLE001 — план не должен ломать глобальный ход
+                logger.exception(
+                    "orchestrator.nutrition_global.plan_engine_discuss_failed trace=%s", trace_id
+                )
+                return None
+
+        if is_edit_callback(text):
+            # DRF-2885 — «Изменить» и тап по шагу: убрать шаг и пересобрать.
+            try:
+                return try_handle_plan_edit(
+                    text=text,
+                    bot_user=bot_user,
+                    conversation=conversation,
+                    trace_id=trace_id,
+                    turn_safety=plan_turn_safety,
+                )
+            except Exception:  # noqa: BLE001 — план не должен ломать глобальный ход
+                logger.exception(
+                    "orchestrator.nutrition_global.plan_engine_edit_failed trace=%s", trace_id
+                )
+                return None
 
         try:
             return try_handle_plan_callback(

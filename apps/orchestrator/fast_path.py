@@ -626,6 +626,30 @@ FAST_PATH_TOOL_CLAIMS: tuple[ToolClaim, ...] = (
             "начать анкету",
         ),
     ),
+    ToolClaim(
+        tool="compose_plan",
+        claimed=False,
+        why=(
+            "Asking for a plan towards one's goal names no service to search "
+            "masters for (DRF-2885); the catalog composes the plan."
+        ),
+        sample_turns=(
+            "помоги составить план",
+            "составь мне программу на месяц",
+        ),
+    ),
+    ToolClaim(
+        tool="plan_remove_step",
+        claimed=False,
+        why=(
+            "Dropping a step from the plan under discussion names no service "
+            "to search masters for (DRF-2885)."
+        ),
+        sample_turns=(
+            "убери второй шаг из плана",
+            "прогулку из плана убери",
+        ),
+    ),
 )
 
 #: Tool name -> claim. Convenience for the guard test and for anyone reading

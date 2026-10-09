@@ -131,6 +131,8 @@ function serve(): void {
       const u = String(url);
       if (u.includes("/wellness/today")) return ok(TODAY);
       if (u.includes("/recent-activity")) return ok(BOOKING);
+      // DRF-2876 — сохранённого плана нового механизма нет: Главная ведёт себя по-прежнему.
+      if (u.includes("/plan/current")) return ok({ plan: null });
       if (u.includes("/plan-lite")) return ok(PLAN);
       if (u.includes("/last-topic")) return ok({ last_topic: null });
       if (u.includes("/wellness/consent-prompt")) return ok({ sent: true });
@@ -309,6 +311,8 @@ describe("Д31 — два блока ОСТАЮТСЯ: это решение в�
           });
         }
         if (u.includes("/recent-activity")) return ok({ this_week_booking_count: 0 });
+        // DRF-2876 — сохранённого плана нового механизма нет: Главная ведёт себя по-прежнему.
+        if (u.includes("/plan/current")) return ok({ plan: null });
         if (u.includes("/plan-lite")) return ok({ plan_lite: null });
         if (u.includes("/last-topic")) return ok({ last_topic: null });
         if (u.includes("/wellness/consent-prompt")) return ok({ sent: true });
@@ -329,6 +333,8 @@ describe("Ответы владельца 23.09 (§172)", () => {
         const u = String(url);
         if (u.includes("/wellness/today")) return ok(TODAY);
         if (u.includes("/recent-activity")) return ok(BOOKING);
+        // DRF-2876 — сохранённого плана нового механизма нет: Главная ведёт себя по-прежнему.
+        if (u.includes("/plan/current")) return ok({ plan: null });
         if (u.includes("/plan-lite")) return ok({ plan_lite: null });
         if (u.includes("/last-topic")) return ok({ last_topic: null });
         if (u.includes("/wellness/consent-prompt")) return ok({ sent: true });
@@ -349,6 +355,8 @@ describe("Ответы владельца 23.09 (§172)", () => {
         const u = String(url);
         if (u.includes("/wellness/today")) return ok({ ...TODAY, active_goals: [] });
         if (u.includes("/recent-activity")) return ok(BOOKING);
+        // DRF-2876 — сохранённого плана нового механизма нет: Главная ведёт себя по-прежнему.
+        if (u.includes("/plan/current")) return ok({ plan: null });
         if (u.includes("/plan-lite")) return ok({ plan_lite: null });
         if (u.includes("/last-topic")) return ok({ last_topic: null });
         if (u.includes("/wellness/consent-prompt")) return ok({ sent: true });
@@ -378,6 +386,8 @@ describe("Д11 — кнопка «Все мои записи» не зовёт �
         const u = String(url);
         if (u.includes("/wellness/today")) return ok(TODAY);
         if (u.includes("/recent-activity")) return ok({ this_week_booking_count: 0 });
+        // DRF-2876 — сохранённого плана нового механизма нет: Главная ведёт себя по-прежнему.
+        if (u.includes("/plan/current")) return ok({ plan: null });
         if (u.includes("/plan-lite")) return ok(PLAN);
         if (u.includes("/last-topic")) return ok({ last_topic: null });
         if (u.includes("/wellness/consent-prompt")) return ok({ sent: true });
