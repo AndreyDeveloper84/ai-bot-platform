@@ -31,6 +31,7 @@ vi.mock("../lib/master-api", async (importOriginal) => {
   const original = await importOriginal<typeof import("../lib/master-api")>();
   return {
     ...original,
+    getPendingAvailability: vi.fn(),
     getWorkingHours: vi.fn(),
     putWorkingHours: vi.fn(),
     requestAvailability: vi.fn(),
@@ -43,6 +44,7 @@ vi.mock("../lib/master-api", async (importOriginal) => {
 import {
   getDashboard,
   getMasterMe,
+  getPendingAvailability,
   getWorkingHours,
   putWorkingHours,
   requestAvailability,
@@ -56,6 +58,7 @@ import {
 } from "./MasterWorkingHoursScreen";
 
 const mockedHours = vi.mocked(getWorkingHours);
+const mockedPending = vi.mocked(getPendingAvailability);
 const mockedPut = vi.mocked(putWorkingHours);
 const mockedRequest = vi.mocked(requestAvailability);
 const mockedDashboard = vi.mocked(getDashboard);
@@ -205,6 +208,7 @@ function renderAt(path: string) {
 beforeEach(() => {
   vi.clearAllMocks();
   mockedHours.mockResolvedValue(WEEK);
+  mockedPending.mockResolvedValue({ items: [] });
   mockedPut.mockResolvedValue(WEEK);
   mockedRequest.mockResolvedValue({ id: "r-1", status: "pending" } as never);
   mockedDashboard.mockResolvedValue(dashboard());
@@ -436,6 +440,65 @@ describe("5 · салонная поверхность — чтение и за�
     fireEvent.click(await screen.findByRole("button", { name: /^Среда/ }));
     const dialog = await screen.findByRole("dialog");
     expect(dialog).toHaveAccessibleName(/^Среда, \d{1,2} /);
+  });
+});
+
+describe("5b · lifecycle заявки живёт в Working Time", () => {
+  it("показывает pending как авторитетное состояние экрана", async () => {
+    mockedPending.mockResolvedValue({
+      items: [
+        {
+          request_id: "r-pending",
+          requested_start: "2026-10-12T10:00:00+03:00",
+          requested_end: "2026-10-12T14:00:00+03:00",
+          reason_class: "personal",
+          reason_text: "Личные дела",
+          status: "pending",
+          decided_at: null,
+          decided_by_name: null,
+          rejection_reason: null,
+        },
+      ],
+    });
+    renderAt("/master/working-hours");
+    expect(await screen.findByText(HOURS_COPY.salon.lifecycleTitle)).toBeInTheDocument();
+    expect(screen.getByText(HOURS_COPY.salon.pending)).toBeInTheDocument();
+    expect(screen.getByText("Личные дела")).toBeInTheDocument();
+  });
+
+  it("показывает approved и rejected; rejected можно исправить и отправить снова", async () => {
+    mockedPending.mockResolvedValue({
+      items: [
+        {
+          request_id: "r-approved",
+          requested_start: "2026-10-13T10:00:00+03:00",
+          requested_end: "2026-10-13T14:00:00+03:00",
+          reason_class: "personal",
+          reason_text: "",
+          status: "approved",
+          decided_at: "2026-10-10T09:00:00+03:00",
+          decided_by_name: "Мария",
+          rejection_reason: null,
+        },
+        {
+          request_id: "r-rejected",
+          requested_start: "2026-10-14T10:00:00+03:00",
+          requested_end: "2026-10-14T14:00:00+03:00",
+          reason_class: "personal",
+          reason_text: "Нужно уйти раньше",
+          status: "rejected",
+          decided_at: "2026-10-10T10:00:00+03:00",
+          decided_by_name: "Мария",
+          rejection_reason: "В это время есть важная запись",
+        },
+      ],
+    });
+    renderAt("/master/working-hours");
+    expect(await screen.findByText(HOURS_COPY.salon.approved)).toBeInTheDocument();
+    expect(screen.getByText(HOURS_COPY.salon.rejected)).toBeInTheDocument();
+    expect(screen.getByText(/Причина: В это время есть важная запись/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: HOURS_COPY.salon.rejectedEdit }));
+    expect(await screen.findByText("Укажите период, в который вы недоступны.")).toBeInTheDocument();
   });
 });
 
