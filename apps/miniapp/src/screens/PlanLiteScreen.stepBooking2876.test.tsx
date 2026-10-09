@@ -280,6 +280,23 @@ describe("«Мой план»: от шага к услуге, времени и 
     ]);
   });
 
+  it("пока читается время другого дня, кнопки дней и времён недоступны", async () => {
+    mockedDay.mockReturnValue(new Promise(() => undefined));
+    const offers = await openSecondStep();
+    fireEvent.click(within(offers).getByRole("button", { name: "Консультация по режиму · Ольга" }));
+    const slots = await screen.findByTestId("plan-step-slots");
+
+    fireEvent.click(within(slots).getByRole("button", { name: "17 октября, сб" }));
+
+    await waitFor(() =>
+      expect(within(slots).getAllByRole("button").every((b) => (b as HTMLButtonElement).disabled)).toBe(true),
+    );
+    fireEvent.click(within(slots).getByRole("button", { name: "14 октября, ср" }));
+    fireEvent.click(within(slots).getByRole("button", { name: "12 октября в 10:00" }));
+    expect(mockedDay).toHaveBeenCalledTimes(1);
+    expect(mockedBook).not.toHaveBeenCalled();
+  });
+
   it("свободный день один — кнопок других дней нет", async () => {
     mockedChoose.mockResolvedValue({
       token: SEARCH,
