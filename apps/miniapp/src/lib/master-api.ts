@@ -310,6 +310,8 @@ export interface MasterBookingDetail {
   temporal_state: BookingTemporalState;
   /** Только для upcoming, по часам сервера; иначе null. */
   minutes_until: number | null;
+  /** Версия canonical appointment, которую описывает этот readback. */
+  appointment_version: number | null;
   /** Часы сервера в tz тенанта — точка отсчёта для «Сегодня/Завтра». */
   checked_at: string;
 }
@@ -323,6 +325,79 @@ export const getMasterBooking = (
     method: "GET",
     signal: opts.signal,
   });
+
+
+export type MasterBookingAction =
+  | "acknowledge"
+  | "cancel"
+  | "complete"
+  | "no-show"
+  | "reschedule";
+
+export interface MasterBookingActionBody {
+  action: MasterBookingAction;
+  expected_version?: number;
+  reason?: string;
+  new_start_datetime?: string;
+}
+
+export interface MasterBookingActionResult {
+  outcome: "committed" | "conflict" | "blocked" | "pending";
+  reason_code?: "stale_version" | "state_changed" | "version_unknown" | "action_unavailable" | "result_pending";
+  appointment_id?: string;
+  status?: string;
+  version?: number;
+  start_at?: string;
+}
+
+/**
+ * Consequential write for the master's own appointment.
+ *
+ * 202/409 are domain outcomes, not transport failures. A network failure or
+ * unreadable response is treated as unknown/pending because the canonical
+ * write may already have committed; the caller must read back before another
+ * mutation attempt.
+ */
+export const actOnMasterBooking = async (
+  id: string,
+  body: MasterBookingActionBody,
+): Promise<MasterBookingActionResult> => {
+  const headers = new Headers({ "Content-Type": "application/json" });
+  applyIdentityHeaders(headers);
+
+  let res: Response;
+  try {
+    res = await fetch(`${MASTER_API_BASE}/bookings/${encodeURIComponent(id)}/action`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(body),
+    });
+  } catch {
+    return { outcome: "pending", reason_code: "result_pending" };
+  }
+
+  try {
+    const data = (await res.json()) as Partial<MasterBookingActionResult> & {
+      error?: string;
+      detail?: string;
+    };
+
+    if (res.status === 403) {
+      throw new ApiError(403, data.error ?? "forbidden", data.detail ?? "action unavailable");
+    }
+    if (res.status === 404) {
+      throw new ApiError(404, data.error ?? "not_found", data.detail ?? "booking not found");
+    }
+    if (data.outcome) return data as MasterBookingActionResult;
+    if (!res.ok) {
+      return { outcome: "blocked", reason_code: "action_unavailable" };
+    }
+    return { outcome: "pending", reason_code: "result_pending" };
+  } catch (err) {
+    if (err instanceof ApiError) throw err;
+    return { outcome: "pending", reason_code: "result_pending" };
+  }
+};
 
 // --- M4 master profile (read-by-self + edit own bio/photo) --------------
 // Mirrors apps/master_api/views.py::me() + onboarding_profile() (PATCH).
