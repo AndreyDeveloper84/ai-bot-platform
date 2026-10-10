@@ -67,6 +67,9 @@ CONVERTED = {
     # DRF-2785: действия мастера на своей записи из салонного бота
     # (подтвердить, отменить, состоялся, не пришёл) — один вызов через колонку.
     ("apps/channels/max/master_actions.py", 1),
+    # DRF-2943: Mini App booking action bridge uses the same canonical resolver
+    # before calling the specialist action endpoint.
+    ("apps/master_api/views_bookings.py", 1),
 }
 
 PENDING_1933B: dict[tuple[str, str], int] = {}
