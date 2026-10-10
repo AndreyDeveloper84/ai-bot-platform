@@ -42,6 +42,9 @@ from apps.orchestrator import plan_gate
 from apps.orchestrator import plan_step_card as step
 from apps.orchestrator.safety.plan_turn import PlanTurnSafety
 
+#: Человек этих узлов назван в списке приёмки Плана; сам замок — test_plan_access_2885.
+pytestmark = pytest.mark.usefixtures("plan_open_to_everyone")
+
 PLAN_ID = "5a5a5a5a-1111-4222-8333-999999999999"
 PLAN8 = "5a5a5a5a"
 SEARCH_ID = "c0ffee00-aaaa-4bbb-8ccc-ddddeeeeffff"
