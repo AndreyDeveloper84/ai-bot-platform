@@ -116,6 +116,30 @@ describe("DRF-2941 · frozen Schedule contract", () => {
     expect(screen.getByTestId("location")).toHaveTextContent("/master/bookings/b-42");
   });
 
+  it("pending indicator keeps the salon wall-clock date instead of device timezone", async () => {
+    mockedSchedule.mockResolvedValue(freeDay());
+    mockedPending.mockResolvedValue({
+      items: [
+        {
+          request_id: "r-1",
+          requested_start: "2026-10-10T00:30:00+11:00",
+          requested_end: "2026-10-10T18:00:00+11:00",
+          reason_class: "personal",
+          reason_text: "",
+          status: "pending",
+          decided_at: null,
+          decided_by_name: null,
+          rejection_reason: null,
+        },
+      ],
+    });
+    renderSchedule();
+
+    expect(
+      await screen.findByText(/запрос на выходной 10 окт—10 окт, ждёт одобрения/),
+    ).toBeInTheDocument();
+  });
+
   it("day/week/month views remain available", async () => {
     mockedSchedule.mockResolvedValue(freeDay());
     renderSchedule();
