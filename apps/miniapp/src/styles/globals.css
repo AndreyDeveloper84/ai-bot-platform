@@ -1501,6 +1501,48 @@ a {
   text-align: center;
 }
 
+
+.booking-detail__actions {
+  margin-top: var(--s-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+
+.booking-detail__reschedule {
+  padding: var(--s-4);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-lg);
+  background: var(--c-surface-1);
+}
+
+.booking-detail__reschedule h2 {
+  margin: 0;
+  font-size: var(--font-size-300);
+}
+
+.booking-detail__reschedule label {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+  font-size: var(--font-size-200);
+}
+
+.booking-detail__slot-list {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--s-2);
+}
+
+.booking-detail__reschedule-confirm {
+  padding-top: var(--s-2);
+  border-top: 1px solid var(--c-divider);
+}
+
+.booking-detail__reschedule-confirm p {
+  margin: 0 0 var(--s-2);
+}
+
 .m-card--tappable {
   cursor: pointer;
 }

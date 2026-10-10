@@ -10,6 +10,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  actOnMasterBooking,
   createMasterBooking,
   getMasterBookingSlots,
   searchMasterCustomers,
@@ -164,5 +165,61 @@ describe("createMasterBooking — исход §18, не исключение", (
     );
     const res = await createMasterBooking(body);
     expect(res).toEqual({ outcome: "failed", detail: "service not found" });
+  });
+});
+
+
+describe("DRF-2943 master booking action transport", () => {
+  it("202 result_pending is an authoritative unknown result, not a thrown retryable error", async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse(202, { outcome: "pending", reason_code: "result_pending" }),
+    );
+
+    const res = await actOnMasterBooking("b-1", {
+      action: "cancel",
+      expected_version: 7,
+    });
+
+    expect(res).toEqual({ outcome: "pending", reason_code: "result_pending" });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("409 stale_version is a conflict outcome so UI reads back instead of retrying mutation", async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse(409, { outcome: "conflict", reason_code: "stale_version" }),
+    );
+
+    const res = await actOnMasterBooking("b-1", {
+      action: "reschedule",
+      expected_version: 7,
+      new_start_datetime: "2026-10-21T17:00:00+03:00",
+    });
+
+    expect(res).toEqual({ outcome: "conflict", reason_code: "stale_version" });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("unreadable response becomes pending because the canonical write may already have committed", async () => {
+    fetchMock.mockResolvedValue(new Response("not-json", { status: 200 }));
+
+    const res = await actOnMasterBooking("b-1", {
+      action: "cancel",
+      expected_version: 7,
+    });
+
+    expect(res).toEqual({ outcome: "pending", reason_code: "result_pending" });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("network failure becomes pending and never encourages a second write", async () => {
+    fetchMock.mockRejectedValue(new TypeError("Failed to fetch"));
+
+    const res = await actOnMasterBooking("b-1", {
+      action: "cancel",
+      expected_version: 7,
+    });
+
+    expect(res).toEqual({ outcome: "pending", reason_code: "result_pending" });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });
