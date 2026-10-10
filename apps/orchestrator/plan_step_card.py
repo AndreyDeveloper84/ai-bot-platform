@@ -65,7 +65,8 @@ logger = logging.getLogger(__name__)
 CB_STEP_PREFIX = "cb:plan:step:"
 CB_OFFER_PREFIX = "cb:plan:offer:"
 CB_SLOT_PREFIX = "cb:plan:slot:"
-STEP_CALLBACK_RE = re.compile(r"^cb:plan:(step|offer|slot):([0-9a-f]{8}):([0-9]{1,2})$")
+CB_DAY_PREFIX = "cb:plan:day:"
+STEP_CALLBACK_RE = re.compile(r"^cb:plan:(step|offer|slot|day):([0-9a-f]{8}):([0-9]{1,2})$")
 
 #: Свой ключ в ``Conversation.skill_state``.
 STATE_KEY = "plan_engine_step"
@@ -87,6 +88,8 @@ AYLA_LINK_UNAVAILABLE = "AYLA_LINK_UNAVAILABLE"
 #: Сколько вариантов и времён показывается кнопками за раз.
 MAX_OFFERS = 8
 MAX_SLOTS = 8
+#: Сколько дней со свободным временем предлагается на выбор.
+MAX_DAYS = 7
 #: На сколько дней вперёд ищется ближайший день со свободным временем.
 SLOT_HORIZON_DAYS = 14
 
@@ -291,8 +294,8 @@ def _dispatch(
 ) -> SkillResult:
     """Одно ядро на чат и экран: гейт, состояние, четвёрка, действие.
 
-    ``kind`` — ``step`` (услуги для шага), ``offer`` (выбор услуги), ``slot``
-    (запись на время). Порядок проверок общий: гейт согласия — первым; затем
+    ``kind`` — ``step`` (услуги для шага), ``offer`` (выбор услуги), ``day``
+    (другой день для времени), ``slot`` (запись на время). Порядок проверок общий: гейт согласия — первым; затем
     состояние разговора («устарело» раньше, чем читается вердикт); затем
     четвёрка безопасности; затем каталог.
     """
@@ -316,6 +319,8 @@ def _dispatch(
         return _named(SAFETY_INPUT_UNAVAILABLE)
     if kind == "offer":
         return _choose_offer(bot_user, conversation, trace_id, four, waiting, index)
+    if kind == "day":
+        return _choose_day(conversation, trace_id, waiting, index)
     return _book_slot(bot_user, conversation, trace_id, four, waiting, index)
 
 
@@ -357,7 +362,7 @@ def step_action(
     """
     from apps.orchestrator.plan_engine_card import PLAN_ENGINE_UNAVAILABLE, engine_enabled
 
-    if not engine_enabled() or kind not in ("step", "offer", "slot"):
+    if not engine_enabled() or kind not in ("step", "offer", "day", "slot"):
         return StepAction(PLAN_ENGINE_UNAVAILABLE, None)
     result = _dispatch(
         kind=kind,
@@ -533,23 +538,102 @@ def _slot_label(iso: str) -> str:
     return moment.strftime("%d.%m %H:%M")
 
 
-def _nearest_slots(option: dict[str, Any]) -> list[str]:
-    """Свободное время ближайшего дня, в котором оно есть; ``[]`` — нет в горизонте."""
+def _day_label(day: str) -> str:
+    """«ДД.ММ» — день без слов: подписи для кнопки дня владелец не давал."""
+    return date.fromisoformat(day).strftime("%d.%m")
+
+
+def _day_slots(option: dict[str, Any], day: str) -> list[str]:
+    """Свободное время мастера в этот день — как его прислал каталог."""
     from apps.integrations.ayla.booking_client import get_ayla_booking_client
 
-    client = get_ayla_booking_client()
+    slots = get_ayla_booking_client().get_available_times(
+        specialist_id=option["specialist_ref"],
+        date=day,
+        service_id=option["tenant_offer_ref"],
+    )
+    return [s.datetime for s in slots if isinstance(s.datetime, str) and s.datetime][:MAX_SLOTS]
+
+
+def _free_days(option: dict[str, Any]) -> tuple[list[str], list[str]]:
+    """Дни горизонта со свободным временем и время ближайшего из них.
+
+    У каталога нет ручки «свободные дни» — день спрашивается по одному, как в
+    ``booking_client.get_available_dates``. Дней берётся не больше
+    :data:`MAX_DAYS`; ``([], [])`` — свободного времени в горизонте нет.
+    """
     start = _today()
+    days: list[str] = []
+    nearest: list[str] = []
     for offset in range(SLOT_HORIZON_DAYS):
         day = (start + timedelta(days=offset)).isoformat()
-        slots = client.get_available_times(
-            specialist_id=option["specialist_ref"],
-            date=day,
-            service_id=option["tenant_offer_ref"],
+        found = _day_slots(option, day)
+        if not found:
+            continue
+        if not days:
+            nearest = found
+        days.append(day)
+        if len(days) == MAX_DAYS:
+            break
+    return days, nearest
+
+
+def _slots_reply(waiting: dict[str, Any]) -> SkillResult:
+    """Времена выбранного дня кнопками, под ними — остальные дни датами."""
+    option = waiting["options"][waiting["chosen"]]
+    slots = [s for s in waiting.get("slots") or [] if isinstance(s, str)]
+    days = [d for d in waiting.get("days") or [] if isinstance(d, str)]
+    token = _hex8(waiting["search_id"])
+    buttons = [
+        {"label": _slot_label(iso), "callback": f"{CB_SLOT_PREFIX}{token}:{k}"}
+        for k, iso in enumerate(slots)
+    ]
+    buttons += [
+        {"label": _day_label(day), "callback": f"{CB_DAY_PREFIX}{token}:{n}"}
+        for n, day in enumerate(days)
+        if day != waiting.get("day")
+    ]
+    outcome = PLAN_STEP_SLOTS if slots else PLAN_STEP_NO_SLOTS
+    return _reply(_option_lines(option), outcome, buttons)
+
+
+def _choose_day(
+    conversation: Any, trace_id: str, waiting: dict[str, Any], index: int
+) -> SkillResult:
+    """Другой день из показанных: его время читается у каталога заново.
+
+    Каталогу здесь ничего не пишется — это чтение расписания; гейт согласия и
+    вердикт хода проверены до входа, как у остальных действий с шагом.
+    """
+    from apps.integrations.ayla.booking_client import BookingAPIError
+    from apps.orchestrator.plan_engine_card import PLAN_ENGINE_UNAVAILABLE
+
+    options = waiting.get("options")
+    chosen = waiting.get("chosen")
+    days = waiting.get("days")
+    if (
+        not isinstance(options, list)
+        or not isinstance(chosen, int)
+        or isinstance(chosen, bool)
+        or chosen >= len(options)
+        or not isinstance(options[chosen], dict)
+        or not isinstance(days, list)
+        or index >= len(days)
+        or not isinstance(days[index], str)
+    ):
+        return _named(PLAN_STEP_EXPIRED)
+    try:
+        slots = _day_slots(options[chosen], days[index])
+    except BookingAPIError as exc:
+        logger.warning(
+            "orchestrator.plan_step_card.day_slots_failed trace=%s class=%s",
+            trace_id,
+            type(exc).__name__,
         )
-        found = [s.datetime for s in slots if isinstance(s.datetime, str) and s.datetime]
-        if found:
-            return found[:MAX_SLOTS]
-    return []
+        return _named(PLAN_ENGINE_UNAVAILABLE)
+    state = {**waiting, "day": days[index], "slots": slots}
+    _write(conversation, state)
+    return _slots_reply(state)
 
 
 def _choose_offer(
@@ -594,7 +678,7 @@ def _choose_offer(
         return _plan_refusal(exc, trace_id, "resolution")
 
     try:
-        slots = _nearest_slots(option)
+        days, slots = _free_days(option)
     except BookingAPIError as exc:
         logger.warning(
             "orchestrator.plan_step_card.slots_failed trace=%s class=%s",
@@ -602,15 +686,17 @@ def _choose_offer(
             type(exc).__name__,
         )
         return _named(PLAN_ENGINE_UNAVAILABLE)
-    _write(conversation, {**waiting, "chosen": index, "slots": slots})
+    state = {
+        **waiting,
+        "chosen": index,
+        "days": days,
+        "day": days[0] if days else None,
+        "slots": slots,
+    }
+    _write(conversation, state)
     if not slots:
         return _named(PLAN_STEP_NO_SLOTS)
-    token = _hex8(waiting["search_id"])
-    buttons = [
-        {"label": _slot_label(iso), "callback": f"{CB_SLOT_PREFIX}{token}:{k}"}
-        for k, iso in enumerate(slots)
-    ]
-    return _reply(_option_lines(option), PLAN_STEP_SLOTS, buttons)
+    return _slots_reply(state)
 
 
 # ─── время → запись ──────────────────────────────────────────────────────

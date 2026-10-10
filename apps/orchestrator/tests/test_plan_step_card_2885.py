@@ -198,6 +198,10 @@ def _tap(text: str, conversation: Any, *, safety: Any = "default") -> Any:
 STEP0 = f"cb:plan:step:{PLAN8}:0"
 OFFER0 = f"cb:plan:offer:{SEARCH8}:0"
 SLOT0 = f"cb:plan:slot:{SEARCH8}:0"
+DAY1 = f"cb:plan:day:{SEARCH8}:1"
+SLOT_C = "2026-10-14T09:00:00+03:00"
+SLOT_D = "2026-10-14T15:00:00+03:00"
+SLOT_E = "2026-10-17T12:00:00+03:00"
 
 
 def _buttons(result: Any) -> list[dict[str, str]]:
@@ -392,8 +396,14 @@ class TestFromAServiceToATime:
 
         result = _tap(OFFER0, conversation)
 
-        # 10 и 11 октября пусты — показан первый день, где время есть.
-        assert [c["date"] for c in booking.slot_calls] == ["2026-10-10", "2026-10-11", "2026-10-12"]
+        # 10 и 11 октября пусты — показан первый день, где время есть. Дни
+        # спрашиваются до конца горизонта: остальные свободные идут на выбор.
+        assert [c["date"] for c in booking.slot_calls][:3] == [
+            "2026-10-10",
+            "2026-10-11",
+            "2026-10-12",
+        ]
+        assert len(booking.slot_calls) == step.SLOT_HORIZON_DAYS
         assert _buttons(result) == [
             {"label": "12.10 10:00", "callback": f"cb:plan:slot:{SEARCH8}:0"},
             {"label": "12.10 11:30", "callback": f"cb:plan:slot:{SEARCH8}:1"},
@@ -438,6 +448,150 @@ class TestFromAServiceToATime:
 
         assert result.reply_text == "PLAN_STEP_RESOLUTION_REFUSED:offer_not_a_candidate · тест"
         assert booking.slot_calls == []
+
+
+class TestAnotherDay:
+    """Человек может выбрать не ближайший день: остальные — кнопками-датами."""
+
+    @pytest.fixture(autouse=True)
+    def _three_free_days(self, booking: FakeBooking) -> None:
+        booking.days = {
+            "2026-10-12": [SLOT_A, SLOT_B],
+            "2026-10-14": [SLOT_C, SLOT_D],
+            "2026-10-17": [SLOT_E],
+        }
+
+    def test_d1_under_the_times_of_the_nearest_day_come_the_other_days_as_dates(self) -> None:
+        conversation = _at_offers()
+
+        result = _tap(OFFER0, conversation)
+
+        assert _buttons(result) == [
+            {"label": "12.10 10:00", "callback": f"cb:plan:slot:{SEARCH8}:0"},
+            {"label": "12.10 11:30", "callback": f"cb:plan:slot:{SEARCH8}:1"},
+            {"label": "14.10", "callback": f"cb:plan:day:{SEARCH8}:1"},
+            {"label": "17.10", "callback": f"cb:plan:day:{SEARCH8}:2"},
+        ]
+        waiting = conversation.skill_state[step.STATE_KEY]
+        assert waiting["days"] == ["2026-10-12", "2026-10-14", "2026-10-17"]
+        assert waiting["day"] == "2026-10-12"
+
+    def test_d2_a_day_tap_shows_the_times_of_that_day_and_offers_the_others(
+        self, plan: FakePlan, booking: FakeBooking
+    ) -> None:
+        conversation = _at_slots()
+        before = (len(plan.resolved), len(booking.slot_calls))
+
+        result = _tap(DAY1, conversation)
+
+        assert result.meta["plan_outcome"] == "PLAN_STEP_SLOTS"
+        assert _buttons(result) == [
+            {"label": "14.10 09:00", "callback": f"cb:plan:slot:{SEARCH8}:0"},
+            {"label": "14.10 15:00", "callback": f"cb:plan:slot:{SEARCH8}:1"},
+            {"label": "12.10", "callback": f"cb:plan:day:{SEARCH8}:0"},
+            {"label": "17.10", "callback": f"cb:plan:day:{SEARCH8}:2"},
+        ]
+        # Выбор услуги не повторяется; расписание спрошено за один этот день.
+        assert len(plan.resolved) == before[0]
+        assert [c["date"] for c in booking.slot_calls[before[1] :]] == ["2026-10-14"]
+
+    def test_d3_after_a_day_tap_the_pressed_time_of_that_day_is_booked(
+        self, booking: FakeBooking
+    ) -> None:
+        conversation = _at_slots()
+        _tap(DAY1, conversation)
+
+        result = _tap(f"cb:plan:slot:{SEARCH8}:1", conversation)
+
+        assert result.meta["plan_outcome"] == "PLAN_STEP_BOOKED"
+        assert booking.created[0]["start_datetime"] == SLOT_D
+
+    def test_d4_a_day_whose_time_is_gone_says_so_and_keeps_the_other_days(
+        self, booking: FakeBooking
+    ) -> None:
+        conversation = _at_slots()
+        booking.days["2026-10-14"] = []
+
+        result = _tap(DAY1, conversation)
+
+        assert result.meta["plan_outcome"] == "PLAN_STEP_NO_SLOTS"
+        assert _buttons(result) == [
+            {"label": "12.10", "callback": f"cb:plan:day:{SEARCH8}:0"},
+            {"label": "17.10", "callback": f"cb:plan:day:{SEARCH8}:2"},
+        ]
+        # Старая кнопка времени прежнего дня больше ничего не записывает.
+        assert _tap(SLOT0, conversation).reply_text == "PLAN_STEP_EXPIRED · тест"
+        assert booking.created == []
+
+    @pytest.mark.parametrize(
+        "tap", ["cb:plan:day:deadbeef:1", f"cb:plan:day:{SEARCH8}:3", f"cb:plan:day:{SEARCH8}:9"]
+    )
+    def test_d5_a_stale_or_unknown_day_reads_no_schedule(
+        self, booking: FakeBooking, tap: str
+    ) -> None:
+        conversation = _at_slots()
+        before = len(booking.slot_calls)
+
+        result = _tap(tap, conversation)
+
+        assert result.reply_text == "PLAN_STEP_EXPIRED · тест"
+        assert len(booking.slot_calls) == before
+
+    def test_d6_a_day_tap_before_a_service_is_chosen_reads_no_schedule(
+        self, booking: FakeBooking
+    ) -> None:
+        conversation = _at_offers()
+
+        result = _tap(DAY1, conversation)
+
+        assert result.reply_text == "PLAN_STEP_EXPIRED · тест"
+        assert booking.slot_calls == []
+
+    def test_d7_a_day_tap_is_under_the_consent_gate_and_needs_the_turns_verdict(
+        self, booking: FakeBooking, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        conversation = _at_slots()
+        before = len(booking.slot_calls)
+
+        assert _tap(DAY1, conversation, safety=None).reply_text == "SAFETY_INPUT_UNAVAILABLE · тест"
+        monkeypatch.setattr(
+            plan_gate, "plan_processing_refusal", lambda bot_user: "PLAN_CONSENT_REQUIRED"
+        )
+        assert _tap(DAY1, conversation).reply_text == "PLAN_CONSENT_REQUIRED · тест"
+        assert len(booking.slot_calls) == before
+
+    def test_d8_no_more_days_are_offered_than_the_limit(self, booking: FakeBooking) -> None:
+        booking.days = {
+            f"2026-10-{day:02d}": [f"2026-10-{day:02d}T10:00:00+03:00"] for day in range(10, 24)
+        }
+        conversation = _at_offers()
+
+        result = _tap(OFFER0, conversation)
+
+        days = conversation.skill_state[step.STATE_KEY]["days"]
+        assert days == [f"2026-10-{day:02d}" for day in range(10, 10 + step.MAX_DAYS)]
+        assert [b["label"] for b in _buttons(result)] == [
+            "10.10 10:00",
+            *[f"{day:02d}.10" for day in range(11, 10 + step.MAX_DAYS)],
+        ]
+        # Набрав предел, расписание дальше не спрашивают.
+        assert len(booking.slot_calls) == step.MAX_DAYS
+
+    def test_d9_a_failed_read_of_the_day_is_unavailable_and_keeps_the_state(
+        self, booking: FakeBooking, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        conversation = _at_slots()
+        shown = dict(conversation.skill_state[step.STATE_KEY])
+
+        def broken(**kwargs: Any) -> list[Any]:
+            raise booking_mod.BookingAPIError("down")
+
+        monkeypatch.setattr(booking, "get_available_times", broken)
+
+        result = _tap(DAY1, conversation)
+
+        assert result.reply_text == "PLAN_ENGINE_UNAVAILABLE · тест"
+        assert conversation.skill_state[step.STATE_KEY] == shown
 
 
 # ─── время → запись ──────────────────────────────────────────────────────
@@ -634,6 +788,6 @@ def test_k1_step_buttons_carry_the_catalogs_labels_and_the_plan_token() -> None:
 def test_k2_the_taps_belong_to_the_plan_family_and_leave_no_words_in_history() -> None:
     from apps.orchestrator.plan_lite_card import is_plan_callback, tap_history_text
 
-    for tap in (STEP0, OFFER0, SLOT0):
+    for tap in (STEP0, OFFER0, SLOT0, DAY1):
         assert is_plan_callback(tap) is True
         assert tap_history_text(tap) is None
