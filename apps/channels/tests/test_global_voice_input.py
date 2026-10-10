@@ -10,6 +10,7 @@ test_handler_voice_input.py``), доказанный на втором вход�
 
 from __future__ import annotations
 
+import json
 import logging
 import uuid
 from unittest.mock import MagicMock, patch
@@ -552,3 +553,73 @@ class TestEchoStaysOutOfTheGuard:
             _msg(text="привет", user_id=70044), trace_id=str(uuid.uuid4())
         )
         assert [c["text"] for c in sent] == [REPLACEMENT_TEXT]
+
+
+def _everything_in_the_database() -> str:
+    """Все строки всех таблиц одним текстом (DRF-1943).
+
+    Обход по реестру моделей, включая авто-таблицы связей: новая таблица
+    попадает в проверку сама. Байты разворачиваются в текст, чтобы запись
+    голосового в ``BinaryField`` не прошла мимо.
+    """
+    from django.apps import apps as django_apps
+
+    def plain(value):
+        if isinstance(value, bytes | bytearray | memoryview):
+            return bytes(value).decode("latin-1")
+        return str(value)
+
+    chunks = []
+    for model in django_apps.get_models(include_auto_created=True):
+        for row in model._base_manager.values():
+            chunks.append(json.dumps(row, ensure_ascii=False, default=plain))
+    return "\n".join(chunks)
+
+
+class TestVoiceIsNotKept:
+    """DRF-1943 — решение владельца 06.10: «голос не храним, только текст»."""
+
+    URL_SIG = "SIG-MARKER-1943"
+    BYTES = b"VOICE-BYTES-1943"
+
+    def _voice_webhook(self, user_id: int) -> dict:
+        attachment = {
+            "type": "audio",
+            "payload": {
+                "id": 7,
+                "url": f"https://a.oneme.ru/v.ogg?sig={self.URL_SIG}",
+                "token": "TOKEN-MARKER-1943",
+            },
+        }
+        return _msg(user_id=user_id, mid=f"keep-{user_id}", attachments=[attachment])
+
+    def test_after_a_voice_turn_only_the_text_is_in_the_database(self, sent, fake_redis, concierge):
+        from apps.ingress.services import record_webhook
+
+        body = self._voice_webhook(70051)
+        audio = page(0, opus_head(0), flags=2) + page(96_000, self.BYTES, seq=1)
+        _provider("запиши меня на массаж")
+
+        # Приём (журнал, событие, аудит) и обработка — как в бою, подряд.
+        record_webhook(channel="max", external_event_id="keep-70051", raw_payload=body)
+        with patch(_DOWNLOAD, return_value=audio):
+            max_handler.handle_global_max_event(body, trace_id=str(uuid.uuid4()))
+
+        stored = _everything_in_the_database()
+        # Текст на месте, и журнал знает, что это было голосовое…
+        assert _user_rows(70051) == [("запиши меня на массаж", "voice")]
+        assert "запиши меня на массаж" in stored
+        assert '"redacted": "voice"' in stored
+        # …а записи и ссылки на неё нет ни в одной таблице.
+        assert self.URL_SIG not in stored
+        assert "TOKEN-MARKER-1943" not in stored
+        assert self.BYTES.decode() not in stored
+
+    def test_the_scan_does_see_a_link_that_is_stored(self):
+        """Калибровка: обход находит ссылку, если она в базе лежит."""
+        from apps.ingress.models import WebhookJournal
+
+        WebhookJournal.objects.create(
+            channel="max", external_event_id="keep-raw", raw_payload=self._voice_webhook(70052)
+        )
+        assert self.URL_SIG in _everything_in_the_database()
