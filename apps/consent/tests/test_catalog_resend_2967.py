@@ -187,5 +187,135 @@ def test_c3_a_failed_delivery_is_counted_and_the_run_goes_on(
     assert "applied=1" in printed
 
 
+# ─── след запуска: одна агрегатная строка журнала ───────────────────────────
+
+
+def _audit_rows() -> list[dict[str, Any]]:
+    from apps.audit.models import AuditLog
+
+    return [
+        dict(row.payload)
+        for row in AuditLog.all_tenants.filter(action="consent.resend.catalog").order_by(
+            "created_at"
+        )
+    ]
+
+
+def test_a1_apply_leaves_one_aggregate_audit_row_without_person_ids(
+    tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    now = timezone.now()
+    for person in ("29690", "29691", "29692"):
+        _withdrawn_person(tenant, person, now)
+    answers = iter(["applied", "duplicate", "applied"])
+
+    def _post(**kwargs: Any) -> ConsentEventReceipt:
+        return ConsentEventReceipt(event_id=kwargs["body"]["event_id"], outcome=next(answers))
+
+    monkeypatch.setattr(f"{COMMAND}.post_consent_event", _post)
+
+    printed = _run("--apply", "--pause", "0")
+
+    (row,) = _audit_rows()
+    assert row["consent_type"] == "personal_data"
+    assert row["people"] == 3
+    assert row["outcomes"] == {"applied": 2, "duplicate": 1}
+    assert row["completed"] is True
+    assert row["started_at"] <= row["finished_at"]
+    assert sorted(row) == [
+        "completed",
+        "consent_type",
+        "finished_at",
+        "outcomes",
+        "people",
+        "run_id",
+        "started_at",
+    ]
+    # Ни одного идентификатора человека — ни в строке журнала, ни в выводе.
+    flat = repr(row) + printed
+    assert row["people"] == 3 and not any(p in flat for p in ("29690", "29691", "29692"))
+    assert f"run_id={row['run_id']}" in printed
+
+
+def test_a2_the_dry_run_leaves_no_audit_row(tenant, monkeypatch: pytest.MonkeyPatch) -> None:
+    _withdrawn_person(tenant, "29693", timezone.now())
+    monkeypatch.setattr(f"{COMMAND}.post_consent_event", lambda **kw: None)
+
+    printed = _run()
+
+    assert "mode=dry-run people=1" in printed
+    assert _audit_rows() == []  # empty-assert-ok: a1 видит здесь одну строку
+
+
+def test_a3_failures_are_in_the_audit_row_by_class_name(
+    tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    now = timezone.now()
+    _withdrawn_person(tenant, "29694", now)
+    _withdrawn_person(tenant, "29695", now)
+    calls: list[int] = []
+
+    def _post(**kwargs: Any) -> ConsentEventReceipt:
+        calls.append(1)
+        if len(calls) == 1:
+            raise ConsentEventUnavailable("server: HTTP 503")
+        return ConsentEventReceipt(event_id=kwargs["body"]["event_id"], outcome="applied")
+
+    monkeypatch.setattr(f"{COMMAND}.post_consent_event", _post)
+
+    _run("--apply", "--pause", "0")
+
+    (row,) = _audit_rows()
+    assert row["outcomes"] == {"applied": 1, "failed:ConsentEventUnavailable": 1}
+    assert row["completed"] is True
+
+
+def test_a4_an_interrupted_run_still_leaves_the_row_with_what_went_out(
+    tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Прогон оборвался не отказом каталога, а чем-то иным — уже отправленное
+    должно остаться в журнале, с пометкой «не доведён»."""
+    now = timezone.now()
+    _withdrawn_person(tenant, "29696", now)
+    _withdrawn_person(tenant, "29697", now)
+    calls: list[int] = []
+
+    def _post(**kwargs: Any) -> ConsentEventReceipt:
+        calls.append(1)
+        if len(calls) == 2:
+            raise RuntimeError("interrupted")
+        return ConsentEventReceipt(event_id=kwargs["body"]["event_id"], outcome="applied")
+
+    monkeypatch.setattr(f"{COMMAND}.post_consent_event", _post)
+
+    with pytest.raises(RuntimeError):
+        _run("--apply", "--pause", "0")
+
+    (row,) = _audit_rows()
+    assert row["completed"] is False
+    assert row["outcomes"] == {"applied": 1}
+    assert row["people"] == 2
+
+
+def test_a5_a_missing_audit_row_is_a_loud_failure(tenant, monkeypatch: pytest.MonkeyPatch) -> None:
+    """``write_audit`` свои сбои глотает; строка — единственный след отправки,
+    поэтому её отсутствие — отказ команды с числами в тексте, а не тишина."""
+    from django.core.management.base import CommandError
+
+    _withdrawn_person(tenant, "29698", timezone.now())
+    monkeypatch.setattr(
+        f"{COMMAND}.post_consent_event",
+        lambda **kw: ConsentEventReceipt(event_id=kw["body"]["event_id"], outcome="applied"),
+    )
+    monkeypatch.setattr(f"{COMMAND}.write_audit", lambda *args, **kwargs: None)
+
+    with pytest.raises(CommandError) as caught:
+        _run("--apply", "--pause", "0")
+
+    assert "строка журнала аудита не записана" in str(caught.value)
+    assert "'applied': 1" in str(caught.value)
+    assert "29698" not in str(caught.value)
+
+
 def test_the_marker_names_this_resend() -> None:
     assert catalog_resend.GRANTED_VIA == "resend:drf-2967"
