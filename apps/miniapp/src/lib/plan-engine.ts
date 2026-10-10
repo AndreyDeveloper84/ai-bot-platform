@@ -151,11 +151,19 @@ export interface StepOffers {
 export interface StepSlots {
   token: string;
   option: StepOption;
-  /** Времена ближайшего дня, где они есть, — в поясе мастера. */
+  /** Дни со свободным временем (`ГГГГ-ММ-ДД`), ближайшие первыми. */
+  days: string[];
+  /** Показанный день; `null` — сервер его не назвал. */
+  day: string | null;
+  /** Времена показанного дня — в поясе мастера; пусто — в этом дне времени уже нет. */
   slots: string[];
 }
 
-async function stepAction<T>(action: "offers" | "choose" | "book", token: string, index: number): Promise<T> {
+async function stepAction<T>(
+  action: "offers" | "choose" | "day" | "book",
+  token: string,
+  index: number,
+): Promise<T> {
   return request<T>("/plan/step", { method: "POST", body: JSON.stringify({ action, token, index }) });
 }
 
@@ -173,6 +181,11 @@ export async function stepOffers(plan: SavedPlan, stepIndex: number): Promise<St
 /** Выбор услуги: сервер фиксирует его в каталоге и отдаёт свободное время. */
 export async function chooseStepOption(token: string, optionIndex: number): Promise<StepSlots> {
   return stepAction<StepSlots>("choose", token, optionIndex);
+}
+
+/** Другой день из показанных: сервер читает его время у каталога заново. */
+export async function chooseStepDay(token: string, dayIndex: number): Promise<StepSlots> {
+  return stepAction<StepSlots>("day", token, dayIndex);
 }
 
 /** Запись на время; возвращает время созданной записи. */
