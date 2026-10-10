@@ -3,8 +3,8 @@
  *
  * Состояние дня — ПЕРВЫМ, одно из четырёх: ближайшая запись (имя, услуга,
  * начало–конец, «до визита N мин») + следующие спокойнее · «Сейчас по
- * расписанию» (без «Сейчас идёт визит» и «До конца ≈») · «На сегодня записей
- * нет» (кнопка «Добавить запись» появится с М-3 / DRF-2155 — мёртвых и лживых
+ * расписанию» (без «Сейчас идёт визит» и «До конца ≈») · «Сегодня у вас пока
+ * нет записей.» (кнопка «Добавить запись» появилась с М-3 / DRF-2155 — мёртвых
  * кнопок не рисуем, DRF-1181) · «Сегодня у вас выходной по графику.» + «Рабочие часы →» ·
  * рамка дня не прочитана → «Не удалось проверить расписание» + «Проверить снова».
  *
@@ -187,14 +187,13 @@ describe("«Вам ещё не назначили услуги» — по чис
 });
 
 describe("порядок: состояние дня — первым", () => {
-  it("блок дня стоит выше карточки настройки и «Спросить Ayla»", async () => {
+  it("блок дня стоит выше постоянной нижней навигации", async () => {
     mockedDashboard.mockResolvedValue(doc({ next_visit: NEXT }));
     renderAt();
     const day = await screen.findByRole("region", { name: /сегодня/i });
-    const ayla = screen.getByRole("button", { name: /Спросить Ayla/ });
-    // DOM order: day block precedes the Ayla entry.
+    const aylaTab = screen.getByRole("button", { name: "Ayla" });
     expect(
-      day.compareDocumentPosition(ayla) & Node.DOCUMENT_POSITION_FOLLOWING,
+      day.compareDocumentPosition(aylaTab) & Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
   });
 });
@@ -434,11 +433,11 @@ describe("убрано по макету и §50 п.5", () => {
     expect(screen.queryByText(/★/)).toBeNull();
     expect(screen.queryByText(/[Вв]ыплат/)).toBeNull();
     expect(screen.queryByRole("button", { name: /Диалоги/ })).toBeNull();
-    // Положительный сторож той же отрисовки: шапка и «Спросить Ayla» на месте.
+    // DRF-2955: отдельной карточки «Спросить Ayla» больше нет — вход живёт
+    // в постоянной вкладке и не дублируется на Today.
     expect(screen.getByText("Архипкин")).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: /Спросить Ayla/ }),
-    ).toBeInTheDocument();
+    expect(screen.queryByText("Спросить Ayla")).toBeNull();
+    expect(screen.getByRole("button", { name: "Ayla" })).toBeInTheDocument();
   });
 });
 
