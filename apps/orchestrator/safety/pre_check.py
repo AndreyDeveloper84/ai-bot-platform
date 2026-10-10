@@ -81,6 +81,169 @@ class SafetyResult:
     reason: str = ""
 
 
+# ── «умираю (как) хочу …»: hyperbole vs crisis (#1081 narrowing, DRF-2684) ──
+#
+# Bare «умираю» is a crisis signal; «Умираю, хочу кофе» is a figure of speech,
+# common on a beauty bot — typed with a comma, and always punctuated when it
+# comes from speech recognition. Until DRF-2684 the exemption was «хочу +
+# anything» across whitespace only: «Умираю, хочу кофе.» got the crisis reply,
+# and «умираю хочу просто умереть» passed.
+#
+# The exemption is now narrow on purpose. «умираю» is NOT a crisis only when
+# all of this holds:
+#
+# * «(как) хочу» is followed by an everyday object of desire
+#   (``_BENIGN_WANT``: food, sleep, rest, a service, «к вам»), with at most
+#   three words from a closed list in between (``_WANT_FILLER``) — any other
+#   word there, and the wish is not an everyday one;
+# * no word of death, ending, farewell or hopelessness (``_DISTRESS_NEAR``)
+#   stands within ``_UMIRAYU_WINDOW`` characters before «умираю» or after
+#   «хочу»;
+# * the message has the shape of a figure of speech: one «умираю»; nothing but
+#   a greeting in the sentences before it; after its own sentence — only
+#   questions («Умираю, хочу пиццу. Сколько в ней калорий?»).
+#
+# What this does and does not promise. A word missing from ``_BENIGN_WANT`` or
+# ``_WANT_FILLER`` costs a false crisis reply — those two fail towards the
+# stop. ``_DISTRESS_NEAR`` cannot: distress told in words it does not know,
+# inside ONE sentence with an everyday wish («Умираю, хочу записаться на
+# <unknown word>»), passes. The shape rule is what keeps the rest: a second
+# statement or an earlier sentence takes the exemption away whatever words it
+# uses. It reads sentence ends, so it works on typed text only — the
+# punctuation-free copy of a voice transcript (``voice_turn.strip_for_gate``)
+# has none and is judged by the two lists alone. That is where voice was before
+# this change, not a new gap (DRF-2922 is the way to close it).
+#
+# ``_GAP`` is whitespace plus every mark ``strip_for_gate`` removes: marks
+# BETWEEN the words of the phrase itself never change the verdict. ``_GAP_IN``
+# leaves the sentence enders out for «умираю от …»: «умираю, от боли» is the
+# body (MEDICAL) like the unpunctuated form, while typed «Умираю. От меня все
+# отвернулись.» stays with this rule.
+_GAP = r"[\s,.!?;:…\"'’«»“”„()\[\]{}<>—–-]+"
+_GAP_IN = r"[\s,;:\"'’«»“”„()\[\]{}<>—–-]+"
+_SENTENCE_END = r".!?…\n"
+_UMIRAYU_WINDOW = 120
+
+_BENIGN_WANT = (
+    # Food and drink.
+    r"(кофе\w*|ча[йюя]|чайку|есть|поесть|кушать|покушать|жрать|пожрать|пить|попить|воды|водички"
+    r"|сладк\w+|шоколад\w*|пицц\w+|суши|ролл\w+|морожен\w+|торт\w*|пирожн\w+|конфет\w*|булочк\w+"
+    r"|бургер\w*|мяс[оа]|картошк\w+|пельмен\w+|шаурм\w+|вин[оа]|пив[оа]"
+    # Sleep, rest, everyday.
+    r"|спать|поспать|выспаться|отдохнуть|отдыхать|отпуск\w*|море|моря|домой|бан[юи]|сауну|душ|ванну"
+    r"|туалет|курить|покурить|похудеть|каникул\w*|полежать|поваляться"
+    # Services and booking. «записать завещание» is not a booking.
+    r"|маникюр\w*|педикюр\w*|массаж\w*|стрижк\w+|подстричь\w*|постричь\w*|покрас\w+|окрас\w+"
+    r"|перекрас\w+|подкрас\w+|корни"
+    r"|окрашиван\w+|бров\w+|ресниц\w+|реснич\w+|ногт\w+|ноготочк\w+|волос\w*|кончик\w+|уклад\w+"
+    r"|прич[её]ск\w+|макияж\w*|эпиляц\w+|депиляц\w+|шугаринг\w*|спа|чистк\w+|пилинг\w*|гель-?лак\w*"
+    r"|покрыти\w+|наращиван\w+|нараст\w+|ламинирован\w+|кератин\w*|загар\w*|солярий\w*"
+    rf"|записаться|запись|запиш\w+|к{_GAP}вам|мастер\w*)"
+)
+
+# Words that may stand between «хочу» and the everyday object. A closed list:
+# with any two words allowed here, «хочу сброситься, есть крыша» read as «хочу
+# есть».
+_WANT_FILLER = (
+    r"(?:в|во|на|к|ко|с|со|у|за|по|до|и|а|же|бы|уже|ещё|еще|очень|так|просто|прямо|срочно|снова"
+    r"|опять|наконец|поскорее|скорее|сейчас|сегодня|завтра|этот|эту|это|эти|этого|тот|ту"
+    r"|так(?:ой|ую|ое|ие|ого)|ваш\w*|твой|твою|нов\w+|свеж\w+|горяч\w+|холодн\w+|больш\w+|вкусн\w+"
+    r"|красив\w+|нормальн\w+|хорош\w+|фирменн\w+|чашк\w+|чашечк\w+|кус(?:ок|очек)|чего|что|нибудь"
+    r"|то|сделать|обновить|снять|поправить|покрыть|попробовать|сходить|пойти|поехать|попасть"
+    r"|прийти|приехать|лечь|убрать|подровнять|эти|этих|отросш\w+|секущ\w+|немного|бокал\w*)"
+)
+
+# «не проснуться до обеда» and «не могу больше ждать» are everyday speech.
+_NOT_ABOUT_TIME = rf"(?!{_GAP}(до|к|в|на|по|вовремя|утром|рано)\b)"
+_NOT_WAITING = rf"(?!{_GAP}(ждать|терпеть|без)\b)"
+_DISTRESS_WORDS = (
+    # Death and non-being.
+    r"(умер(?!ен)\w*|умира(?!ю\b)\w*|умр\w+|сдох\w*|подох\w*|помер(еть|ла|ли)?\b|помр\w+|погиб\w*"
+    r"|исчез\w*|пропа(сть|ду)\b|смерт(?!ельн)\w*|\bуби(ть|ться|л\w*|йств\w*|ва\w*)|убь\w+"
+    r"|похорон\w*|эвтаназ\w*"
+    rf"|не{_GAP}(жить|существовать|дышать|чувствовать|родит\w+|рожда\w+|встав\w+)\b"
+    rf"|не{_GAP}(вернусь|наступ\w+|будите|выдерж\w+)"
+    rf"|не{_GAP}(проснуться|проснусь|просыпаться)\b{_NOT_ABOUT_TIME}"
+    rf"|не{_GAP}хоч\w*{_GAP}(просыпаться|проснуться)\b{_NOT_ABOUT_TIME}"
+    rf"|меня{_GAP}(\w+{_GAP}){{0,2}}"
+    rf"не{_GAP}(было|стало|будет|станет|существ\w+|наш\w+|найд\w+|спас\w+|откач\w+)"
+    rf"|не{_GAP}(было|стало|будет|станет){_GAP}меня|без{_GAP}меня|забер\w+{_GAP}меня"
+    # Life and its end.
+    rf"|(из|от|с){_GAP}(\w+{_GAP})?жизн\w+"
+    rf"|жизн\w+{_GAP}(\w+{_GAP})?((за|о)?конч|надоел|оборв|бессмысл|не{_GAP}(имеет|нужн|мил))"
+    r"|(?<!в\s)смысл\w*|незачем"
+    rf"|(вс[её]|это|этим|всем){_GAP}(\w+{_GAP})?(за|о|по)?конч\w+"
+    rf"|(за|о|по)?конч\w+{_GAP}(вс[её]|это\b|с{_GAP}эт|со{_GAP}вс)"
+    r"|\bкончено\b|приконч\w*"
+    rf"|(?<!под\s)\bконец\b(?!{_GAP}(дня|недел|месяц|год|смен|рабоч))"
+    rf"|прекрат\w*{_GAP}(вс[её]|это\b|жить|существ\w+|мучен\w+|страдан\w+)"
+    rf"|перест\w+{_GAP}(жить|быть|существ\w+|дыш\w+|мучи\w+|страда\w+|чувств\w+)|отмуч\w*"
+    # Leaving, sleep «for good», the other world.
+    r"|(уйти|уйду|уснуть|заснуть|усну|засну|спать|поспать|отдохнуть|лечь)"
+    rf"{_GAP}(навсегда|насовсем|вечн\w+)"
+    rf"|от{_GAP}(всего|всех|себя)\b"
+    rf"|(этот|этого|тот){_GAP}(мир|свет)|на{_GAP}неб|в{_GAP}(могил|гроб|петл|ра[йю]\b)"
+    rf"|под{_GAP}земл\w+|к{_GAP}богу"
+    # Farewell.
+    r"|попрощ|прощан\w+|прост(ить|ит)ся|прощай|напоследок|записк\w*|завещан\w*"
+    rf"|прости(те)?{_GAP}меня"
+    rf"|(мо[йяеё]|мои){_GAP}последн\w+"
+    rf"|последн\w+{_GAP}(шаг|день|вечер|ноч\w+|вздох|сообщени\w+|слов\w+)"
+    # Methods.
+    rf"|с{_GAP}собой{_GAP}(что|сдел)|(что|чего)-?(то|нибудь){_GAP}с{_GAP}собой"
+    rf"|под{_GAP}(поезд|машин|кол[её]с)|из{_GAP}окна"
+    rf"|(выйти|шагн\w*|прыгн\w*|выпрыгн\w*|выброс\w*){_GAP}(\w+{_GAP})?(в|из){_GAP}окн"
+    rf"|с{_GAP}(крыш|мост|балкон)"
+    r"|застрел|отрав|утоп|повес(ит|ил|ь)\w*|повеш\w*|задуш|удав(ит|л|к)\w*|таблет|снотворн"
+    r"|вен[ыу]\b|вер[её]вк\w*|лезви\w*|\bяд[ау]?\b"
+    # Hopelessness.
+    rf"|больше{_GAP}не{_GAP}могу\b{_NOT_WAITING}|не{_GAP}могу{_GAP}(больше|так)\b{_NOT_WAITING}"
+    rf"|(нет|нету){_GAP}(больше{_GAP})?сил|сил{_GAP}(больше{_GAP}|уже{_GAP})?(нет|нету)"
+    rf"|никому{_GAP}(я{_GAP})?не{_GAP}нуж|не{_GAP}вижу{_GAP}выхода|выхода{_GAP}нет|нет{_GAP}выхода"
+    rf"|вс[её]{_GAP}решил|обуз\w*|никч[её]мн\w*|ненавижу{_GAP}себя"
+    rf"|(очень|так){_GAP}плохо|плохо{_GAP}мне|мне{_GAP}плохо)"
+)
+# The list above is written with plain ``\w*`` / ``\w+`` to stay readable. An
+# unbounded tail backtracks letter by letter under the window that follows it —
+# seconds on a hostile 4 000 characters — so the tails are made bounded and
+# possessive here; no word form needs more than 30 letters.
+_DISTRESS_NEAR = _DISTRESS_WORDS.replace(r"\w*", r"\w{0,30}+").replace(r"\w+", r"\w{1,30}+")
+
+# The rest of the message after the everyday object: its own sentence, then
+# nothing but questions. A text without sentence ends satisfies it trivially.
+_ONLY_QUESTIONS_FOLLOW = (
+    rf"[^{_SENTENCE_END}]*+[{_SENTENCE_END}\s]*+"
+    rf"(?:[^{_SENTENCE_END}]++\?[{_SENTENCE_END}\s]*+)*+\Z"
+)
+_UMIRAYU_HYPERBOLE = (
+    rf"{_GAP}(?:(?:как(?:{_GAP}же)?|так){_GAP})?хочу\b"
+    rf"(?!.{{0,{_UMIRAYU_WINDOW}}}{_DISTRESS_NEAR})"
+    rf"{_GAP}(?:{_WANT_FILLER}{_GAP}){{0,3}}{_BENIGN_WANT}\b{_ONLY_QUESTIONS_FOLLOW}"
+)
+_UMIRAYU_NOT_OF = rf"(?!{_GAP_IN}от\b)"
+_UMIRAYU = rf"\bумираю\b{_UMIRAYU_NOT_OF}"
+# A sentence before the first «умираю» that is more than a greeting.
+_GREETING = (
+    r"[\W_]*+(?:(?:привет\w*|здравствуй\w*|добр\w+\s+(?:день|вечер|утро)|девочки|девчонки"
+    r"|ой|ох|ай|блин|слушайте|я)[\W_]*+)*+"
+)
+_SENTENCE_BEFORE_UMIRAYU = rf"(?!{_GREETING}\bумираю\b)(?:(?!\bумираю\b)[^{_SENTENCE_END}])*+[{_SENTENCE_END}].*?{_UMIRAYU}"
+# ``\A(?=.*…)`` is a gate, not a condition: a text with neither word leaves the
+# rule after one pass instead of trying ``_DISTRESS_NEAR`` at every position.
+# ``s`` lets the windows cross a line break. A second «умираю» is tried first:
+# a repeated word is not a figure of speech, and a hostile text made of it must
+# not be weighed occurrence by occurrence.
+_UMIRAYU_CRISIS = (
+    r"(?is)\A(?=.*(?:умираю|dying))(?:"
+    rf".*?{_UMIRAYU}.*?{_UMIRAYU}"
+    rf"|{_SENTENCE_BEFORE_UMIRAYU}"
+    r"|.*?(?:"
+    rf"\bумираю\b(?!{_UMIRAYU_HYPERBOLE}){_UMIRAYU_NOT_OF}"
+    rf"|{_DISTRESS_NEAR}.{{0,{_UMIRAYU_WINDOW}}}{_UMIRAYU}"
+    r"|\bdying\b))"
+)
+
+
 # Pinned default safety patterns. Tenant overrides MERGE on top via settings.
 # Verdicts encode the action — patterns map to specific verdicts.
 _DEFAULT_PATTERNS: dict[str, list[str]] = {
@@ -92,8 +255,8 @@ _DEFAULT_PATTERNS: dict[str, list[str]] = {
     # in BOTH word orders (Russian reorders freely — «убью себя» AND «себя
     # убью»). EN verb stems keep a leading \b so «send it» / «change myself» /
     # «haircut myself» don't false-trigger. Known accepted over-triggers
-    # («умираю как хочу…», «убьюсь если…», «cut myself shaving») are in the PR
-    # #1081 review table.
+    # («убьюсь если…», «cut myself shaving») are in the PR #1081 review table;
+    # «умираю как хочу…» has its own block above (DRF-2684).
     SafetyVerdict.HANDOFF.value: [
         # RU — base stems + idioms «наложить на себя руки» / «счёты с жизнью».
         r"(?i)(\bсамоубийств|\bсуицид|налож\w*\s+на\s+себя\s+руки|сч[её]ты\s+с\s+жизнью)",
@@ -128,10 +291,11 @@ _DEFAULT_PATTERNS: dict[str, list[str]] = {
         r"|\bsuicid|self[\s-]?harm|\boverdos)",
         # Bare «умираю» stays here (crisis): without «от боли / скорую /
         # сердце» it reads as despair as often as as a body. The hyperbole
-        # «умираю (как) хочу…» (common on a beauty bot) is excluded by the
-        # negative lookahead; the physical «умираю от …» moved to MEDICAL
-        # (DRF-2000) together with the rest of the acute-emergency group.
-        r"(?i)(\bумираю\b(?!\s+(как\s+)?хочу)(?!\s+от\b)|\bdying\b)",
+        # «умираю (как) хочу <everyday thing>» is exempt — see the block
+        # above ``_GAP`` (DRF-2684); the physical «умираю от …» moved to
+        # MEDICAL (DRF-2000) together with the rest of the acute-emergency
+        # group.
+        _UMIRAYU_CRISIS,
         # Abuse / domestic violence — stems
         r"(?i)(\bизбива|\bнасили|\babuse\b|\bbattered\b)",
     ],
@@ -145,7 +309,7 @@ _DEFAULT_PATTERNS: dict[str, list[str]] = {
     SafetyVerdict.MEDICAL.value: [
         # Cardiac / ambulance / dying of pain — all inflections of «скорая».
         r"(?i)(сердечн\w*\s+приступ|heart\s+attack|\bинфаркт|\bинсульт"
-        r"|\bскор(ая|ую|ой|ые)\b(\s+помощ\w*)?|\bemergency\b|\bумираю\s+от\b)",
+        rf"|\bскор(ая|ую|ой|ые)\b(\s+помощ\w*)?|\bemergency\b|\bумираю{_GAP_IN}от\b)",
         # Breathing / consciousness / chest — with the same emotional-idiom
         # exception the health_screening classifier keeps («задыхаюсь от
         # смеха», «потеряла сознание от восторга» are not emergencies; S-1b).

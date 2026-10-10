@@ -196,14 +196,28 @@ class TestGlobalVoice:
             concierge.call_args.args[0] == "Умираю, хочу кофе."
         )  # модели — оригинал, не копия без знаков
 
-    def test_k19_same_transcript_stops_when_strip_is_off(
+    def test_k19_same_transcript_passes_without_the_copy_too(
         self, sent, fake_redis, concierge, settings
     ):
+        # DRF-2684 (K19-А): правило «умираю» само не замечает знаков. До правки
+        # при выключенном флаге эта же расшифровка давала кризисный ответ.
         settings.VOICE_GATE_STRIP_PUNCT = False
         _provider("Умираю, хочу кофе.")
         with patch(_DOWNLOAD, return_value=ogg_of(2)):
             max_handler.handle_global_max_event(_msg(user_id=70005, attachments=[AUDIO]))
-        assert Message.all_tenants.filter(action_type="safety_pre_check").count() == 1
+        assert concierge.call_count == 1
+        assert concierge.call_args.args[0] == "Умираю, хочу кофе."
+        assert Message.all_tenants.filter(action_type="safety_pre_check").count() == 0
+
+    @pytest.mark.parametrize(("user_id", "strip"), [(70015, True), (70016, False)])
+    def test_k19_a_crisis_behind_the_hyperbole_stops_with_and_without_the_copy(
+        self, sent, fake_redis, concierge, settings, user_id, strip
+    ):
+        settings.VOICE_GATE_STRIP_PUNCT = strip
+        _provider("Умираю, хочу просто умереть.")
+        with patch(_DOWNLOAD, return_value=ogg_of(2)):
+            max_handler.handle_global_max_event(_msg(user_id=user_id, attachments=[AUDIO]))
+        assert [c["text"] for c in sent] == [CRISIS_REPLY_TEXT]
         concierge.assert_not_called()
 
     def test_too_long_is_answered_and_the_model_is_not_called(
