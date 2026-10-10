@@ -320,13 +320,15 @@ def _booked_at(plan: dict[str, Any], step_id: str) -> str | None:
     показывает. Считается только действующая запись (:data:`_LIVE_BOOKING`):
     отменённая, прошедшая и запись с неизвестным статусом — нет.
 
-    Каталог отдаёт это время в UTC, а экран берёт часы из строки (DRF-2589),
-    поэтому момент переписывается в пояс салона. Салона записи от шага бот
-    не знает (его нет в зеркале), и пояс берётся запасной — названный в
-    ``apps.tenancy.timezones`` (Москва). Для салона в другом поясе часы будут
-    неверны, пока каталог не отдаст пояс записи. Неразобранное время не
-    показывается.
+    Каталог отдаёт момент в UTC, а экран берёт часы из строки (DRF-2589),
+    поэтому момент переписывается в пояс записи. Пояс — поле ``timezone``
+    рядом с временем: имя пояса IANA, снимок пояса мастера на момент записи.
+    Пояса нет или имя не разобрано — запасной, названный в
+    ``apps.tenancy.timezones`` (Москва): проверки имени на записи у каталога
+    нет. Неразобранное время не показывается.
     """
+    from types import SimpleNamespace
+
     from apps.tenancy.timezones import salon_iso, salon_zone
 
     states = plan.get("step_state")
@@ -345,7 +347,9 @@ def _booked_at(plan: dict[str, Any], step_id: str) -> str | None:
                 moment = datetime.fromisoformat(booking["start_datetime"])
             except ValueError:
                 continue
-            return salon_iso(moment, salon_zone(None))
+            named = booking.get("timezone")
+            zone = salon_zone(SimpleNamespace(timezone=named if isinstance(named, str) else ""))
+            return salon_iso(moment, zone)
     return None
 
 

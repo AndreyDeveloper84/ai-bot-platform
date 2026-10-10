@@ -618,3 +618,38 @@ def test_b4_the_catalogs_utc_time_reaches_the_screen_as_the_hours_of_the_salon(
     }
 
     assert _booked(client, person) == [SLOT, None]
+
+
+def test_b5_the_hours_are_those_of_the_bookings_own_zone(
+    client: Client, tenant, wire, person: str, catalog: StepCatalog
+) -> None:
+    """Пояс записи — снимок пояса мастера, каталог отдаёт его рядом с временем:
+    07:00 UTC — это 12:00 в Екатеринбурге, а не 10:00 по запасному поясу."""
+    utc = "2026-10-12T07:00:00+00:00"
+    _state(catalog)["step_state"] = {
+        "s-sleep": {
+            "bookings": [
+                {"status": "confirmed", "start_datetime": utc, "timezone": "Asia/Yekaterinburg"}
+            ]
+        },
+        "s-walk": {
+            "bookings": [
+                {"status": "confirmed", "start_datetime": utc, "timezone": "Europe/Moscow"}
+            ]
+        },
+    }
+
+    assert _booked(client, person) == ["2026-10-12T12:00:00+05:00", SLOT]
+
+
+@pytest.mark.parametrize("zone", ["", None, "Mars/Olympus", "+05:00", 5, ["Asia/Yekaterinburg"]])
+def test_b6_a_zone_that_is_missing_or_unreadable_falls_back_to_the_named_default(
+    client: Client, tenant, wire, person: str, catalog: StepCatalog, zone: Any
+) -> None:
+    utc = "2026-10-12T07:00:00+00:00"
+    _state(catalog)["step_state"] = {
+        "s-sleep": {"bookings": [{"status": "confirmed", "start_datetime": utc, "timezone": zone}]},
+        "s-walk": {"bookings": [{"status": "confirmed", "start_datetime": utc}]},
+    }
+
+    assert _booked(client, person) == [SLOT, SLOT]
