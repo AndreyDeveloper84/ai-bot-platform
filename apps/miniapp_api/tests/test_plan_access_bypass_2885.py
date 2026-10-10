@@ -23,7 +23,8 @@ Mini App, прямые API, действия с шагами.
   ничего не собирает;
 * x6 — закрыто при пустом списке, при списке не того вида и для другого
   человека, когда список называет соседа;
-* x7 — обратно: назвали снова — путь снова работает (замок, а не поломка).
+* x7 — обратно: назвали снова — путь снова работает (замок, а не поломка);
+* x8 — четыре внутренних читателя закрыты и при прямом вызове.
 """
 
 from __future__ import annotations
@@ -328,6 +329,60 @@ def test_x6_closed_for_an_empty_list_a_list_of_the_wrong_shape_and_a_neighbours_
     _assert_no_plan_words(chat)
     _assert_no_plan_words(tap)
     assert (read.status_code, book.status_code) == (404, 404)
+    assert calls == before, calls[len(before) :]
+
+
+def test_x8_the_inner_readers_are_closed_on_their_own_not_only_behind_the_outer_ones(
+    client: Client, tenant, wire, person: str, calls: list[str], settings
+) -> None:
+    """Четыре читателя замка стоят ЗА другими (ручкой экрана, обработчиком
+    нажатия). Каждый закрыт и при прямом вызове: сосед, который позовёт их
+    мимо внешней проверки, замка не обойдёт."""
+    from apps.conversations.services import resolve_active_global_conversation
+    from apps.identity.models import BotUser
+    from apps.orchestrator.plan_engine_card import (
+        discussed_plan,
+        pending_proposal_view,
+        trigger_visible,
+    )
+    from apps.orchestrator.plan_step_card import step_action
+
+    _walk_while_listed(client, person, calls)
+    settings.SYNTHETIC_TEST_TRIGGER_ACCOUNTS = (f"max:{person}",)
+    shell = BotUser.all_tenants.filter(channel="max", channel_user_id=person).first()
+    assert shell is not None
+
+    def talk() -> Any:
+        found = resolve_active_global_conversation(shell, create_if_missing=False)
+        assert found is not None
+        return found
+
+    def act() -> str:
+        return step_action(
+            kind="day",
+            token=SEARCH8,
+            index=0,
+            bot_user=shell,
+            conversation=talk(),
+            trace_id="t",
+            safety=views.last_turn_safety_for(shell),
+        ).name
+
+    # Названному человеку все четыре отвечают.
+    assert pending_proposal_view(talk()) is not None
+    discussing = _ask(client, "cb:plan:discuss:saved", as_user=person)
+    assert discussing.status_code == 200, discussing.content[:300]
+    assert discussed_plan(talk()) is not None
+    assert trigger_visible(shell) is True
+    assert act() == "PLAN_STEP_SLOTS"
+
+    _unlist(settings)
+    before = list(calls)
+
+    assert pending_proposal_view(talk()) is None
+    assert discussed_plan(talk()) is None
+    assert trigger_visible(shell) is False
+    assert act() == "PLAN_ENGINE_UNAVAILABLE"
     assert calls == before, calls[len(before) :]
 
 
