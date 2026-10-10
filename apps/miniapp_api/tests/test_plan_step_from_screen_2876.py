@@ -118,8 +118,10 @@ def _world(monkeypatch: pytest.MonkeyPatch, settings) -> None:
 
 
 @pytest.fixture
-def person(tenant) -> str:
+def person(tenant, settings) -> str:
     value = str(next(_PEOPLE))
+    # Замок приёмки — настоящий: человек узла назван в списке.
+    settings.PLAN_ACCEPTANCE_ACCOUNTS = (f"max:{value}",)
     _person_shell(tenant, value)
     return value
 

@@ -39,7 +39,8 @@ from apps.miniapp_api.tests.test_plan_decision_proxy_2879 import (  # noqa: F401
     bot_user as proxy_person,
 )
 
-pytestmark = pytest.mark.django_db
+#: Человек этих узлов назван в списке приёмки Плана; сам замок — test_plan_access_2885.
+pytestmark = [pytest.mark.django_db, pytest.mark.usefixtures("plan_open_to_everyone")]
 
 #: Клиент каталога в ядре (чат и экран зовут его через модуль клиента).
 CORE_CLIENT = "apps.integrations.ayla.plan_engine_client.PlanEngineHttpClient"
