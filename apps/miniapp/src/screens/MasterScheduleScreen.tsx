@@ -61,6 +61,7 @@ import {
 } from "../lib/master-api";
 import { hapticImpact, hapticSelection, signalReady } from "../lib/max-sdk";
 import { MasterAvatar } from "../components/MasterAvatar";
+import { parseSalonWallClock } from "../lib/format";
 import { MasterBookingCard } from "../components/master/MasterBookingCard";
 import { SystemState } from "../components/master/SystemState";
 import { MasterTabBar } from "../components/MasterTabBar";
@@ -668,8 +669,8 @@ function PendingBanner({ pending }: { pending: PendingAvailabilityItem[] }) {
 }
 
 function formatBannerDate(iso: string): string {
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return iso;
+  const wall = parseSalonWallClock(iso);
+  if (wall === null) return iso;
   const months = [
     "янв",
     "фев",
@@ -684,7 +685,7 @@ function formatBannerDate(iso: string): string {
     "ноя",
     "дек",
   ];
-  return `${d.getDate()} ${months[d.getMonth()] ?? ""}`;
+  return `${wall.day} ${months[wall.month - 1] ?? ""}`;
 }
 
 // --- Day view -------------------------------------------------------------
