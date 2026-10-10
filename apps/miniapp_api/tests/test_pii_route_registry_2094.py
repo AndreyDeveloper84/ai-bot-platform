@@ -679,9 +679,11 @@ CUSTOMER_ROUTES: dict[str, Entry] = {
     # --- Plan Engine saved plan (DRF-2876, own) -------------------------
     "customer_plan_current": own(
         "plan.plan_id",
-        "plan.steps[].step_id / label / why",
+        "plan.steps[].step_id / label / why / booked_at",
         "proposal.plan_id / replaces_plan_id",
         "proposal.steps[].step_id / label / why",
+        "draft.token",
+        "draft.steps[].label / why",
         via="apps.miniapp_api.views_plan_engine:saved_plan_payload",
         note=(
             "the caller's own saved plan, read from the catalog under their "
@@ -696,6 +698,29 @@ CUSTOMER_ROUTES: dict[str, Entry] = {
         "acknowledgement only — {'replaced': bool} after the catalog made the caller's own "
         "proposal the plan in effect; the two plan ids from the body are not echoed",
         via="apps.miniapp_api.views_plan_engine:customer_plan_replace",
+    ),
+    "customer_plan_step": own(
+        "token",
+        "options[].service_name / salon_name / salon_city / master_name / price / "
+        "duration_minutes / place_address / synthetic",
+        "option (the chosen one, same fields)",
+        "days[] / day",
+        "slots[]",
+        "booked_at",
+        via="apps.orchestrator.plan_step_card:option_view",
+        note=(
+            "the services the catalog offers for a step of the caller's own plan, the free "
+            "times of the option they picked and the time of the booking just made for them: "
+            "catalog vocabulary about salons and their staff (a master's public display "
+            "name, price, duration, the confirmed address of the place) plus the caller's "
+            "own booking time. No catalog ids of the service or the master, no client name, "
+            "phone or health answers"
+        ),
+    ),
+    "customer_plan_save": none(
+        "acknowledgement only — {'saved': true} after the caller's own unsaved proposal was "
+        "saved by the catalog; the card token from the body is not echoed",
+        via="apps.miniapp_api.views_plan_engine:customer_plan_save",
     ),
     "customer_plan_keep": none(
         "acknowledgement only — {'kept': true} after the caller's own proposal was archived; "

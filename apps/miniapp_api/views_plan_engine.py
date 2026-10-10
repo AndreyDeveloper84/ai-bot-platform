@@ -4,6 +4,8 @@
     GET  /customer/plan/current   → сохранённый план и предложение рядом с ним
     POST /customer/plan/replace   → заменить действующий план предложением
     POST /customer/plan/keep      → отказаться от предложения, оставить действующий
+    POST /customer/plan/save      → сохранить несохранённое предложение из чата
+    POST /customer/plan/step      → шаг → услуги → время → запись (см. :func:`customer_plan_step`)
 
 Каталог собирает план, но не вычисляет два входа — их приносит бот:
 
@@ -32,6 +34,8 @@ Mini App: чужого идентификатора в запросе не су�
 from __future__ import annotations
 
 import json
+from datetime import datetime
+import re
 import logging
 from typing import Any
 
@@ -195,14 +199,21 @@ def saved_plan_payload(
     raw_revision = plan.get("revision")
     revision: dict[str, Any] = raw_revision if isinstance(raw_revision, dict) else {}
     steps = [s for s in revision.get("steps") or [] if isinstance(s, dict)]
-    out: list[dict[str, str | None]] = []
+    out: list[dict[str, Any]] = []
     for step in steps:
         key = str(step.get("capability_ref") or "")
         label = labels.get(key)
         step_id = step.get("step_id")
         if not label or not isinstance(step_id, str) or not step_id:
             return None
-        out.append({"step_id": step_id, "label": label, "why": (effects or {}).get(key) or None})
+        out.append(
+            {
+                "step_id": step_id,
+                "label": label,
+                "why": (effects or {}).get(key) or None,
+                "booked_at": _booked_at(plan, step_id),
+            }
+        )
     if not out:
         return None
     return {"plan_id": str(plan.get("plan_id") or ""), "steps": out}
@@ -243,7 +254,7 @@ def customer_plan_current(request: HttpRequest) -> HttpResponse:
         if plan is None:
             # Предложение существует только рядом с действующим планом: без
             # него заменять нечего, и спрашивать о замене не о чем.
-            return JsonResponse({"plan": None, "proposal": None})
+            return JsonResponse({"plan": None, "proposal": None, "draft": _draft_for(bot_user)})
         keys = _step_keys(plan)
         # Предложение показывается только рядом с ДЕЙСТВУЮЩИМ планом: у
         # приостановленного заменять нечего (каталог заменяет действующий).
@@ -292,7 +303,50 @@ def customer_plan_current(request: HttpRequest) -> HttpResponse:
         sum(1 for key in keys if key not in effects),
         proposal_payload is not None,
     )
-    return JsonResponse({"plan": payload, "proposal": proposal_payload})
+    return JsonResponse(
+        {"plan": payload, "proposal": proposal_payload, "draft": _draft_for(bot_user)}
+    )
+
+
+#: Статусы записи каталога, при которых запись от шага действует.
+_LIVE_BOOKING = frozenset({"pending", "awaiting_payment", "confirmed"})
+
+
+def _booked_at(plan: dict[str, Any], step_id: str) -> str | None:
+    """Время записи, сделанной от этого шага, — или ``None``.
+
+    Каталог хранит у шага только идентификаторы услуги и записи и время
+    записи; названий услуги и мастера в состоянии шага нет, и экран их не
+    показывает. Считается только действующая запись (:data:`_LIVE_BOOKING`):
+    отменённая, прошедшая и запись с неизвестным статусом — нет.
+
+    Каталог отдаёт это время в UTC, а экран берёт часы из строки (DRF-2589),
+    поэтому момент переписывается в пояс салона. Салона записи от шага бот
+    не знает (его нет в зеркале), и пояс берётся запасной — названный в
+    ``apps.tenancy.timezones`` (Москва). Для салона в другом поясе часы будут
+    неверны, пока каталог не отдаст пояс записи. Неразобранное время не
+    показывается.
+    """
+    from apps.tenancy.timezones import salon_iso, salon_zone
+
+    states = plan.get("step_state")
+    state = states.get(step_id) if isinstance(states, dict) else None
+    bookings = state.get("bookings") if isinstance(state, dict) else None
+    if not isinstance(bookings, list):
+        return None
+    for booking in reversed(bookings):
+        if (
+            isinstance(booking, dict)
+            and isinstance(booking.get("start_datetime"), str)
+            and booking["start_datetime"]
+            and booking.get("status") in _LIVE_BOOKING
+        ):
+            try:
+                moment = datetime.fromisoformat(booking["start_datetime"])
+            except ValueError:
+                continue
+            return salon_iso(moment, salon_zone(None))
+    return None
 
 
 def _step_keys(plan: dict[str, Any]) -> list[str]:
@@ -303,6 +357,54 @@ def _step_keys(plan: dict[str, Any]) -> list[str]:
         for s in (steps if isinstance(steps, list) else [])
         if isinstance(s, dict)
     ]
+
+
+def _person_conversation(bot_user: BotUser) -> Any:
+    """Действующий разговор человека с ботом — или ``None``. Только читается.
+
+    Чат Mini App и бот — один разговор глобальной оболочки MAX; экран его не
+    создаёт. Человек не из MAX, оболочки или разговора нет — ``None``.
+    """
+    from apps.conversations.services import resolve_active_global_conversation
+    from apps.identity.services.global_tenant import get_global_bot_tenant
+
+    if (bot_user.channel or "") != "max":
+        return None
+    person_id = (bot_user.channel_user_id or "").strip()
+    if not person_id:
+        return None
+    shell = BotUser.all_tenants.filter(
+        tenant=get_global_bot_tenant(), channel="max", channel_user_id=person_id
+    ).first()
+    if shell is None:
+        return None
+    return resolve_active_global_conversation(shell, create_if_missing=False)
+
+
+def _draft_for(bot_user: BotUser) -> dict[str, Any] | None:
+    """Несохранённое предложение, собранное в чате, — для показа на экране.
+
+    Задание владельца (§9): Mini App сохраняет без сообщения «сохрани» в чат.
+    Предложение у чата и экрана общее — оно лежит в состоянии разговора.
+
+    Под гейтом согласия (DRF-2967) НЕ отдаётся — решение автора гейта:
+    открыт просмотр СОХРАНЁННОГО плана, а несохранённое предложение — это
+    результат обработки, который планом ещё не стал. Закрыто молча
+    (``null``), а не отказом всей ручки: иначе закрылось бы и чтение своего
+    плана. Любой сбой — тоже ``null``: чтение плана из-за черновика не падает.
+    """
+    from apps.orchestrator.plan_engine_card import pending_proposal_view
+
+    try:
+        if plan_processing_refusal(bot_user) is not None:
+            return None
+        conversation = _person_conversation(bot_user)
+        if conversation is None:
+            return None
+        return pending_proposal_view(conversation)
+    except Exception:  # noqa: BLE001 — черновик не должен ронять чтение плана
+        logger.warning("customer_plan.draft_unavailable bot_user=%s", bot_user.pk, exc_info=True)
+        return None
 
 
 def last_turn_safety_for(bot_user: BotUser) -> Any:
@@ -317,22 +419,10 @@ def last_turn_safety_for(bot_user: BotUser) -> Any:
     нет, он истёк (два часа без хода) или последний ход вердикта не записал.
     Разговор здесь только читается — экран его не создаёт.
     """
-    from apps.conversations.services import resolve_active_global_conversation
-    from apps.identity.services.global_tenant import get_global_bot_tenant
     from apps.orchestrator.safety.plan_turn import last_turn_safety
 
     try:
-        if (bot_user.channel or "") != "max":
-            return None
-        person_id = (bot_user.channel_user_id or "").strip()
-        if not person_id:
-            return None
-        shell = BotUser.all_tenants.filter(
-            tenant=get_global_bot_tenant(), channel="max", channel_user_id=person_id
-        ).first()
-        if shell is None:
-            return None
-        conversation = resolve_active_global_conversation(shell, create_if_missing=False)
+        conversation = _person_conversation(bot_user)
         if conversation is None:
             return None
         return last_turn_safety(conversation.id)
@@ -341,6 +431,216 @@ def last_turn_safety_for(bot_user: BotUser) -> Any:
             "customer_plan.last_turn_safety_unavailable bot_user=%s", bot_user.pk, exc_info=True
         )
         return None
+
+
+#: Опознаватель карточки предложения — тот же, что в кнопках чата.
+_DRAFT_TOKEN_RE = re.compile(r"^[0-9a-f]{8}$")
+
+#: Исход сохранения → отказ экрану. Имена исходов — карточки плана; экран
+#: показывает слаг с пометкой «тест», пока слов владельца нет.
+_SAVE_REFUSALS: dict[str, tuple[str, int]] = {
+    "PLAN_PROPOSAL_EXPIRED": ("plan_proposal_expired", 409),
+    "SAFETY_INPUT_UNAVAILABLE": ("plan_safety_unavailable", 409),
+    "PLAN_SAVE_SAFETY_BLOCKED": ("plan_safety_blocked", 409),
+    "GOAL_NOT_FOUND": ("plan_goal_not_found", 409),
+    "PLAN_CAPABILITY_NOT_CONFIRMED": ("plan_proposal_expired", 409),
+    PLAN_DELETION_REQUESTED: ("deletion_requested", 423),
+    PLAN_CONSENT_REQUIRED: ("plan_consent_required", 403),
+    PLAN_BASIS_UNAVAILABLE: ("plan_basis_unavailable", 503),
+}
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@require_init_data
+def customer_plan_save(request: HttpRequest) -> HttpResponse:
+    """POST — сохранить несохранённое предложение, собранное в чате.
+
+    Тело: ``{token}`` — опознаватель показанной карточки (тот же, что в
+    кнопке «Сохранить» чата). Сохраняется именно показанная версия; повторное
+    нажатие дубля не создаёт (слова владельца, лист 07.10, п.15).
+
+    Это запись:
+
+    * под гейтом согласия (DRF-2967) — до разбора тела и до ядра;
+    * с вердиктом последнего хода разговора: нет вердикта → 409
+      ``plan_safety_unavailable``, каталог не спрашивается.
+
+    Ответ 200 ``{"saved": true}``. У цели уже действует план — каталог
+    сохранит новый предложением; экран перечитывает сохранённое и видит его
+    сам (``proposal`` в чтении), ответ один и тот же.
+    """
+    from apps.orchestrator.plan_engine_card import save_pending
+
+    if not plan_engine_enabled():
+        return _error("plan_engine_disabled", "plan engine is not enabled", 404)
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    refused = _basis_refusal(bot_user)
+    if refused is not None:
+        return refused
+    try:
+        body = json.loads(request.body or b"{}")
+    except ValueError:
+        return _error("malformed", "body is not valid JSON", 400)
+    token = body.get("token") if isinstance(body, dict) else None
+    if not isinstance(token, str) or not _DRAFT_TOKEN_RE.match(token):
+        return _error("malformed", "token must be the proposal card token", 400)
+
+    try:
+        conversation = _person_conversation(bot_user)
+    except Exception:  # noqa: BLE001 — нет разговора → нет предложения
+        logger.warning(
+            "customer_plan_save.conversation_unavailable bot_user=%s", bot_user.pk, exc_info=True
+        )
+        conversation = None
+    if conversation is None:
+        return _error("plan_proposal_expired", "there is no proposal to save", 409)
+
+    outcome = save_pending(
+        bot_user=bot_user,
+        conversation=conversation,
+        token=token,
+        safety=last_turn_safety_for(bot_user),
+        trace_id=str(getattr(request, "trace_id", "") or ""),
+    )
+    if outcome.saved:
+        logger.info("customer_plan_save.done bot_user=%s", bot_user.pk)
+        return JsonResponse({"saved": True})
+    logger.info("customer_plan_save.refused bot_user=%s outcome=%s", bot_user.pk, outcome.name)
+    if outcome.name in _SAVE_REFUSALS:
+        error, status = _SAVE_REFUSALS[outcome.name]
+        return _error(error, "the plan is not saved", status)
+    # Каталог недоступен или отверг НАШ запрос — человеку это одна и та же
+    # недоступность; имя уже в журнале карточки.
+    return _error("ayla_unavailable", "ayla plan engine unavailable", 502)
+
+
+#: Действие экрана с шагом → вид нажатия ядра.
+_STEP_ACTIONS = {"offers": "step", "choose": "offer", "day": "day", "book": "slot"}
+_STEP_TOKEN_RE = re.compile(r"^[0-9a-f]{8}$")
+
+#: Исход действия с шагом → отказ экрану; причины каталога идут своим именем.
+_STEP_REFUSALS: dict[str, tuple[str, int]] = {
+    "SAFETY_INPUT_UNAVAILABLE": ("plan_safety_unavailable", 409),
+    "PLAN_STEP_EXPIRED": ("plan_step_expired", 409),
+    "PLAN_STEP_NO_SLOTS": ("plan_step_no_slots", 409),
+    "PLAN_STEP_BOOKING_NOT_AVAILABLE": ("plan_step_booking_not_available", 409),
+    "HEALTH_CHECK_REQUIRED": ("health_check_required", 409),
+    "AYLA_LINK_UNAVAILABLE": ("ayla_unavailable", 502),
+    "PLAN_ENGINE_UNAVAILABLE": ("ayla_unavailable", 502),
+    "PLAN_CONTRACT_VIOLATION": ("ayla_unavailable", 502),
+    PLAN_DELETION_REQUESTED: ("deletion_requested", 423),
+    PLAN_CONSENT_REQUIRED: ("plan_consent_required", 403),
+    PLAN_BASIS_UNAVAILABLE: ("plan_basis_unavailable", 503),
+}
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@require_init_data
+def customer_plan_step(request: HttpRequest) -> HttpResponse:
+    """POST — от шага сохранённого плана к услуге, времени и записи.
+
+    Тело: ``{action, token, index}``:
+
+    * ``offers`` — услуги для шага: ``token`` — первые восемь знаков
+      идентификатора плана, ``index`` — место шага в плане;
+    * ``choose`` — выбор услуги: ``token`` — опознаватель подбора из ответа
+      ``offers``, ``index`` — номер варианта;
+    * ``day`` — другой день: тот же ``token``, ``index`` — номер дня из
+      ``days``; ответ той же формы, что у ``choose``;
+    * ``book`` — запись: тот же ``token``, ``index`` — номер времени.
+
+    Тот же путь, что кнопками в чате (ядро общее, состояние разговора общее).
+    Каждое действие — обработка по плану человека, поэтому:
+
+    * под гейтом согласия (DRF-2967) — до разбора тела и до ядра;
+    * с вердиктом последнего хода разговора: нет вердикта → 409
+      ``plan_safety_unavailable``, каталог не спрашивается.
+
+    Ответ 200 — состояние пути словами каталога: ``options`` (варианты),
+    ``days`` и ``day`` (дни со свободным временем и показанный из них),
+    ``slots`` (времена показанного дня), ``booked_at`` (время записи).
+    Идентификаторы услуги и мастера экрану не уходят.
+    """
+    from apps.orchestrator.plan_step_card import option_view, step_action
+
+    if not plan_engine_enabled():
+        return _error("plan_engine_disabled", "plan engine is not enabled", 404)
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    refused = _basis_refusal(bot_user)
+    if refused is not None:
+        return refused
+    try:
+        body = json.loads(request.body or b"{}")
+    except ValueError:
+        return _error("malformed", "body is not valid JSON", 400)
+    action = body.get("action") if isinstance(body, dict) else None
+    token = body.get("token") if isinstance(body, dict) else None
+    index = body.get("index") if isinstance(body, dict) else None
+    if (
+        action not in _STEP_ACTIONS
+        or not isinstance(token, str)
+        or not _STEP_TOKEN_RE.match(token)
+        or isinstance(index, bool)
+        or not isinstance(index, int)
+        or not 0 <= index <= 99
+    ):
+        return _error("malformed", "action, token and index are required", 400)
+
+    try:
+        conversation = _person_conversation(bot_user)
+    except Exception:  # noqa: BLE001 — нет разговора → нет вердикта
+        logger.warning(
+            "customer_plan_step.conversation_unavailable bot_user=%s", bot_user.pk, exc_info=True
+        )
+        conversation = None
+    if conversation is None:
+        # Вердикт экран берёт из разговора; без разговора его нет вовсе.
+        return _error("plan_safety_unavailable", "no verdict of the last chat turn", 409)
+
+    done = step_action(
+        kind=_STEP_ACTIONS[action],
+        token=token,
+        index=index,
+        bot_user=bot_user,
+        conversation=conversation,
+        trace_id=str(getattr(request, "trace_id", "") or ""),
+        safety=last_turn_safety_for(bot_user),
+    )
+    state = done.state or {}
+    options = [o for o in state.get("options") or [] if isinstance(o, dict)]
+    chosen = state.get("chosen")
+    slots = [s for s in state.get("slots") or [] if isinstance(s, str)]
+    logger.info(
+        "customer_plan_step.done bot_user=%s action=%s outcome=%s", bot_user.pk, action, done.name
+    )
+    if done.name == "PLAN_STEP_OFFERS":
+        return JsonResponse({"token": done.token, "options": [option_view(o) for o in options]})
+    days = [d for d in state.get("days") or [] if isinstance(d, str)]
+    # «В этом дне времени уже нет» при выборе дня — не отказ пути: остальные
+    # дни по-прежнему можно выбрать, и экран получает их тем же ответом.
+    shows_day = done.name == "PLAN_STEP_SLOTS" or (
+        done.name == "PLAN_STEP_NO_SLOTS" and action == "day"
+    )
+    if shows_day and isinstance(chosen, int) and chosen < len(options):
+        return JsonResponse(
+            {
+                "token": done.token,
+                "option": option_view(options[chosen]),
+                "days": days,
+                "day": state.get("day") if isinstance(state.get("day"), str) else None,
+                "slots": slots,
+            }
+        )
+    if done.name == "PLAN_STEP_BOOKED" and index < len(slots):
+        return JsonResponse({"booked_at": slots[index]})
+    if done.name in _STEP_REFUSALS:
+        error, status = _STEP_REFUSALS[done.name]
+        return _error(error, "the step action is refused", status)
+    # Причина каталога (нет услуг, шаг не допущен, отказ записи) — своим
+    # именем: экран показывает его с пометкой «тест», пока слов владельца нет.
+    return _error(done.name.lower().replace(":", "."), "the step action is refused", 409)
 
 
 def _plan_ids(request: HttpRequest, *names: str) -> dict[str, str] | JsonResponse:
@@ -517,6 +817,8 @@ __all__ = [
     "customer_plan_decision",
     "customer_plan_keep",
     "customer_plan_replace",
+    "customer_plan_save",
+    "customer_plan_step",
     "last_turn_safety_for",
     "plan_decision_payload",
     "plan_engine_enabled",

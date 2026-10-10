@@ -25,7 +25,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
 
 vi.mock("../lib/plan-engine", () => ({
   // DRF-2876 — сохранённого плана нового механизма нет: экран идёт прежним путём.
-  getSavedPlanState: async () => ({ plan: null, proposal: null }),
+  getSavedPlanState: async () => ({ plan: null, proposal: null, draft: null }),
 }));
 vi.mock("../lib/plan-lite", async (importOriginal) => {
   const original = await importOriginal<typeof import("../lib/plan-lite")>();

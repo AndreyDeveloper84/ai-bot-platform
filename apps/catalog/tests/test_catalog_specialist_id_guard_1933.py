@@ -95,6 +95,16 @@ NOT_A_MIRROR_ROW: dict[tuple[str, str], tuple[int, str]] = {
         "фильтр get_staff: id из ответа каталога или None",
     ),
     ("apps/skills/booking/provider.py", "cancel_appointment"): (1, "id из записи каталога"),
+    # DRF-2885 — запись от шага плана: мастер и услуга приходят из ответа
+    # каталога о кандидатах шага, зеркало в этой ветке не участвует вовсе.
+    ("apps/orchestrator/plan_step_card.py", "create_appointment"): (
+        1,
+        "specialist_ref из ответа каталога о кандидатах шага",
+    ),
+    ("apps/orchestrator/plan_step_card.py", "get_available_times"): (
+        1,
+        "specialist_ref из ответа каталога о кандидатах шага",
+    ),
     ("apps/skills/booking/provider.py", "reschedule_appointment"): (1, "id из записи каталога"),
 }
 
@@ -159,8 +169,10 @@ def test_the_scan_sees_the_class():
     sites = _sites()
     assert len(sites) >= 43, len(sites)
     listed = sum(PENDING_1933B.values()) + sum(n for n, _ in NOT_A_MIRROR_ROW.values())
-    # 9: восьмёрка + перенос в Mini App (DRF-2561), та же строка зеркала, что у отмены.
-    assert listed == 9
+    # 11: восьмёрка + перенос в Mini App (DRF-2561), та же строка зеркала, что у
+    # отмены, + два вызова ветки шага плана (DRF-2885): слоты и запись на
+    # идентификаторах из ответа каталога о кандидатах.
+    assert listed == 11
 
 
 def test_every_catalog_call_sends_the_catalog_id_or_is_named():

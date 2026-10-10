@@ -1183,6 +1183,8 @@ class AylaBookingHTTPClient:
         payment_required: bool = True,
         quoted_price: str | None = None,
         quoted_duration_minutes: int | None = None,
+        provenance: dict[str, Any] | None = None,
+        consent: dict[str, str] | None = None,
     ) -> AylaBookingRecord:
         # AMD-002 (D6): payment_required=false → запись без предоплаты,
         # Ayla подтверждает сразу (CONFIRMED + booking.confirmed), Payment
@@ -1202,6 +1204,15 @@ class AylaBookingHTTPClient:
             body["quoted_price"] = quoted_price
         if quoted_duration_minutes is not None:
             body["quoted_duration_minutes"] = quoted_duration_minutes
+        # DRF-2885 — запись от шага плана. ``provenance`` несёт, от какого
+        # шага запись и при каком состоянии безопасности человек действовал;
+        # каталог по нему сам проверяет допуск шага и связывает запись с шагом
+        # в той же операции. ``consent`` — основание обработки (DRF-2967),
+        # рядом с блоком, не внутри него. Без блока — прежний вызов.
+        if provenance is not None:
+            body["provenance"] = provenance
+        if consent is not None:
+            body["consent"] = consent
         resp = self._request(
             "POST",
             "appointments/",
