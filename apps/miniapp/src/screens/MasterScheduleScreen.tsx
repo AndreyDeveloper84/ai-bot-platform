@@ -907,7 +907,7 @@ function FreeWindowCard({
           className="m-card__title"
           style={{ color: "var(--c-text-secondary)" }}
         >
-          {window.start} · {COPY.freeWindow(window.duration_min)}
+          {window.start}–{window.end} · {COPY.freeWindow(window.duration_min)}
         </div>
       </button>
       <button
