@@ -684,7 +684,7 @@ export function NewBookingForm({
                 kind="conflict"
                 onPickAnother={() => setSheet("time")}
               />
-              <div className="booking-conflict__context" aria-label="Сохранённые данные записи">
+              <div className="booking-conflict__context" aria-label="Данные записи">
                 <p>Клиент: {customerLabel}</p>
                 <p>Услуга: {draft.service?.name}</p>
                 <p>Дата: {formatDayTitle(date)}</p>
