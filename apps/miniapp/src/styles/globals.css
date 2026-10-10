@@ -9301,6 +9301,25 @@ a {
   padding: 0;
 }
 
+.working-hours__requests {
+  margin: var(--s-4) 0;
+}
+
+.working-hours__request-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  list-style: none;
+  margin: var(--s-2) 0 0;
+  padding: 0;
+}
+
+.working-hours__request {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+
 .working-hours__item + .working-hours__item {
   border-top: 1px solid var(--c-divider);
 }
