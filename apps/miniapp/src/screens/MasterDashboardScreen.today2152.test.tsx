@@ -5,7 +5,7 @@
  * начало–конец, «до визита N мин») + следующие спокойнее · «Сейчас по
  * расписанию» (без «Сейчас идёт визит» и «До конца ≈») · «На сегодня записей
  * нет» (кнопка «Добавить запись» появится с М-3 / DRF-2155 — мёртвых и лживых
- * кнопок не рисуем, DRF-1181) · «Сегодня выходной» + «Рабочие часы →» ·
+ * кнопок не рисуем, DRF-1181) · «Сегодня у вас выходной по графику.» + «Рабочие часы →» ·
  * рамка дня не прочитана → «Не удалось проверить расписание» + «Проверить снова».
  *
  * Убрано: «ТРЕБУЮТ ВНИМАНИЯ» (переписки), 💬 в шапке, «Открыть диалог ›», тап
@@ -137,7 +137,7 @@ describe("«Вам ещё не назначили услуги» — по чис
    * её видел каждый мастер без записей на сегодня.
    */
   const NOT_ASSIGNED = /не назначили услуги/;
-  const EMPTY_DAY = "На сегодня записей нет";
+  const EMPTY_DAY = "Сегодня у вас пока нет записей.";
 
   function master(over: Partial<DashboardResponse["master"]>): DashboardResponse["master"] {
     return { id: "m-1", name: "Архипкин", specialization: "", photo_url: "", ...over };
@@ -312,7 +312,7 @@ describe("состояние 4 — записей нет", () => {
     renderAt();
 
     const day = await screen.findByRole("region", { name: /сегодня/i });
-    expect(within(day).getByText("На сегодня записей нет")).toBeInTheDocument();
+    expect(within(day).getByText("Сегодня у вас пока нет записей.")).toBeInTheDocument();
     // С М-3 (DRF-2155) кнопка — дверь в «Новую запись» (тап по свободному
     // окну в «Расписании» тоже ведёт в создание, не в «недоступно»).
     expect(
@@ -323,7 +323,7 @@ describe("состояние 4 — записей нет", () => {
     expect(screen.queryByText(/отдохните/)).toBeNull();
   });
 
-  it("выходной: «Сегодня выходной» + «Рабочие часы →»; для соло — экран часов", async () => {
+  it("выходной: «Сегодня у вас выходной по графику.» + «Рабочие часы →»; для соло — экран часов", async () => {
     mockedDashboard.mockResolvedValue(
       doc({
         states: {
@@ -336,8 +336,8 @@ describe("состояние 4 — записей нет", () => {
     renderAt("/solo/my-day");
 
     const day = await screen.findByRole("region", { name: /сегодня/i });
-    expect(within(day).getByText("Сегодня выходной")).toBeInTheDocument();
-    expect(screen.queryByText("На сегодня записей нет")).toBeNull();
+    expect(within(day).getByText("Сегодня у вас выходной по графику.")).toBeInTheDocument();
+    expect(screen.queryByText("Сегодня у вас пока нет записей.")).toBeNull();
     await userEvent.click(
       within(day).getByRole("button", { name: /Рабочие часы/ }),
     );
@@ -390,12 +390,12 @@ describe("состояние 4 — записей нет", () => {
     expect(
       within(day).getByText("Не удалось проверить расписание"),
     ).toBeInTheDocument();
-    expect(screen.queryByText("На сегодня записей нет")).toBeNull();
-    expect(screen.queryByText("Сегодня выходной")).toBeNull();
+    expect(screen.queryByText("Сегодня у вас пока нет записей.")).toBeNull();
+    expect(screen.queryByText("Сегодня у вас выходной по графику.")).toBeNull();
     await userEvent.click(
       within(day).getByRole("button", { name: "Проверить снова" }),
     );
-    expect(await screen.findByText("Сегодня выходной")).toBeInTheDocument();
+    expect(await screen.findByText("Сегодня у вас выходной по графику.")).toBeInTheDocument();
     expect(mockedDashboard).toHaveBeenCalledTimes(2);
   });
 });
@@ -503,7 +503,7 @@ describe("системные состояния — через SystemState по 
 });
 
 describe("переписок на «Сегодня» нет (DRF-1255)", () => {
-  it("inbox_preview с сервера не влияет на состояние дня: без записей — «На сегодня записей нет»", async () => {
+  it("inbox_preview с сервера не влияет на состояние дня: без записей — «Сегодня у вас пока нет записей.»", async () => {
     mockedDashboard.mockResolvedValue(
       doc({
         inbox_preview: [
@@ -521,7 +521,7 @@ describe("переписок на «Сегодня» нет (DRF-1255)", () => {
     );
     renderAt();
     const day = await screen.findByRole("region", { name: /сегодня/i });
-    expect(within(day).getByText("На сегодня записей нет")).toBeInTheDocument();
+    expect(within(day).getByText("Сегодня у вас пока нет записей.")).toBeInTheDocument();
     expect(screen.queryByText(/Ксения/)).toBeNull();
     expect(screen.queryByText(/Здравствуйте/)).toBeNull();
   });
