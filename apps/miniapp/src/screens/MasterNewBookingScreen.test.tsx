@@ -106,7 +106,9 @@ async function fillWholeDraft() {
   await chooseExistingCustomer();
   await chooseService();
   await chooseSlot();
-  await screen.findByText(/Проверьте запись/);
+  await waitFor(() =>
+    expect(screen.getByRole("button", { name: "Создать запись" })).toBeEnabled(),
+  );
 }
 
 beforeEach(() => {
@@ -169,6 +171,26 @@ describe("один экран по макету DRF-1184", () => {
     expect(screen.queryByText(/Снятая/)).toBeNull();
   });
 
+  it("selector услуг фильтруется по названию без изменения каталога", async () => {
+    renderAt();
+    screen.getByLabelText(/Услуга/).click();
+    const search = await screen.findByLabelText("Поиск услуги");
+    fireEvent.change(search, { target: { value: "окраш" } });
+    expect(screen.getByText(/Окрашивание/)).toBeInTheDocument();
+    expect(screen.queryByText(/^Маникюр/)).toBeNull();
+    expect(mockedCatalog).toHaveBeenCalledTimes(1);
+  });
+
+  it("готовый master draft остаётся hub: отдельного confirmation-screen нет", async () => {
+    renderAt("/master/booking/new?date=2026-10-21");
+    await fillWholeDraft();
+    expect(screen.queryByText("Проверьте запись")).toBeNull();
+    expect(screen.getByLabelText(/^Клиент/).textContent).toMatch(/Анна П\./);
+    expect(screen.getByLabelText(/^Услуга/).textContent).toMatch(/Маникюр/);
+    expect(screen.getByLabelText(/^Дата и время/).textContent).toMatch(/15:00/);
+    expect(screen.getByRole("button", { name: "Создать запись" })).toBeEnabled();
+  });
+
   it("слоты спрашиваются по услуге и дате — без master_id", async () => {
     renderAt("/master/booking/new?date=2026-10-21");
     await chooseService();
@@ -207,14 +229,20 @@ describe("выбор клиента — без телефона (DRF-1039, вл�
   it("«Новый клиент»: имя + телефон + пояснение; телефон не возвращается на экран", async () => {
     renderAt();
     screen.getByLabelText(/Клиент/).click();
-    // «Новый клиент» — тот же блок, что у стойки: имя + телефон; у мастера — с
-    // пояснением макета.
+    // Master frozen: поиск клиента и короткий flow нового клиента — разные
+    // selector states, но тот же booking draft.
+    expect(
+      await screen.findByRole("button", { name: "+ Новый клиент" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByLabelText("Имя клиента")).toBeNull();
+    screen.getByRole("button", { name: "+ Новый клиент" }).click();
     expect(await screen.findByText("Новый клиент")).toBeInTheDocument();
     expect(
       screen.getByText(
         "Имя и телефон нужны для создания записи и связи по ней.",
       ),
     ).toBeInTheDocument();
+    expect(screen.queryByText(/заметк/i)).toBeNull();
     fireEvent.change(screen.getByLabelText("Имя клиента"), {
       target: { value: "Мария" },
     });
@@ -228,7 +256,7 @@ describe("выбор клиента — без телефона (DRF-1039, вл�
     expect(row.textContent).not.toContain("5544");
     await chooseService();
     await chooseSlot();
-    await screen.findByText(/Проверьте запись/);
+    expect(screen.queryByText("Проверьте запись")).toBeNull();
     screen.getByRole("button", { name: "Создать запись" }).click();
     expect(await screen.findByText("Запись создана.")).toBeInTheDocument();
 
@@ -398,6 +426,11 @@ describe("исходы — словами SystemState (М-6)", () => {
     ).toBeInTheDocument();
     expect(screen.getByLabelText(/^Клиент/).textContent).toMatch(/Анна П\./);
     expect(screen.getByLabelText(/^Услуга/).textContent).toMatch(/Маникюр/);
+    const saved = screen.getByLabelText("Данные записи");
+    expect(saved).toHaveTextContent("Клиент: Анна П.");
+    expect(saved).toHaveTextContent("Услуга: Маникюр");
+    expect(saved).toHaveTextContent(/Дата:/);
+    expect(saved).toHaveTextContent("Меняется только время.");
     // Варианты — кнопки; выбор варианта ставит слот и убирает конфликт.
     screen.getByRole("button", { name: "17:00" }).click();
     await waitFor(() =>
