@@ -511,7 +511,7 @@ describe("6 · «часы не заданы» ≠ «выходной»", () => {
     expect(
       await screen.findByText(HOURS_COPY.notSet.title),
     ).toBeInTheDocument();
-    expect(screen.queryByText("Сегодня выходной")).toBeNull();
+    expect(screen.queryByText("Сегодня у вас выходной по графику.")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: HOURS_COPY.notSet.cta }));
     expect(await screen.findByText(HOURS_COPY.title)).toBeInTheDocument();
   });
@@ -530,6 +530,6 @@ describe("6 · «часы не заданы» ≠ «выходной»", () => {
   it("шаблон есть и сегодня выходной — прежний текст", async () => {
     mockedDashboard.mockResolvedValue(dashboard({ hours_set: true }));
     renderAt("/master/dashboard");
-    expect(await screen.findByText("Сегодня выходной")).toBeInTheDocument();
+    expect(await screen.findByText("Сегодня у вас выходной по графику.")).toBeInTheDocument();
   });
 });
