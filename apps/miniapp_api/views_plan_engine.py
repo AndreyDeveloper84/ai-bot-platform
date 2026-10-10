@@ -39,7 +39,6 @@ import re
 import logging
 from typing import Any
 
-from django.conf import settings
 from django.http import HttpRequest, HttpResponse, JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
@@ -80,8 +79,16 @@ MAX_EXCLUDED_REFS = 50
 MAX_REF_LEN = 128
 
 
-def plan_engine_enabled() -> bool:
-    return bool(getattr(settings, "PLAN_ENGINE_ENABLED", False))
+def plan_open_to(request: HttpRequest) -> bool:
+    """Открыт ли План человеку этого запроса: замок приёмки (DRF-2885).
+
+    Механизм включён И аккаунт назван в ``PLAN_ACCEPTANCE_ACCOUNTS``. Человека
+    в запросе нет — закрыто. Закрыто отвечает тем же ``plan_engine_disabled``,
+    что выключенный механизм: экран показывает прежний план.
+    """
+    from apps.orchestrator.plan_access import plan_open_for
+
+    return plan_open_for(getattr(request, "bot_user", None))
 
 
 def plan_safety_input(bot_user: BotUser) -> tuple[str, str]:
@@ -137,7 +144,7 @@ def customer_plan_decision(request: HttpRequest) -> HttpResponse:
     """POST — собрать эфемерный план. Ничего не сохраняет."""
     from apps.integrations.ayla import external_user_id_for
 
-    if not plan_engine_enabled():
+    if not plan_open_to(request):
         return _error("plan_engine_disabled", "plan engine is not enabled", 404)
 
     # DRF-2967 — основание раньше всего остального: без согласия на
@@ -243,7 +250,7 @@ def customer_plan_current(request: HttpRequest) -> HttpResponse:
     """
     from apps.integrations.ayla import external_user_id_for
 
-    if not plan_engine_enabled():
+    if not plan_open_to(request):
         return _error("plan_engine_disabled", "plan engine is not enabled", 404)
 
     bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
@@ -320,13 +327,15 @@ def _booked_at(plan: dict[str, Any], step_id: str) -> str | None:
     показывает. Считается только действующая запись (:data:`_LIVE_BOOKING`):
     отменённая, прошедшая и запись с неизвестным статусом — нет.
 
-    Каталог отдаёт это время в UTC, а экран берёт часы из строки (DRF-2589),
-    поэтому момент переписывается в пояс салона. Салона записи от шага бот
-    не знает (его нет в зеркале), и пояс берётся запасной — названный в
-    ``apps.tenancy.timezones`` (Москва). Для салона в другом поясе часы будут
-    неверны, пока каталог не отдаст пояс записи. Неразобранное время не
-    показывается.
+    Каталог отдаёт момент в UTC, а экран берёт часы из строки (DRF-2589),
+    поэтому момент переписывается в пояс записи. Пояс — поле ``timezone``
+    рядом с временем: имя пояса IANA, снимок пояса мастера на момент записи.
+    Пояса нет или имя не разобрано — запасной, названный в
+    ``apps.tenancy.timezones`` (Москва): проверки имени на записи у каталога
+    нет. Неразобранное время не показывается.
     """
+    from types import SimpleNamespace
+
     from apps.tenancy.timezones import salon_iso, salon_zone
 
     states = plan.get("step_state")
@@ -345,7 +354,9 @@ def _booked_at(plan: dict[str, Any], step_id: str) -> str | None:
                 moment = datetime.fromisoformat(booking["start_datetime"])
             except ValueError:
                 continue
-            return salon_iso(moment, salon_zone(None))
+            named = booking.get("timezone")
+            zone = salon_zone(SimpleNamespace(timezone=named if isinstance(named, str) else ""))
+            return salon_iso(moment, zone)
     return None
 
 
@@ -472,7 +483,7 @@ def customer_plan_save(request: HttpRequest) -> HttpResponse:
     """
     from apps.orchestrator.plan_engine_card import save_pending
 
-    if not plan_engine_enabled():
+    if not plan_open_to(request):
         return _error("plan_engine_disabled", "plan engine is not enabled", 404)
     bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
     refused = _basis_refusal(bot_user)
@@ -565,7 +576,7 @@ def customer_plan_step(request: HttpRequest) -> HttpResponse:
     """
     from apps.orchestrator.plan_step_card import option_view, step_action
 
-    if not plan_engine_enabled():
+    if not plan_open_to(request):
         return _error("plan_engine_disabled", "plan engine is not enabled", 404)
     bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
     refused = _basis_refusal(bot_user)
@@ -694,7 +705,7 @@ def customer_plan_replace(request: HttpRequest) -> HttpResponse:
         PlanTransitionRefusedError,
     )
 
-    if not plan_engine_enabled():
+    if not plan_open_to(request):
         return _error("plan_engine_disabled", "plan engine is not enabled", 404)
     bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
     refused = _basis_refusal(bot_user)
@@ -748,7 +759,7 @@ def customer_plan_keep(request: HttpRequest) -> HttpResponse:
         PlanTransitionRefusedError,
     )
 
-    if not plan_engine_enabled():
+    if not plan_open_to(request):
         return _error("plan_engine_disabled", "plan engine is not enabled", 404)
     bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
     ids = _plan_ids(request, "plan_id")
@@ -821,7 +832,7 @@ __all__ = [
     "customer_plan_step",
     "last_turn_safety_for",
     "plan_decision_payload",
-    "plan_engine_enabled",
+    "plan_open_to",
     "plan_safety_input",
     "saved_plan_payload",
 ]

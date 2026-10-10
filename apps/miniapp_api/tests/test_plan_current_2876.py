@@ -37,6 +37,9 @@ from apps.miniapp_api.tests.test_plan_decision_proxy_2879 import (  # noqa: F401
     bot_user,
 )
 
+#: Человек этих узлов назван в списке приёмки Плана; сам замок — test_plan_access_2885.
+pytestmark = pytest.mark.usefixtures("plan_open_to_everyone")
+
 LABELS = {"cap.sleep_routine": "Режим сна", "cap.evening_walk": "Вечерняя прогулка"}
 
 
