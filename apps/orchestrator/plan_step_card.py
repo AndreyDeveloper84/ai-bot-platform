@@ -266,10 +266,10 @@ def try_handle_plan_step(
     turn_safety: TurnSafetyProvider | None,
 ) -> SkillResult | None:
     """Тапы шага, услуги и времени; ``None`` — не наше (форма / механизм выключен)."""
-    from apps.orchestrator.plan_engine_card import engine_enabled
+    from apps.orchestrator.plan_engine_card import plan_open_for
 
     match = STEP_CALLBACK_RE.match((text or "").strip())
-    if match is None or not engine_enabled():
+    if match is None or not plan_open_for(bot_user):
         return None
     return _dispatch(
         kind=match.group(1),
@@ -360,9 +360,9 @@ def step_action(
     ``safety`` — тройка вердикта, которую несёт экран: последнего хода
     разговора; ``None`` — каталог не спрашивается.
     """
-    from apps.orchestrator.plan_engine_card import PLAN_ENGINE_UNAVAILABLE, engine_enabled
+    from apps.orchestrator.plan_engine_card import PLAN_ENGINE_UNAVAILABLE, plan_open_for
 
-    if not engine_enabled() or kind not in ("step", "offer", "day", "slot"):
+    if not plan_open_for(bot_user) or kind not in ("step", "offer", "day", "slot"):
         return StepAction(PLAN_ENGINE_UNAVAILABLE, None)
     result = _dispatch(
         kind=kind,

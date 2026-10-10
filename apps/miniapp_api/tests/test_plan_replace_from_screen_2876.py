@@ -51,7 +51,8 @@ from apps.miniapp_api.tests.test_plan_decision_proxy_2879 import (  # noqa: F401
 )
 from apps.orchestrator.safety.plan_turn import PlanTurnSafety
 
-pytestmark = pytest.mark.django_db
+#: Человек этих узлов назван в списке приёмки Плана; сам замок — test_plan_access_2885.
+pytestmark = [pytest.mark.django_db, pytest.mark.usefixtures("plan_open_to_everyone")]
 
 PROPOSAL = "7c1d2e3f-aaaa-4bbb-8ccc-ddddeeeeffff"
 ACTIVE = "5a5a5a5a-1111-4222-8333-999999999999"

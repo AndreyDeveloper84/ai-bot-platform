@@ -25,7 +25,11 @@ from apps.orchestrator import concierge, plan_engine_card as card
 from apps.orchestrator.concierge import generate_concierge_reply
 from apps.skills.base import SkillResult
 
-pytestmark = pytest.mark.django_db(transaction=True)
+#: Человек этих узлов назван в списке приёмки Плана; сам замок — test_plan_access_2885.
+pytestmark = [
+    pytest.mark.django_db(transaction=True),
+    pytest.mark.usefixtures("plan_open_to_everyone"),
+]
 
 
 def _bot_user(prefix: str) -> Any:
