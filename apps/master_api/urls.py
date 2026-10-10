@@ -91,6 +91,11 @@ urlpatterns = [
         views_bookings.booking_detail_view,
         name="booking_detail",
     ),
+    path(
+        "bookings/<uuid:appointment_id>/action",
+        views_bookings.booking_action,
+        name="booking_action",
+    ),
     path("booking-slots", views_bookings.booking_slots, name="booking_slots"),
     # DRF-1857 (K14) — «Мои отзывы»: прокси в каталог под субъектом мастера.
     path("reviews", views.reviews, name="reviews"),

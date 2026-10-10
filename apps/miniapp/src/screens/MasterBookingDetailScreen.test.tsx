@@ -25,15 +25,27 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../lib/master-api", async (importOriginal) => {
   const original = await importOriginal<typeof import("../lib/master-api")>();
-  return { ...original, getMasterBooking: vi.fn() };
+  return {
+    ...original,
+    getMasterBooking: vi.fn(),
+    getMasterBookingSlots: vi.fn(),
+    actOnMasterBooking: vi.fn(),
+  };
 });
 
 import { ApiError } from "../lib/api";
-import { getMasterBooking, type MasterBookingDetail } from "../lib/master-api";
+import {
+  actOnMasterBooking,
+  getMasterBooking,
+  getMasterBookingSlots,
+  type MasterBookingDetail,
+} from "../lib/master-api";
 import { RECHECK_MIN_INTERVAL_MS } from "../components/master/SystemState";
 import { MasterBookingDetailScreen } from "./MasterBookingDetailScreen";
 
 const mocked = vi.mocked(getMasterBooking);
+const mockedSlots = vi.mocked(getMasterBookingSlots);
+const mockedAction = vi.mocked(actOnMasterBooking);
 
 /** Ответ сервера с ЛИШНИМИ полями — сторож набора: экран их не рендерит. */
 const FAT_EXTRAS = {
@@ -56,6 +68,7 @@ function detail(over: Partial<MasterBookingDetail> = {}): MasterBookingDetail {
     status: "confirmed",
     temporal_state: "upcoming",
     minutes_until: 80,
+    appointment_version: 7,
     checked_at: "2026-08-20T14:10:00",
     ...over,
     ...(FAT_EXTRAS as object),
@@ -120,6 +133,8 @@ function expectNothingForbidden() {
 
 beforeEach(() => {
   mocked.mockReset();
+  mockedSlots.mockReset();
+  mockedAction.mockReset();
 });
 
 afterEach(() => {
@@ -221,6 +236,85 @@ describe("постоянная часть + контекстный блок по
   });
 });
 
+describe("P0 actions — versioned reschedule + destructive cancel", () => {
+  it("upcoming confirmed shows only «Перенести» and «Отменить» as lifecycle actions", async () => {
+    mocked.mockResolvedValue(detail());
+    renderAt();
+    const main = await findScreen();
+    const actions = within(main).getByRole("region", { name: "Действия с записью" });
+    expect(within(actions).getByRole("button", { name: "Перенести" })).toBeInTheDocument();
+    expect(within(actions).getByRole("button", { name: "Отменить" })).toBeInTheDocument();
+    expect(within(actions).queryByRole("button", { name: /Завершить|Не пришёл|Начать/ })).toBeNull();
+  });
+
+  it("cancel requires explicit confirmation and reads back after committed result", async () => {
+    mocked
+      .mockResolvedValueOnce(detail())
+      .mockResolvedValueOnce(detail({ status: "cancelled", temporal_state: "upcoming" }));
+    mockedAction.mockResolvedValue({ outcome: "committed", status: "cancelled", version: 8 });
+    renderAt();
+    await findScreen();
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "Отменить" }));
+    expect(screen.getByText("Отменить запись?")).toBeInTheDocument();
+    expect(mockedAction).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "Отменить запись" }));
+    expect(mockedAction).toHaveBeenCalledWith("b-1", { action: "cancel", expected_version: 7 });
+    expect(mocked).toHaveBeenCalledTimes(2);
+    expect(await screen.findByText("Запись отменена")).toBeInTheDocument();
+  });
+
+  it("reschedule sends exactly the displayed appointment_version and chosen authoritative slot", async () => {
+    mocked
+      .mockResolvedValueOnce(detail())
+      .mockResolvedValueOnce(
+        detail({
+          appointment_version: 8,
+          start_at: "2026-08-21T17:00:00+03:00",
+          end_at: "2026-08-21T18:00:00+03:00",
+        }),
+      );
+    mockedSlots.mockResolvedValue({
+      date: "2026-08-21",
+      timezone: "Europe/Moscow",
+      service_id: "s-1",
+      duration_min: 60,
+      slots: [{ time: "17:00", start_at: "2026-08-21T17:00:00+03:00", duration_min: 60 }],
+    });
+    mockedAction.mockResolvedValue({ outcome: "committed", version: 8 });
+    renderAt();
+    await findScreen();
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "Перенести" }));
+    const dateInput = screen.getByLabelText("Дата");
+    await user.clear(dateInput);
+    await user.type(dateInput, "2026-08-21");
+    await user.click(screen.getByRole("button", { name: "Показать свободное время" }));
+    await user.click(await screen.findByRole("button", { name: "17:00" }));
+    await user.click(screen.getByRole("button", { name: "Подтвердить перенос" }));
+    expect(mockedAction).toHaveBeenCalledWith("b-1", {
+      action: "reschedule",
+      expected_version: 7,
+      new_start_datetime: "2026-08-21T17:00:00+03:00",
+    });
+    expect(mocked).toHaveBeenCalledTimes(2);
+  });
+
+  it("unknown mutation result never repeats the write; only authoritative readback is offered", async () => {
+    mocked.mockResolvedValue(detail());
+    mockedAction.mockResolvedValue({ outcome: "pending", reason_code: "result_pending" });
+    renderAt();
+    await findScreen();
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "Отменить" }));
+    await user.click(screen.getByRole("button", { name: "Отменить запись" }));
+    expect(mockedAction).toHaveBeenCalledTimes(1);
+    expect(await screen.findByText("Проверяем результат")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Проверить снова" }));
+    expect(mockedAction).toHaveBeenCalledTimes(1);
+    expect(mocked).toHaveBeenCalledTimes(2);
+  });
+});
 describe("unknown — «Проверяем результат» + «Проверить снова» (троттл 10 с)", () => {
   it("текст макета дословно, кнопка перечитывает ручку; повтор — не чаще раза в 10 с", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
