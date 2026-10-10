@@ -51,7 +51,8 @@ from apps.orchestrator.tests.test_plan_engine_card_2885 import (
 )
 from apps.tenancy.models import Tenant
 
-pytestmark = pytest.mark.django_db
+#: Человек этих узлов назван в списке приёмки Плана; сам замок — test_plan_access_2885.
+pytestmark = [pytest.mark.django_db, pytest.mark.usefixtures("plan_open_to_everyone")]
 
 PERSON = "2967301"
 SAVE = f"{card.CB_SAVE_PREFIX}{TOKEN}"

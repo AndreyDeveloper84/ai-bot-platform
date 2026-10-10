@@ -814,11 +814,13 @@ def _tools_offered(message_text: str, conversation: Any) -> list[dict[str, Any]]
     # выбора исполнителя (C05), не в DISCOVERY.
     if not (_has_said_facts(conversation) and execution_stage_turn(message_text, conversation)):
         withheld.add(CONFIRM_SAID_FACT_TOOL)
-    # DRF-2885 — при выключенном механизме плана инструмента у модели нет:
-    # подсказка живого консьержа остаётся прежней.
-    from apps.orchestrator.plan_engine_card import engine_enabled as _plan_engine_enabled
+    # DRF-2885 — пока План этому человеку не открыт (механизм выключен или
+    # аккаунт не назван в списке приёмки), инструмента у модели нет: подсказка
+    # живого консьержа остаётся прежней. Человек берётся из разговора; нет
+    # разговора — закрыто.
+    from apps.orchestrator.plan_engine_card import plan_open_in as _plan_open_in
 
-    if not _plan_engine_enabled():
+    if not _plan_open_in(conversation):
         withheld.add(COMPOSE_PLAN_TOOL)
     # DRF-2885 — убрать шаг можно только в открытом обсуждении предложения:
     # вне его исполнитель откажет наверняка.

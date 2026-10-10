@@ -27,15 +27,17 @@
 
 * **настоящий** (решение владельца 08.10): кнопка «Составить план»
   (:data:`CB_COMPOSE`) и свободная просьба, которую опознаёт модель
-  (:func:`compose_for_request`). Достаточно включённого
-  ``PLAN_ENGINE_ENABLED``;
+  (:func:`compose_for_request`). Нужен включённый ``PLAN_ENGINE_ENABLED``
+  и аккаунт в списке приёмки ``PLAN_ACCEPTANCE_ACCOUNTS`` (решение владельца
+  10.10: включение механизма — не пользовательский запуск);
 * **отладочный** — команда :data:`TRIGGER`: дополнительно нужен аккаунт
   мессенджера в серверном списке ``SYNTHETIC_TEST_TRIGGER_ACCOUNTS`` (пуст
   по умолчанию). Для итоговой приёмки не годится.
 
 ### Замки
 
-* **механизм** — :func:`engine_enabled`: без него не отвечает ничего;
+* **механизм и аккаунт** — :func:`plan_open_for`: механизм включён и аккаунт
+  назван в списке приёмки (``PLAN_ACCEPTANCE_ACCOUNTS``); иначе не отвечает ничего;
 * **отладочная команда** — :func:`trigger_visible`, см. выше;
 * **допуск** решает каталог. Набранная руками команда без допуска каталога
   ничего не включает.
@@ -154,11 +156,22 @@ def _trigger_accounts() -> frozenset[str]:
     return frozenset(str(item).strip() for item in raw if str(item).strip())
 
 
-def engine_enabled() -> bool:
-    """Включён ли новый механизм плана. От него зависит ВСЁ в этом модуле."""
-    from django.conf import settings
+def plan_open_for(bot_user: Any) -> bool:
+    """Открыт ли План этому человеку. От этого зависит ВСЁ в этом модуле.
 
-    return bool(getattr(settings, "PLAN_ENGINE_ENABLED", False))
+    Механизм включён И аккаунт назван в списке приёмки — замок
+    :mod:`apps.orchestrator.plan_access`; пустой список — никому.
+    """
+    from apps.orchestrator.plan_access import plan_open_for as open_for
+
+    return open_for(bot_user)
+
+
+def plan_open_in(conversation: Any) -> bool:
+    """То же по разговору — где человека под рукой нет."""
+    from apps.orchestrator.plan_access import plan_open_in as open_in
+
+    return open_in(conversation)
 
 
 def trigger_visible(bot_user: Any) -> bool:
@@ -168,7 +181,7 @@ def trigger_visible(bot_user: Any) -> bool:
     план», свободная просьба), кнопки карточки и показ сохранённого плана от
     списка не зависят — им достаточно включённого механизма.
     """
-    if not engine_enabled():
+    if not plan_open_for(bot_user):
         return False
     account = f"{getattr(bot_user, 'channel', '')}:{getattr(bot_user, 'channel_user_id', '')}"
     return account in _trigger_accounts()
@@ -287,7 +300,7 @@ def try_handle_plan_trigger(
 
     stripped = (text or "").strip()
     by_command = stripped == TRIGGER and trigger_visible(bot_user)
-    by_button = stripped == CB_COMPOSE and engine_enabled()
+    by_button = stripped == CB_COMPOSE and plan_open_for(bot_user)
     if not (by_command or by_button):
         return None
     _write_discussion(conversation, None)
@@ -415,7 +428,7 @@ def compose_for_request(*, bot_user: Any, conversation: Any, trace_id: str) -> S
     ``None`` — механизм выключен: инструмент в этом случае модели и не
     предлагается, а ветка здесь — второй рубеж.
     """
-    if not engine_enabled():
+    if not plan_open_for(bot_user):
         return None
     from apps.orchestrator.safety.plan_turn import turn_safety_of
 
@@ -465,7 +478,7 @@ def try_handle_plan_edit(
     stripped = (text or "").strip()
     edit = EDIT_CALLBACK_RE.match(stripped)
     drop = DROP_CALLBACK_RE.match(stripped)
-    if (edit is None and drop is None) or not engine_enabled():
+    if (edit is None and drop is None) or not plan_open_for(bot_user):
         return None
 
     refusal = _basis_refusal(bot_user)
@@ -570,7 +583,7 @@ def discussed_plan(conversation: Any) -> tuple[str, list[tuple[str, str | None]]
     убрали шаг — обсуждается уже новое предложение. Сохранённый план — снимок
     подписей на момент нажатия «Обсудить».
     """
-    if not engine_enabled():
+    if not plan_open_in(conversation):
         return None
     row = _read_discussion(conversation)
     if row is None:
@@ -677,7 +690,7 @@ def try_handle_plan_discuss(
     Ничего не собирает и не меняет; вердикта не требует.
     """
     match = DISCUSS_CALLBACK_RE.match((text or "").strip())
-    if match is None or not engine_enabled():
+    if match is None or not plan_open_for(bot_user):
         return None
 
     from apps.orchestrator.next_steps import menu_button, next_step_action_data
@@ -792,7 +805,7 @@ def try_handle_saved_plan(*, text: str, bot_user: Any, trace_id: str) -> SkillRe
     """
     from apps.orchestrator.plan_lite_card import looks_like_my_plan_request
 
-    if not engine_enabled() or not looks_like_my_plan_request(text):
+    if not plan_open_for(bot_user) or not looks_like_my_plan_request(text):
         return None
 
     from apps.integrations.ayla import external_user_id_for
@@ -1008,7 +1021,7 @@ def pending_proposal_view(conversation: Any) -> dict[str, Any] | None:
     предложения нет, его нечем показать (шаг без подписи) или оно уже
     сохранено: сохранённое показывается как план, а не как предложение.
     """
-    if not engine_enabled():
+    if not plan_open_in(conversation):
         return None
     pending = _read_pending(conversation)
     labels = _proposal_labels(conversation)
@@ -1038,7 +1051,7 @@ def try_handle_plan_save(
     """Тап «Сохранить»; ``None`` — не наше (форма / нет входа)."""
 
     match = SAVE_CALLBACK_RE.match((text or "").strip())
-    if match is None or not engine_enabled():
+    if match is None or not plan_open_for(bot_user):
         return None
 
     refusal = _basis_refusal(bot_user)
@@ -1151,7 +1164,7 @@ def try_handle_plan_replace(
       закрыта замена.
     """
     match = REPLACE_CALLBACK_RE.match((text or "").strip())
-    if match is None or not engine_enabled():
+    if match is None or not plan_open_for(bot_user):
         return None
 
     from apps.integrations.ayla import external_user_id_for
@@ -1263,7 +1276,8 @@ __all__ = [
     "remove_step_for_request",
     "render_plan_discussion_block",
     "try_handle_plan_discuss",
-    "engine_enabled",
+    "plan_open_for",
+    "plan_open_in",
     "is_edit_callback",
     "is_save_callback",
     "save_command",

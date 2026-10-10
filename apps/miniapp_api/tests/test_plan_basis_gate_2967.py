@@ -71,7 +71,8 @@ from apps.orchestrator.tests.test_plan_engine_card_2885 import (
     _saved_plan,
 )
 
-pytestmark = pytest.mark.django_db
+#: Человек этих узлов назван в списке приёмки Плана; сам замок — test_plan_access_2885.
+pytestmark = [pytest.mark.django_db, pytest.mark.usefixtures("plan_open_to_everyone")]
 
 PD = ConsentRecord.ConsentType.PERSONAL_DATA.value
 
