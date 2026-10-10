@@ -21,12 +21,24 @@
 
 ### Почему «не началось» — одно слово на все отказы
 
-У отказа три причины (нет связи с Ayla, две связи, Ayla не ответила), и
-у каждой своё машинное имя для лога и ``detail``. Но человеку сообщается
+У отказа четыре причины (нет связи с Ayla, две связи, Ayla не ответила,
+у человека рабочая роль — DRF-2919), и у каждой своё машинное имя для
+лога и ``detail``. Но человеку сообщается
 одно: удаление НЕ НАЧАЛОСЬ. Это не упрощение, а требование §7: прежний
 ответ ``502 partial`` означал «часть сделана», и человек не знал, в каком
 состоянии его данные. Здесь состояние всегда одно из двух — заявка есть
 или её нет, — и слово «не началось» ровно это и говорит.
+
+### Сотрудник — не отсюда (DRF-2919)
+
+Решение 08.10: сотрудник удаляет аккаунт из кабинета, клиент —
+из клиентского профиля. Заявка адресуется человеку, а не строке, и
+исполнитель каталога по ней обезличивает карточку мастера, снимает её с
+записи и отзывает связи с салоном — о чём клиентский экран не
+предупреждает. Поэтому человеку с действующей рабочей ролью заявка
+отсюда не заводится: ``staff_account``, повтор не поможет. Сам
+исполнитель (``account_deletion.execute_bot_half``) и заявки, заведённые
+поддержкой, идут мимо этой функции и не затронуты.
 """
 
 from __future__ import annotations
@@ -36,6 +48,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from apps.identity.models import BotUser
+from apps.identity.services.bot_user_resolver import person_holds_working_role
 from apps.identity.services.privacy import resolve_person_link
 
 logger = logging.getLogger(__name__)
@@ -44,6 +57,7 @@ logger = logging.getLogger(__name__)
 NOT_LINKED = "not_linked"
 IDENTITY_CONFLICT = "identity_conflict"
 UPSTREAM_UNAVAILABLE = "upstream_unavailable"
+STAFF_ACCOUNT = "staff_account"
 
 #: Текст для человека — один на все причины (см. докстринг модуля).
 NOT_STARTED_TEXT = (
@@ -117,6 +131,16 @@ def request_account_deletion(bot_user: BotUser, *, client: Any = None) -> Deleti
         PersonalContextHttpClient,
     )
     from apps.integrations.ayla.user_proxy import external_user_id_for
+
+    # Первой, до любого обращения к Ayla: сотруднику отсюда не удаляться,
+    # связан он с Ayla или нет (см. докстринг модуля).
+    if person_holds_working_role(bot_user):
+        logger.info(
+            "identity.deletion_request.not_started reason=%s bot_user=%s",
+            STAFF_ACCOUNT,
+            bot_user.id,
+        )
+        raise DeletionNotStarted(STAFF_ACCOUNT, retryable=False)
 
     link = resolve_person_link(bot_user)
     if link.conflict:
