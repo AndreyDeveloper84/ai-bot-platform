@@ -209,18 +209,24 @@ def test_c1_the_reader_of_the_flag_reads_a_form_that_the_census_sees() -> None:
     assert _reads_the_flag('"""Флаг ``PLAN_ENGINE_ENABLED`` выключен."""\nx = 1') is False
 
 
+def _users_of(sources: dict[str, str], name: str) -> list[str]:
+    return sorted(
+        path
+        for path, source in sources.items()
+        if any(
+            (isinstance(node, ast.Name) and node.id == name)
+            or (isinstance(node, ast.FunctionDef) and node.name == name)
+            or (isinstance(node, ast.alias) and node.name == name)
+            for node in ast.walk(ast.parse(source))
+        )
+    )
+
+
 def test_c2_no_entry_keeps_a_bare_flag_check_of_its_own() -> None:
     """Прежние проверки «включён ли механизм» ушли вместе с именами."""
     sources = _app_sources()
+    # Сначала присутствие: поиск по именам находит то, что в коде есть.
+    assert "orchestrator/plan_engine_card.py" in _users_of(sources, "plan_open_for")
+    assert "miniapp_api/views_plan_engine.py" in _users_of(sources, "plan_open_to")
     for name in ("engine_enabled", "plan_engine_enabled"):
-        users = sorted(
-            path
-            for path, source in sources.items()
-            if any(
-                (isinstance(node, ast.Name) and node.id == name)
-                or (isinstance(node, ast.FunctionDef) and node.name == name)
-                or (isinstance(node, ast.alias) and node.name == name)
-                for node in ast.walk(ast.parse(source))
-            )
-        )
-        assert users == [], (name, users)
+        assert _users_of(sources, name) == [], name
