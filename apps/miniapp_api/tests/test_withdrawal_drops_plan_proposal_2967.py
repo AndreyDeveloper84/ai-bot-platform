@@ -42,6 +42,7 @@ from apps.miniapp_api.tests.test_plan_from_chat_e2e_2885 import (  # noqa: F401 
     wire,
 )
 from apps.orchestrator import plan_engine_card as card
+from apps.orchestrator import plan_step_card as step_card
 from apps.orchestrator.tests.test_plan_engine_card_2885 import (
     ACTIVE_ID,
     KEEP,
@@ -203,3 +204,77 @@ def test_w5_a_failed_cleanup_does_not_cost_the_withdrawal(
     assert _state_keys() >= PLAN_KEYS  # очистка действительно не прошла
     refused = _ask(client, SAVE, as_user=PERSON).json()["answer"]
     assert refused == f"PLAN_CONSENT_REQUIRED · {card.TEST_MARK}"
+
+
+# ─── ход «шаг → услуга → время»: его состояние — тот же остаток обработки ────
+
+SEARCH_ID = "3e4f5a6b-1111-4222-8333-444455556666"
+SLOT_TAP = f"{step_card.CB_SLOT_PREFIX}{SEARCH_ID[:8]}:0"
+OFFER_TAP = f"{step_card.CB_OFFER_PREFIX}{SEARCH_ID[:8]}:0"
+
+
+def _step_in_progress(client: Client, tenant) -> None:
+    """Человек с согласием дошёл до выбора времени: состояние шага лежит в
+    разговоре, как его оставляет настоящий ход (тот же писатель)."""
+    from apps.orchestrator.open_question import write_conversation_state
+
+    record_global_consent(_bare_person_shell(tenant, PERSON), source="test")
+    _ask(client, card.CB_COMPOSE, as_user=PERSON)  # настоящий ход заводит разговор
+    conversation = Conversation.all_tenants.get(bot_user__in=_shells())
+    write_conversation_state(
+        conversation,
+        step_card.STATE_KEY,
+        {
+            "plan_id": "p-1",
+            "step_id": "s-a",
+            "search_id": SEARCH_ID,
+            "options": [{"service_name": "Массаж", "specialist_name": "Мария"}],
+            "chosen": 0,
+            "slots": ["2026-10-12T10:00:00+03:00"],
+        },
+    )
+    assert step_card.STATE_KEY in _state_keys()
+
+
+def test_w6_a_real_withdrawal_drops_the_step_state(
+    client: Client, tenant, wire, catalog: FakeCatalog, django_capture_on_commit_callbacks
+) -> None:
+    _step_in_progress(client, tenant)
+    assert step_card.STATE_KEY in _state_keys()  # до отзыва состояние шага лежит
+
+    _withdraw(django_capture_on_commit_callbacks)
+
+    assert step_card.STATE_KEY not in _state_keys()
+
+
+@pytest.mark.parametrize("tap", [SLOT_TAP, OFFER_TAP])
+def test_w7_after_a_new_consent_the_old_step_buttons_are_stale(
+    tap: str,
+    client: Client,
+    tenant,
+    wire,
+    catalog: FakeCatalog,
+    django_capture_on_commit_callbacks,
+) -> None:
+    """Отозвал → согласился снова → нажал старую кнопку услуги или времени:
+    состояние собрано под прежним согласием и стёрто — «устарело»."""
+    _step_in_progress(client, tenant)
+    _withdraw(django_capture_on_commit_callbacks)
+    for shell in _shells():
+        record_global_consent(shell, source="test")
+
+    answer = _ask(client, tap, as_user=PERSON).json()["answer"]
+
+    assert answer == f"{step_card.PLAN_STEP_EXPIRED} · {card.TEST_MARK}"
+
+
+def test_w7_without_a_withdrawal_the_step_state_is_read(
+    client: Client, tenant, wire, catalog: FakeCatalog
+) -> None:
+    """Близнец: отзыва нет — та же кнопка времени идёт ДАЛЬШЕ состояния."""
+    _step_in_progress(client, tenant)
+
+    answer = _ask(client, SLOT_TAP, as_user=PERSON).json()["answer"]
+
+    assert answer != f"{step_card.PLAN_STEP_EXPIRED} · {card.TEST_MARK}"
+    assert answer.endswith(f"· {card.TEST_MARK}")  # исход назван, ход не упал
