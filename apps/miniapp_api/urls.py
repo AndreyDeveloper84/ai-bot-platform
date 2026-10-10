@@ -254,6 +254,32 @@ urlpatterns = [
         views_plan_engine.customer_plan_current,
         name="customer_plan_current",
     ),
+    # DRF-2876 — предложение рядом с действующим планом: заменить (запись,
+    # под гейтом согласия и с вердиктом последнего хода) или оставить текущий.
+    path(
+        "plan/replace",
+        views_plan_engine.customer_plan_replace,
+        name="customer_plan_replace",
+    ),
+    path(
+        "plan/keep",
+        views_plan_engine.customer_plan_keep,
+        name="customer_plan_keep",
+    ),
+    # DRF-2876 — сохранить с экрана несохранённое предложение из чата (§9):
+    # запись, под гейтом согласия и с вердиктом последнего хода.
+    path(
+        "plan/save",
+        views_plan_engine.customer_plan_save,
+        name="customer_plan_save",
+    ),
+    # DRF-2876 — от шага к услуге, времени и записи с экрана: тот же путь,
+    # что кнопками в чате; под гейтом согласия и с вердиктом последнего хода.
+    path(
+        "plan/step",
+        views_plan_engine.customer_plan_step,
+        name="customer_plan_step",
+    ),
     # DRF-2099 — дневник за неделю: строка на день и записи одного дня;
     # границы суток считает каталог по поясу человека.
     path(

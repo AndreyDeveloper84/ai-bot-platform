@@ -170,6 +170,7 @@ import { StatusBadge } from "../components/StatusBadge";
 import { CustomerTabBar } from "../components/CustomerTabBar";
 import { UnbookableBadge } from "../components/UnbookableNote";
 import { useScreenBack } from "../hooks/useScreenBack";
+import { getSavedPlan } from "../lib/plan-engine";
 import { PLAN_LITE_COPY, PLAN_LITE_ROUTE } from "./PlanLiteScreen";
 import { screenRoot } from "../lib/screen-back";
 
@@ -236,7 +237,17 @@ type RecsSlice = Slice<CatalogBrowseData> | { kind: "not_requested" };
  * «Недоступен» и «плана нет» — разные факты: во втором случае карточка цели
  * зовёт составить план, в первом о плане молчит.
  */
-type PlanSlice = { kind: "loading" } | { kind: "ok"; data: PlanLite | null } | { kind: "unavailable" };
+type PlanSlice =
+  | { kind: "loading" }
+  | { kind: "ok"; data: PlanLite | null }
+  /**
+   * DRF-2876 — у человека сохранён план нового механизма. Решение владельца
+   * 09.10 (вариант «а»): блок «План на сегодня» и счёт действий на Главной
+   * не показываются — они построены вокруг счётчиков прежнего плана, а у
+   * нового плана счёта нет. Вход в план — карточка цели.
+   */
+  | { kind: "saved" }
+  | { kind: "unavailable" };
 
 function isOnline(): boolean {
   if (typeof navigator === "undefined") return true;
@@ -334,12 +345,15 @@ export function CustomerWellnessDashboardScreen() {
     // Ветка `null` держит форму `allSettled` и порядок распаковки: так
     // включение полки возвращает запрос одной строкой в `aylaPicksShelfOn`,
     // а не раскопками.
-    const [todayRes, activityRes, recsRes, planRes, topicRes] = await Promise.allSettled([
+    const [todayRes, activityRes, recsRes, planRes, topicRes, savedPlanRes] = await Promise.allSettled([
       getWellnessToday(),
       getRecentActivity(),
       shelfOn ? getCatalogBrowse() : Promise.resolve(null),
       getPlanLite(),
       getLastTopicAndChatLink(),
+      // DRF-2876 — есть ли сохранённый план нового механизма (`null` — нет
+      // или механизм выключен на сервере).
+      getSavedPlan(),
     ]);
 
     if (todayRes.status === "fulfilled") {
@@ -372,9 +386,20 @@ export function CustomerWellnessDashboardScreen() {
 
     // План: выключен на сервере (`plan_lite_disabled`) или не ответил —
     // «недоступен», без ошибки на экране: Главная от плана не зависит.
-    setPlanSlice(
-      planRes.status === "fulfilled" ? { kind: "ok", data: planRes.value } : { kind: "unavailable" },
-    );
+    //
+    // DRF-2876 — сохранённый новый план важнее прежнего: с ним счётчики
+    // прежнего плана не показываются. Не удалось узнать, есть ли он, — о
+    // плане молчим («недоступен»): показать счётчики прежнего плана рядом с
+    // новым в «Моём плане» было бы противоречием.
+    if (savedPlanRes.status === "rejected") {
+      setPlanSlice({ kind: "unavailable" });
+    } else if (savedPlanRes.value) {
+      setPlanSlice({ kind: "saved" });
+    } else {
+      setPlanSlice(
+        planRes.status === "fulfilled" ? { kind: "ok", data: planRes.value } : { kind: "unavailable" },
+      );
+    }
     setLastTopic(topicRes.status === "fulfilled" ? topicRes.value.topic : null);
     setChatLink(topicRes.status === "fulfilled" ? topicRes.value.chatLink : null);
   }, [shelfOn]);
@@ -1580,6 +1605,8 @@ function GoalCard({
   } else if (planKnown) {
     statusLine = "План ещё не составлен";
   } else if (goal.week_num) {
+    // Сюда же приходит сохранённый новый план (DRF-2876): счёта действий у
+    // него нет, остаётся счётчик недель.
     // План недоступен (сервер выключил или не ответил) — о плане молчим,
     // счётчик недель остаётся: это не оценка выполнения (решение №13).
     statusLine = `Неделя ${goal.week_num}`;
@@ -1606,6 +1633,14 @@ function GoalCard({
       {!activePlan && planKnown && (
         <button type="button" className="wellness-dash__cta" onClick={onPlan}>
           Составить план
+        </button>
+      )}
+      {/* DRF-2876 — сохранён новый план: вход в него отсюда, вторым блоком
+          на Главной он не дублируется (решение владельца 09.10). Подпись —
+          существующая, та же, что у раздела. */}
+      {plan.kind === "saved" && (
+        <button type="button" className="wellness-dash__cta" onClick={onPlan}>
+          {PLAN_LITE_COPY.entryFromDashboard}
         </button>
       )}
       <button type="button" className="wellness-dash__link-btn" onClick={onGoal}>

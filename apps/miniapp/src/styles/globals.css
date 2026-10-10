@@ -3006,6 +3006,41 @@ a {
   font-weight: 600;
 }
 
+.booking-form__hint {
+  margin: 0 0 var(--s-2);
+  color: var(--c-text-secondary);
+  font-size: var(--font-size-100);
+}
+
+.booking-selector__list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.booking-selector__new {
+  width: 100%;
+  margin-top: var(--s-3);
+}
+
+.booking-conflict__context {
+  margin-top: var(--s-3);
+  padding: var(--s-3);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-md);
+  background: var(--c-surface-1);
+}
+
+.booking-conflict__context p {
+  margin: 0;
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+
+.booking-conflict__context p + p {
+  margin-top: var(--s-1);
+}
+
 /* Mark-unavailable bottom sheet ------------------------------------------- */
 
 .schedule-sheet-backdrop {

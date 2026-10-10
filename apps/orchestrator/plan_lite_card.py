@@ -104,7 +104,9 @@ CB_DIARY = "cb:food:diary"
 #: :mod:`apps.orchestrator.plan_engine_card`): то же семейство, свой разборщик.
 PLAN_CALLBACK_RE = re.compile(
     r"^cb:plan:(accept:[1-9][0-9]{0,5}|later|book|compose"
-    r"|save:[0-9a-f]{8}|edit:[0-9a-f]{8}|drop:[0-9a-f]{8}:[0-9]{1,2})$"
+    r"|save:[0-9a-f]{8}|edit:[0-9a-f]{8}|drop:[0-9a-f]{8}:[0-9]{1,2}"
+    r"|discuss:(?:saved|[0-9a-f]{8})|replace:[0-9a-f]{8}|keep:[0-9a-f]{8}"
+    r"|(?:step|offer|slot|day):[0-9a-f]{8}:[0-9]{1,2})$"
 )
 
 #: Слаг экрана «Мой план» — в ``MINIAPP_ROUTES`` и ``_ROUTE_MAP`` (паритет —
@@ -218,6 +220,22 @@ def tap_history_text(text: str) -> str | None:
         from apps.orchestrator.plan_engine_card import BUTTON_COMPOSE
 
         return BUTTON_COMPOSE
+    if stripped.startswith(("cb:plan:step:", "cb:plan:offer:", "cb:plan:slot:", "cb:plan:day:")):
+        # Тап по шагу, услуге, дню или времени — выбор из показанного, а не
+        # реплика: подпись человек не говорил, в историю она не идёт.
+        return None
+    if stripped.startswith("cb:plan:replace:"):
+        from apps.orchestrator.plan_engine_card import BUTTON_REPLACE
+
+        return BUTTON_REPLACE
+    if stripped.startswith("cb:plan:keep:"):
+        from apps.orchestrator.plan_engine_card import BUTTON_KEEP
+
+        return BUTTON_KEEP
+    if stripped.startswith("cb:plan:discuss:"):
+        from apps.orchestrator.plan_engine_card import BUTTON_DISCUSS
+
+        return BUTTON_DISCUSS
     if stripped.startswith("cb:plan:edit:"):
         from apps.orchestrator.plan_engine_card import BUTTON_EDIT
 
