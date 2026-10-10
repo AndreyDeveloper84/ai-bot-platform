@@ -213,7 +213,10 @@ class TestRosterIsTheRealOne:
 
         # DRF-2885: ``compose_plan`` отнимается, пока механизм плана выключен,
         # ``plan_remove_step`` — пока не обсуждают предложение плана.
-        settings.PLAN_ENGINE_ENABLED = True
+        # План открыт человеку разговора (замок приёмки — test_plan_access_2885).
+        from apps.orchestrator import plan_engine_card
+
+        monkeypatch.setattr(plan_engine_card, "plan_open_in", lambda _conversation: True)
         monkeypatch.setattr(concierge, "_plan_step_removable", lambda _conversation: True)
         monkeypatch.setattr(concierge, "_has_said_facts", lambda _conversation: True)
         # DRF-1923: и ход C05 — иначе confirm_said_fact отнимается по стадии.
@@ -241,18 +244,31 @@ class TestRosterIsTheRealOne:
             "plan_remove_step",
         ], withheld
 
-    def test_compose_plan_is_offered_only_with_the_plan_engine(self, settings) -> None:
-        """DRF-2885 — подсказка живого консьержа не меняется, пока флаг выключен."""
+    def test_compose_plan_is_offered_only_to_a_person_the_plan_is_open_to(self, settings) -> None:
+        """DRF-2885 — подсказка живого консьержа не меняется, пока План человеку
+        не открыт: механизм выключен ИЛИ аккаунт не назван в списке приёмки."""
+        from types import SimpleNamespace
+
         from apps.orchestrator.concierge import _tools_offered
 
-        def names() -> set[str]:
-            return {str(spec["name"]) for spec in _tools_offered("привет", conversation=None)}
+        def talk(person: str) -> SimpleNamespace:
+            return SimpleNamespace(bot_user=SimpleNamespace(channel="max", channel_user_id=person))
+
+        def names(conversation: object) -> set[str]:
+            return {str(spec["name"]) for spec in _tools_offered("привет", conversation)}
 
         # Сначала присутствие — иначе «нет» прошло бы и при пустом списке.
         settings.PLAN_ENGINE_ENABLED = True
-        assert "compose_plan" in names()
+        settings.PLAN_ACCEPTANCE_ACCOUNTS = ("max:1001",)
+        assert "compose_plan" in names(talk("1001"))
+        # Тот же ход другого человека, без разговора, при пустом списке, без флага.
+        assert "compose_plan" not in names(talk("1002"))
+        assert "compose_plan" not in names(None)
+        settings.PLAN_ACCEPTANCE_ACCOUNTS = ()
+        assert "compose_plan" not in names(talk("1001"))
+        settings.PLAN_ACCEPTANCE_ACCOUNTS = ("max:1001",)
         settings.PLAN_ENGINE_ENABLED = False
-        assert "compose_plan" not in names()
+        assert "compose_plan" not in names(talk("1001"))
 
     def test_subtraction_reads_the_constant_not_a_copy(self) -> None:
         """Source-level: the helper's body names CONCIERGE_TOOL_SPECS and no
