@@ -426,7 +426,7 @@ describe("исходы — словами SystemState (М-6)", () => {
     ).toBeInTheDocument();
     expect(screen.getByLabelText(/^Клиент/).textContent).toMatch(/Анна П\./);
     expect(screen.getByLabelText(/^Услуга/).textContent).toMatch(/Маникюр/);
-    const saved = screen.getByLabelText("Сохранённые данные записи");
+    const saved = screen.getByLabelText("Данные записи");
     expect(saved).toHaveTextContent("Клиент: Анна П.");
     expect(saved).toHaveTextContent("Услуга: Маникюр");
     expect(saved).toHaveTextContent(/Дата:/);
