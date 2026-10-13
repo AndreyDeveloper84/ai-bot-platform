@@ -21,7 +21,7 @@ import logging
 import os
 import socket
 import sys
-from typing import Iterable
+from typing import Any, Iterable
 
 # Bootstrap Django before any apps.* imports. Required when this module
 # is run as `python -m apps.workers.consumer` (systemd) — otherwise the
@@ -38,6 +38,13 @@ from apps.ingress import streams as ingress_streams  # noqa: E402
 from apps.ingress.streams import DEFAULT_GROUP_NAME  # noqa: E402
 from apps.tenancy.context import tenant_scope, trace_id_scope  # noqa: E402
 from apps.workers.base import resolve_tenant_by_id_string  # noqa: E402
+from apps.workers.reaper import (  # noqa: E402
+    _FORENSIC_VOICE_REDACTED,
+    DLQ_STREAM_MAXLEN,
+    _build_dlq_fields,
+    _classify_pel_entry,
+    _dlq_stream_for,
+)
 from apps.workers.registry import lookup, registered_streams  # noqa: E402
 
 logger = logging.getLogger(__name__)
@@ -51,6 +58,67 @@ def _consumer_name() -> str:
     """
 
     return f"{socket.gethostname()}-{__import__('os').getpid()}"
+
+
+def _move_voice_entry_to_dlq(
+    client: Any, stream: str, group: str, entry_id: str, decoded: dict[str, str]
+) -> bool:
+    """Move a failed entry that carries a voice link to ``<stream>:dlq``. Never raises.
+
+    DRF-1943 — «голос не храним, только текст». A failed entry otherwise
+    waits in the PEL with the whole webhook body — and with it the link
+    MAX serves the recording by, without authorisation, for 24 h — until
+    the reaper (off by default) or the retention trim
+    (``INGRESS_RAW_RETENTION_HOURS``) takes it. Nothing re-reads the PEL:
+    the group reads ``">"`` only, and a manual replay of a voice turn would
+    hit the idempotency key taken at the start of the turn. So the entry is
+    moved at once: the DLQ keeps the body without the link (who, when, that
+    it was voice, the trace), the PEL and the stream drop the original.
+
+    Returns True once the DLQ copy is written. XACK and XDEL are tried
+    separately and XDEL runs even if XACK failed: it is XDEL that removes
+    the link. A failure before the copy is written leaves the entry where
+    it is today — in the PEL until the reaper or the trim.
+    """
+
+    try:
+        decision = _classify_pel_entry(stream, entry_id, decoded)
+        fields = _build_dlq_fields(decoded, stream, entry_id, decision.classification)
+        if fields.get(_FORENSIC_VOICE_REDACTED) != "1":
+            return False
+        client.xadd(
+            _dlq_stream_for(stream),
+            fields,
+            maxlen=DLQ_STREAM_MAXLEN,
+            approximate=True,
+        )
+    except Exception:  # noqa: BLE001 — the batch must go on; the entry stays in the PEL
+        logger.exception(
+            "workers.voice_dlq_move_failed stream=%s entry_id=%s — left in the PEL",
+            stream,
+            entry_id,
+        )
+        return False
+
+    try:
+        client.xack(stream, group, entry_id)
+    except Exception:  # noqa: BLE001
+        logger.exception("workers.voice_dlq_xack_failed stream=%s entry_id=%s", stream, entry_id)
+    try:
+        client.xdel(stream, entry_id)
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "workers.voice_dlq_xdel_failed stream=%s entry_id=%s — left to the retention trim",
+            stream,
+            entry_id,
+        )
+    logger.warning(
+        "workers.voice_entry_moved_to_dlq stream=%s entry_id=%s classification=%s",
+        stream,
+        entry_id,
+        decision.classification,
+    )
+    return True
 
 
 def consume_once(
@@ -69,7 +137,8 @@ def consume_once(
       count: Max entries to consume per call.
 
     Returns:
-      Number of entries successfully processed (XACK'd).
+      Number of entries successfully processed (XACK'd). A failed voice
+      entry moved to the DLQ (DRF-1943) is not counted: it was not processed.
     """
 
     # Call via module attribute so test monkeypatches on streams._client
@@ -172,6 +241,12 @@ def consume_once(
                     handler_failed = True
 
             if handler_failed:
+                # DRF-1943 — «голос не храним»: a failed entry with a voice
+                # attachment goes to the DLQ at once, as a copy without the
+                # link, and leaves the PEL and the stream. Everything else
+                # stays below, exactly as before.
+                if _move_voice_entry_to_dlq(client, stream_name, group, entry_id, decoded):
+                    continue
                 # Do NOT XACK on failure. Entry stays in PEL for
                 # operator escalation (manual XCLAIM / XAUTOCLAIM).
                 # **No automatic DLQ retry is wired** as of 2026-05-21
