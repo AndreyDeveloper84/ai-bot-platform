@@ -47,6 +47,9 @@ from apps.planning_rules.registry import PlanningRegistryInvalidError, load_regi
 from apps.planning_rules.wire import registry_wire_body
 from apps.tenancy.models import Tenant
 
+#: Человек этих узлов назван в списке приёмки Плана; сам замок — test_plan_access_2885.
+pytestmark = pytest.mark.usefixtures("plan_open_to_everyone")
+
 BOT_TOKEN = "test-bot-token-plan-engine-2879"  # noqa: S105 — test fixture  # pragma: allowlist secret
 EXT = "bot:max:28790"
 CLIENT = "apps.miniapp_api.views_plan_engine.PlanEngineHttpClient"

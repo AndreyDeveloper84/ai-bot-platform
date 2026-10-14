@@ -53,6 +53,9 @@ from apps.orchestrator import open_question, plan_engine_card as card
 from apps.orchestrator.nutrition_global import try_handle_structured_nutrition_turn
 from apps.orchestrator.safety.plan_turn import PlanTurnSafety
 
+#: Человек этих узлов назван в списке приёмки Плана; сам замок — test_plan_access_2885.
+pytestmark = pytest.mark.usefixtures("plan_open_to_everyone")
+
 ACCOUNT = "max:770001"
 DECISION_ID = "0f3a9c2e-1111-4222-8333-444455556666"
 PROPOSAL_ID = "7c1d2e3f-aaaa-4bbb-8ccc-ddddeeeeffff"

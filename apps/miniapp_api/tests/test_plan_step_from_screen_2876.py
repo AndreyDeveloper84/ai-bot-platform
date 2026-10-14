@@ -23,6 +23,8 @@
 * p9 — настоящая услуга не записывается; услуга с расспросом не выбирается;
 * p10 — начатое на экране продолжается в чате;
 * p11 — повторное нажатие времени шлёт тот же ключ идемпотентности;
+* y1–y3 — выбор другого дня: его время, запись на него, день без времени;
+* r1–r3 — стойкое ограничение читается у человека, а не у записи запроса;
 * b1–b3 — время действующей записи у шага в чтении плана.
 """
 
@@ -117,8 +119,10 @@ def _world(monkeypatch: pytest.MonkeyPatch, settings) -> None:
 
 
 @pytest.fixture
-def person(tenant) -> str:
+def person(tenant, settings) -> str:
     value = str(next(_PEOPLE))
+    # Замок приёмки — настоящий: человек узла назван в списке.
+    settings.PLAN_ACCEPTANCE_ACCOUNTS = (f"max:{value}",)
     _person_shell(tenant, value)
     return value
 
@@ -182,7 +186,13 @@ def test_p2_choose_then_book_each_call_with_the_last_turns_verdict_and_the_basis
     booked = _step(client, person, "book", SEARCH8, 0)
 
     assert chosen.status_code == 200, chosen.content[:300]
-    assert chosen.json() == {"token": SEARCH8, "option": OPTION, "slots": [SLOT]}
+    assert chosen.json() == {
+        "token": SEARCH8,
+        "option": OPTION,
+        "days": ["2026-10-12"],
+        "day": "2026-10-12",
+        "slots": [SLOT],
+    }
     assert booked.status_code == 200, booked.content[:300]
     assert booked.json() == {"booked_at": SLOT}
 
@@ -451,6 +461,163 @@ def test_p11_a_second_press_on_the_time_sends_the_same_idempotency_key(
     assert booking.created[0]["idempotency_key"] == booking.created[1]["idempotency_key"]
 
 
+# ─── стойкое ограничение — человека, а не записи ─────────────────────────
+
+
+def _records(person: str) -> dict[str, Any]:
+    """Записи одного человека: глобальная (чат) и салона приложения (экран)."""
+    from apps.identity.models import BotUser
+    from apps.identity.services.global_tenant import get_global_bot_tenant
+
+    rows = list(BotUser.all_tenants.filter(channel="max", channel_user_id=person))
+    chat = [r for r in rows if r.tenant_id == get_global_bot_tenant().id]
+    screen = [r for r in rows if r.tenant_id != get_global_bot_tenant().id]
+    # Узел осмыслен, только если записей действительно две и они разные.
+    assert len(chat) == 1 and len(screen) == 1, [(r.pk, r.tenant_id) for r in rows]
+    return {"chat": chat[0], "screen": screen[0]}
+
+
+@pytest.mark.parametrize(
+    ("where", "how", "sent"),
+    [
+        ("chat", "stop", "stop"),
+        ("chat", "open", "open"),
+        ("screen", "stop", "stop"),
+    ],
+)
+def test_r1_a_restriction_recorded_on_any_record_of_the_person_rides_from_the_screen(
+    client: Client,
+    tenant,
+    wire,
+    person: str,
+    catalog: StepCatalog,
+    where: str,
+    how: str,
+    sent: str,
+) -> None:
+    """Чат пишет ограничение на глобальную запись человека, экран несёт запись
+    салона приложения. Каталогу с экрана уходит ограничение ЧЕЛОВЕКА (H5)."""
+    from apps.orchestrator.safety import s1_restriction
+
+    _turn(client, person)  # вердикт последнего хода — обычный
+    record = _records(person)[where]
+    if how == "stop":
+        assert s1_restriction.mark_stop(
+            record, group="G4", question_id="health_screening.g4", source="test", reason="test"
+        )
+    else:
+        assert s1_restriction.open_restriction(
+            record, group="G4", question_id="health_screening.g4", source="test"
+        )
+
+    _step(client, person, "offers", PLAN8, 0)
+
+    assert catalog.asked[0]["s1_restriction"] == sent
+    assert catalog.asked[0]["safety_state"] == "NORMAL"  # вердикт хода ограничение не прикрывает
+
+
+def test_r2_of_two_records_the_stricter_restriction_wins(
+    client: Client, tenant, wire, person: str, catalog: StepCatalog
+) -> None:
+    from apps.orchestrator.safety import s1_restriction
+
+    _turn(client, person)
+    records = _records(person)
+    kwargs = {"group": "G4", "question_id": "health_screening.g4", "source": "test"}
+    assert s1_restriction.open_restriction(records["screen"], **kwargs)
+    assert s1_restriction.mark_stop(records["chat"], reason="test", **kwargs)
+
+    _step(client, person, "offers", PLAN8, 0)
+
+    assert catalog.asked[0]["s1_restriction"] == "stop"
+
+
+def test_r3_without_a_restriction_on_any_record_none_is_sent(
+    client: Client, tenant, wire, person: str, catalog: StepCatalog
+) -> None:
+    _turn(client, person)
+    _records(person)  # записей две, ограничений нет ни на одной
+
+    _step(client, person, "offers", PLAN8, 0)
+
+    assert catalog.asked[0]["s1_restriction"] == "none"
+
+
+# ─── другой день ─────────────────────────────────────────────────────────
+
+LATER_DAY = "2026-10-14"
+LATER_SLOT = "2026-10-14T15:00:00+03:00"
+
+
+def _two_days(booking: Booking, monkeypatch: pytest.MonkeyPatch, later: list[str]) -> None:
+    free = {"2026-10-12": [SLOT], LATER_DAY: later}
+    monkeypatch.setattr(
+        booking,
+        "get_available_times",
+        lambda **kwargs: [SimpleNamespace(datetime=iso) for iso in free.get(kwargs["date"], [])],
+    )
+
+
+def test_y1_another_day_is_shown_with_its_times_and_then_booked(
+    client: Client, tenant, wire, person: str, catalog: StepCatalog, booking: Booking, monkeypatch
+) -> None:
+    _two_days(booking, monkeypatch, [LATER_SLOT])
+    _turn(client, person)
+    _step(client, person, "offers", PLAN8, 0)
+    chosen = _step(client, person, "choose", SEARCH8, 0)
+    assert (chosen.json()["days"], chosen.json()["day"]) == (
+        ["2026-10-12", LATER_DAY],
+        "2026-10-12",
+    )
+
+    day = _step(client, person, "day", SEARCH8, 1)
+    booked = _step(client, person, "book", SEARCH8, 0)
+
+    assert day.status_code == 200, day.content[:300]
+    assert day.json() == {
+        "token": SEARCH8,
+        "option": OPTION,
+        "days": ["2026-10-12", LATER_DAY],
+        "day": LATER_DAY,
+        "slots": [LATER_SLOT],
+    }
+    assert booked.json() == {"booked_at": LATER_SLOT}
+    assert booking.created[0]["start_datetime"] == LATER_SLOT
+    assert len(catalog.resolved) == 1  # выбор услуги не повторялся
+
+
+def test_y2_a_day_whose_time_is_gone_still_offers_the_other_days(
+    client: Client, tenant, wire, person: str, catalog: StepCatalog, booking: Booking, monkeypatch
+) -> None:
+    _two_days(booking, monkeypatch, [LATER_SLOT])
+    _turn(client, person)
+    _step(client, person, "offers", PLAN8, 0)
+    _step(client, person, "choose", SEARCH8, 0)
+    _two_days(booking, monkeypatch, [])
+
+    day = _step(client, person, "day", SEARCH8, 1)
+
+    assert day.status_code == 200, day.content[:300]
+    assert (day.json()["day"], day.json()["slots"]) == (LATER_DAY, [])
+    assert day.json()["days"] == ["2026-10-12", LATER_DAY]
+
+
+def test_y3_a_day_action_is_gated_and_an_unknown_day_is_stale(
+    client: Client, tenant, wire, person: str, catalog: StepCatalog, booking: Booking, monkeypatch
+) -> None:
+    _two_days(booking, monkeypatch, [LATER_SLOT])
+    _turn(client, person)
+    _step(client, person, "offers", PLAN8, 0)
+    _step(client, person, "choose", SEARCH8, 0)
+
+    unknown = _step(client, person, "day", SEARCH8, 5)
+    _withdraw(person)
+    gated = _step(client, person, "day", SEARCH8, 1)
+
+    assert (unknown.status_code, unknown.json()["error"]) == (409, "plan_step_expired")
+    assert (gated.status_code, gated.json()["error"]) == (403, "plan_consent_required")
+
+
 # ─── время записи у шага в чтении плана ──────────────────────────────────
 
 
@@ -536,3 +703,38 @@ def test_b4_the_catalogs_utc_time_reaches_the_screen_as_the_hours_of_the_salon(
     }
 
     assert _booked(client, person) == [SLOT, None]
+
+
+def test_b5_the_hours_are_those_of_the_bookings_own_zone(
+    client: Client, tenant, wire, person: str, catalog: StepCatalog
+) -> None:
+    """Пояс записи — снимок пояса мастера, каталог отдаёт его рядом с временем:
+    07:00 UTC — это 12:00 в Екатеринбурге, а не 10:00 по запасному поясу."""
+    utc = "2026-10-12T07:00:00+00:00"
+    _state(catalog)["step_state"] = {
+        "s-sleep": {
+            "bookings": [
+                {"status": "confirmed", "start_datetime": utc, "timezone": "Asia/Yekaterinburg"}
+            ]
+        },
+        "s-walk": {
+            "bookings": [
+                {"status": "confirmed", "start_datetime": utc, "timezone": "Europe/Moscow"}
+            ]
+        },
+    }
+
+    assert _booked(client, person) == ["2026-10-12T12:00:00+05:00", SLOT]
+
+
+@pytest.mark.parametrize("zone", ["", None, "Mars/Olympus", "+05:00", 5, ["Asia/Yekaterinburg"]])
+def test_b6_a_zone_that_is_missing_or_unreadable_falls_back_to_the_named_default(
+    client: Client, tenant, wire, person: str, catalog: StepCatalog, zone: Any
+) -> None:
+    utc = "2026-10-12T07:00:00+00:00"
+    _state(catalog)["step_state"] = {
+        "s-sleep": {"bookings": [{"status": "confirmed", "start_datetime": utc, "timezone": zone}]},
+        "s-walk": {"bookings": [{"status": "confirmed", "start_datetime": utc}]},
+    }
+
+    assert _booked(client, person) == [SLOT, SLOT]

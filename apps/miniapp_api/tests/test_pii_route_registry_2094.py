@@ -704,6 +704,7 @@ CUSTOMER_ROUTES: dict[str, Entry] = {
         "options[].service_name / salon_name / salon_city / master_name / price / "
         "duration_minutes / place_address / synthetic",
         "option (the chosen one, same fields)",
+        "days[] / day",
         "slots[]",
         "booked_at",
         via="apps.orchestrator.plan_step_card:option_view",

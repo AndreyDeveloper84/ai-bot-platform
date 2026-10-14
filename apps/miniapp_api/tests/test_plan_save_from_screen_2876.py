@@ -61,7 +61,8 @@ from apps.orchestrator.decision_readiness import state as state_mod
 from apps.orchestrator.decision_readiness.tests.fakes import FakeRedis
 from apps.orchestrator.tests.test_plan_engine_card_2885 import DECISION_ID, TOKEN, FakeCatalog
 
-pytestmark = pytest.mark.django_db
+#: Человек этих узлов назван в списке приёмки Плана; сам замок — test_plan_access_2885.
+pytestmark = [pytest.mark.django_db, pytest.mark.usefixtures("plan_open_to_everyone")]
 
 #: Счётчик людей: у ручки чата лимит вопросов на человека в минуту, а кеш
 #: лимита живёт дольше узла — каждому узлу свой человек.

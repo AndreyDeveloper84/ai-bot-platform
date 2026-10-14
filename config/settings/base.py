@@ -1995,6 +1995,17 @@ SYNTHETIC_TEST_TRIGGER_ACCOUNTS = tuple(
     if item.strip()
 )
 
+# DRF-2885 — замок приёмки Плана (решение владельца 10.10): включённый
+# ``PLAN_ENGINE_ENABLED`` сам никому План не открывает. Механизм отвечает только
+# аккаунтам из этого списка: ``канал:идентификатор`` через запятую, например
+# ``max:12345``. Пусто (умолчание) — НИКОМУ. Назвать аккаунты — отдельное явное
+# действие; читается в ``apps.orchestrator.plan_access``.
+PLAN_ACCEPTANCE_ACCOUNTS = tuple(
+    item.strip()
+    for item in os.environ.get("PLAN_ACCEPTANCE_ACCOUNTS", "").split(",")
+    if item.strip()
+)
+
 PLAN_ENGINE_ENABLED = os.environ.get("PLAN_ENGINE_ENABLED", "false").lower() in (
     "true",
     "1",

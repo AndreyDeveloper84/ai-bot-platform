@@ -101,8 +101,12 @@ def clear_plan_proposals_for_person(bot_user: Any) -> int:
     хранился без основания, а после нового согласия старая карточка
     «Сохранить» сохранила бы предложение, собранное под прежним.
 
-    Стираются два ключа состояния — во всех разговорах всех оболочек
-    человека. Ключ вопроса «Заменить / Оставить» остаётся: в нём только
+    Стираются три ключа состояния — во всех разговорах всех оболочек
+    человека: предложение, обсуждение и ход «шаг → услуга → время» (выбранная
+    услуга, мастер и слоты под шаг человека — тот же остаток обработки, и та
+    же дыра: старая кнопка времени после нового согласия записала бы по
+    состоянию, собранному под прежним). Ключ вопроса «Заменить / Оставить»
+    остаётся: в нём только
     идентификаторы планов, и без него человек под отзывом не смог бы
     отказаться от висящего предложения, а это действие открыто.
 
@@ -117,9 +121,10 @@ def clear_plan_proposals_for_person(bot_user: Any) -> int:
         from apps.conversations.models import Conversation
         from apps.conversations.services import write_skill_state
         from apps.orchestrator.plan_engine_card import DISCUSSION_KEY, STATE_KEY
+        from apps.orchestrator.plan_step_card import STATE_KEY as STEP_STATE_KEY
         from apps.tenancy.context import tenant_scope
 
-        keys = (STATE_KEY, DISCUSSION_KEY)
+        keys = (STATE_KEY, DISCUSSION_KEY, STEP_STATE_KEY)
         conversations = list(
             Conversation.all_tenants.filter(
                 bot_user__in=person_channel_shells(bot_user),
