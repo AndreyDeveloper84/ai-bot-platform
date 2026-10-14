@@ -268,6 +268,8 @@ export function NewBookingForm({
   // «found nothing» and «could not look» must never collapse into one.
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<FormCustomerRow[]>([]);
+  const [customerMode, setCustomerMode] = useState<"search" | "new">("search");
+  const [serviceQuery, setServiceQuery] = useState("");
   const [searchState, setSearchState] = useState<
     "idle" | "searching" | "done" | "unavailable" | "error" | "phone_closed"
   >("idle");
@@ -528,6 +530,15 @@ export function NewBookingForm({
     ? `${formatDayTitle(date)} · ${draft.slot.time}`
     : null;
 
+  const visibleServices = useMemo(() => {
+    if (!isMaster) return services;
+    const q = serviceQuery.trim().toLocaleLowerCase("ru-RU");
+    if (!q) return services;
+    return services.filter((service) =>
+      service.name.toLocaleLowerCase("ru-RU").includes(q),
+    );
+  }, [isMaster, serviceQuery, services]);
+
   const missing = missingSteps(draft, rules);
   const ready = canReview(draft, rules);
   // A slot the schedule labelled but did not timestamp cannot be committed:
@@ -599,7 +610,7 @@ export function NewBookingForm({
         </div>
       )}
 
-      {ready && (
+      {ready && !isMaster && (
         // §18 — review is a confirmation of intent, shown before the
         // irreversible tap and carrying exactly what was chosen.
         <section className="callout" style={{ marginTop: "var(--s-4) " }}>
@@ -673,6 +684,12 @@ export function NewBookingForm({
                 kind="conflict"
                 onPickAnother={() => setSheet("time")}
               />
+              <div className="booking-conflict__context" aria-label="Данные записи">
+                <p>Клиент: {customerLabel}</p>
+                <p>Услуга: {draft.service?.name}</p>
+                <p>Дата: {formatDayTitle(date)}</p>
+                <p>Меняется только время.</p>
+              </div>
               {alternatives && alternatives.length > 0 && (
                 <ul
                   style={{
@@ -775,158 +792,226 @@ export function NewBookingForm({
       )}
 
       {sheet === "customer" && (
-        <Sheet title="Клиент" onClose={() => setSheet(null)}>
-          {/* §13 — search shows only what disambiguates a person: a name
-              and a masked phone. Nothing about their history, and never a
-              raw number. */}
-          <label>
-            Найти клиента
-            <input
-              type="search"
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              placeholder={isMaster ? "Имя" : "Имя или телефон"}
-              aria-label="Поиск клиента"
-            />
-          </label>
+        <Sheet
+          title={isMaster && customerMode === "new" ? "Новый клиент" : "Клиент"}
+          onClose={() => {
+            setCustomerMode("search");
+            setSheet(null);
+          }}
+        >
+          {isMaster && customerMode === "new" ? (
+            <>
+              <p className="booking-form__hint">
+                Имя и телефон нужны для создания записи и связи по ней.
+              </p>
+              <label>
+                Имя
+                <input
+                  type="text"
+                  value={newName}
+                  onChange={(e) => setNewName(e.target.value)}
+                  aria-label="Имя клиента"
+                />
+              </label>
+              <label>
+                Телефон
+                <input
+                  type="tel"
+                  value={newPhone}
+                  onChange={(e) => setNewPhone(e.target.value)}
+                  aria-label="Телефон клиента"
+                />
+              </label>
+              <button
+                type="button"
+                className="cta-bar__button"
+                disabled={!newName.trim() || !newPhone.trim()}
+                onClick={() => {
+                  dispatch({
+                    type: "customer/set",
+                    customer: {
+                      kind: "new",
+                      name: newName.trim(),
+                      phone: newPhone.trim(),
+                    },
+                  });
+                  setCustomerMode("search");
+                  setSheet(null);
+                }}
+              >
+                Сохранить клиента
+              </button>
+              <button
+                type="button"
+                className="btn-secondary"
+                onClick={() => setCustomerMode("search")}
+              >
+                Назад к поиску
+              </button>
+            </>
+          ) : (
+            <>
+              <label>
+                Найти клиента
+                <input
+                  type="search"
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                  placeholder={isMaster ? "Имя" : "Имя или телефон"}
+                  aria-label="Поиск клиента"
+                />
+              </label>
 
-          {searchState === "idle" && (
-            <p style={{ color: "var(--c-text-secondary)", margin: 0 }}>
-              Введите хотя бы два символа.
-            </p>
-          )}
+              {searchState === "idle" && (
+                <p className="booking-form__hint">Введите хотя бы два символа.</p>
+              )}
 
-          {searchState === "searching" && (
-            <div className="callout" role="status">
-              Ищу…
-            </div>
-          )}
+              {searchState === "searching" && (
+                <div className="callout" role="status">
+                  Ищу…
+                </div>
+              )}
 
-          {searchState === "unavailable" && (
-            // Not «нет такого клиента». §13: «A failed search is not proof
-            // that the customer does not exist» — telling the receptionist
-            // otherwise is how duplicates get created.
-            <div className="callout callout--warning" role="status">
-              Поиск по клиентам пока недоступен. Это не значит, что клиента нет
-              — заведите его как нового.
-            </div>
-          )}
+              {searchState === "unavailable" && (
+                <div className="callout callout--warning" role="status">
+                  Поиск по клиентам пока недоступен. Это не значит, что клиента нет
+                  — заведите его как нового.
+                </div>
+              )}
 
-          {searchState === "error" && (
-            <div className="callout callout--warning" role="status">
-              Не удалось выполнить поиск. Это не значит, что клиента нет.
-            </div>
-          )}
+              {searchState === "error" && (
+                <div className="callout callout--warning" role="status">
+                  Не удалось выполнить поиск. Это не значит, что клиента нет.
+                </div>
+              )}
 
-          {searchState === "phone_closed" && (
-            // Мастер: поиск по номеру закрыт (DRF-1039) — сказать, как искать.
-            <div className="callout" role="status">
-              Ищите по имени.
-            </div>
-          )}
+              {searchState === "phone_closed" && (
+                <div className="callout" role="status">
+                  Ищите по имени.
+                </div>
+              )}
 
-          {searchState === "done" && results.length === 0 && (
-            <div className="callout" role="status">
-              {isMaster
-                ? "Совпадений нет. Возможно, клиент записан под другим именем."
-                : "Совпадений нет. Возможно, клиент записан под другим именем или телефоном."}
-            </div>
-          )}
+              {searchState === "done" && results.length === 0 && (
+                <div className="callout" role="status">
+                  {isMaster
+                    ? "Совпадений нет. Возможно, клиент записан под другим именем."
+                    : "Совпадений нет. Возможно, клиент записан под другим именем или телефоном."}
+                </div>
+              )}
 
-          {searchState === "done" && results.length > 0 && (
-            <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
-              {results.map((c) => (
-                <li key={c.id}>
+              {searchState === "done" && results.length > 0 && (
+                <ul className={isMaster ? "booking-selector__list" : undefined}
+                    style={isMaster ? undefined : { listStyle: "none", padding: 0, margin: 0 }}>
+                  {results.map((c) => (
+                    <li key={c.id}>
+                      <button
+                        type="button"
+                        className="sheet__item"
+                        onClick={() => {
+                          dispatch({
+                            type: "customer/set",
+                            customer: {
+                              kind: "existing",
+                              id: c.id,
+                              name: c.name,
+                              phone_masked: isMaster ? undefined : c.phone_masked,
+                            },
+                          });
+                          setSheet(null);
+                        }}
+                      >
+                        {isMaster
+                          ? `${c.name} · ${c.last_visit_date ? `была ${formatLastVisit(c.last_visit_date)}` : "новый клиент"}`
+                          : c.phone_masked
+                            ? `${c.name} · ${c.phone_masked}`
+                            : c.name}
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+
+              {isMaster ? (
+                <button
+                  type="button"
+                  className="btn-secondary booking-selector__new"
+                  onClick={() => setCustomerMode("new")}
+                >
+                  + Новый клиент
+                </button>
+              ) : (
+                <>
+                  <h3 className="section__title">Новый клиент</h3>
+                  <label>
+                    Имя
+                    <input
+                      type="text"
+                      value={newName}
+                      onChange={(e) => setNewName(e.target.value)}
+                      aria-label="Имя клиента"
+                    />
+                  </label>
+                  <label>
+                    Телефон
+                    <input
+                      type="tel"
+                      value={newPhone}
+                      onChange={(e) => setNewPhone(e.target.value)}
+                      aria-label="Телефон клиента"
+                    />
+                  </label>
                   <button
                     type="button"
-                    className="sheet__item"
+                    className="cta-bar__button"
+                    disabled={!newName.trim() || !newPhone.trim()}
                     onClick={() => {
                       dispatch({
                         type: "customer/set",
                         customer: {
-                          kind: "existing",
-                          id: c.id,
-                          name: c.name,
-                          // Мастер: маски телефона в черновике не бывает по построению.
-                          phone_masked: isMaster ? undefined : c.phone_masked,
+                          kind: "new",
+                          name: newName.trim(),
+                          phone: newPhone.trim(),
                         },
                       });
                       setSheet(null);
                     }}
                   >
-                    {isMaster
-                      ? `${c.name} · ${c.last_visit_date ? `была ${formatLastVisit(c.last_visit_date)}` : "новый клиент"}`
-                      : c.phone_masked
-                        ? `${c.name} · ${c.phone_masked}`
-                        : c.name}
+                    Сохранить клиента
                   </button>
-                </li>
-              ))}
-            </ul>
+                </>
+              )}
+            </>
           )}
-
-          <h3 className="section__title">Новый клиент</h3>
-          {isMaster && (
-            // Макет DRF-1184, дословно. Телефон — вход для каталога; на экран
-            // он не возвращается ни в одной форме (DRF-1039).
-            <p
-              style={{
-                color: "var(--c-text-secondary)",
-                margin: "0 0 var(--s-2)",
-              }}
-            >
-              Имя и телефон нужны для создания записи и связи по ней.
-            </p>
-          )}
-          <label>
-            Имя
-            <input
-              type="text"
-              value={newName}
-              onChange={(e) => setNewName(e.target.value)}
-              aria-label="Имя клиента"
-            />
-          </label>
-          <label>
-            Телефон
-            <input
-              type="tel"
-              value={newPhone}
-              onChange={(e) => setNewPhone(e.target.value)}
-              aria-label="Телефон клиента"
-            />
-          </label>
-          <button
-            type="button"
-            className="cta-bar__button"
-            disabled={!newName.trim() || !newPhone.trim()}
-            onClick={() => {
-              dispatch({
-                type: "customer/set",
-                customer: {
-                  kind: "new",
-                  name: newName.trim(),
-                  phone: newPhone.trim(),
-                },
-              });
-              setSheet(null);
-            }}
-          >
-            Сохранить клиента
-          </button>
         </Sheet>
       )}
 
       {sheet === "service" && (
         <Sheet title="Услуга" onClose={() => setSheet(null)}>
+          {isMaster ? (
+            <label>
+              Поиск услуги
+              <input
+                type="search"
+                value={serviceQuery}
+                onChange={(e) => setServiceQuery(e.target.value)}
+                placeholder="Название услуги"
+                aria-label="Поиск услуги"
+              />
+            </label>
+          ) : null}
           {services.length === 0 ? (
             <div className="callout" role="status">
               Список услуг не загрузился. Откройте «Услуги» и проверьте каталог.
             </div>
+          ) : visibleServices.length === 0 ? (
+            <div className="callout" role="status">
+              Услуги по такому запросу не найдены.
+            </div>
           ) : (
-            <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
-              {services.map((s) => (
-                <li key={s.id}>
+            <ul className={isMaster ? "booking-selector__list" : undefined}
+                style={isMaster ? undefined : { listStyle: "none", padding: 0, margin: 0 }}>
+              {visibleServices.map((service) => (
+                <li key={service.id}>
                   <button
                     type="button"
                     className="sheet__item"
@@ -934,16 +1019,17 @@ export function NewBookingForm({
                       dispatch({
                         type: "service/set",
                         service: {
-                          id: s.id,
-                          name: s.name,
-                          duration_min: s.duration_min ?? 0,
+                          id: service.id,
+                          name: service.name,
+                          duration_min: service.duration_min ?? 0,
                         },
                       });
+                      setServiceQuery("");
                       setSheet(null);
                     }}
                   >
-                    {s.name}
-                    {s.duration_min ? ` · ${s.duration_min} мин` : ""}
+                    {service.name}
+                    {service.duration_min ? ` · ${service.duration_min} мин` : ""}
                   </button>
                 </li>
               ))}

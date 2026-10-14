@@ -307,6 +307,34 @@ def _erase_zone_memory_on_withdrawal(bot_user: "BotUser", consent_type: str) -> 
         return 0
 
 
+def _drop_plan_proposals_on_withdrawal(bot_user: "BotUser", consent_type: str) -> int:
+    """Отозвано согласие на хранение — несохранённое предложение плана уходит.
+
+    DRF-2967. Стоит в :func:`withdraw`, самой нижней двери отзыва, рядом со
+    стиранием зон: так его получает любой путь отзыва.
+
+    Согласие держится на человеке, а не на оболочке, и отзыв на любой
+    оболочке закрывает человека целиком (:func:`has_person_consent`: последний
+    отзыв позже любой действующей записи). Поэтому предложение уходит из
+    разговоров ВСЕХ его оболочек, а отдельной проверки «осталось ли согласие
+    где-то ещё» здесь нет — сразу после отзыва ответ на неё всегда «нет».
+    Сохранённый план отзыв не уничтожает (решение владельца) — он в каталоге
+    и сюда не относится.
+
+    Отзыв не откатывается и не падает из-за очистки: помощник сам никогда не
+    бросает, а использование предложения уже остановлено гейтом плана.
+    """
+    if consent_type != ConsentRecord.ConsentType.PERSONAL_DATA.value:
+        return 0
+    try:
+        from apps.conversations.model_history import clear_plan_proposals_for_person
+
+        return clear_plan_proposals_for_person(bot_user)
+    except Exception:  # noqa: BLE001 — очистка не откатывает отзыв; см. докстринг
+        logger.exception("consent.withdraw.plan_proposals_drop_failed bot_user=%s", bot_user.id)
+        return 0
+
+
 def withdraw(
     bot_user: "BotUser",
     *,
@@ -409,6 +437,7 @@ def withdraw(
             )
 
     _erase_zone_memory_on_withdrawal(bot_user, consent_type)
+    _drop_plan_proposals_on_withdrawal(bot_user, consent_type)
 
     transaction.on_commit(_emit_withdraw)
     logger.info(

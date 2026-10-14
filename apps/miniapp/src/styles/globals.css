@@ -1501,6 +1501,48 @@ a {
   text-align: center;
 }
 
+
+.booking-detail__actions {
+  margin-top: var(--s-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+
+.booking-detail__reschedule {
+  padding: var(--s-4);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-lg);
+  background: var(--c-surface-1);
+}
+
+.booking-detail__reschedule h2 {
+  margin: 0;
+  font-size: var(--font-size-300);
+}
+
+.booking-detail__reschedule label {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+  font-size: var(--font-size-200);
+}
+
+.booking-detail__slot-list {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--s-2);
+}
+
+.booking-detail__reschedule-confirm {
+  padding-top: var(--s-2);
+  border-top: 1px solid var(--c-divider);
+}
+
+.booking-detail__reschedule-confirm p {
+  margin: 0 0 var(--s-2);
+}
+
 .m-card--tappable {
   cursor: pointer;
 }
@@ -2467,10 +2509,20 @@ a {
 
 .master-services__row {
   width: 100%;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: var(--s-2);
   color: inherit;
   font: inherit;
   text-align: left;
   cursor: pointer;
+}
+
+.master-services__row-chevron {
+  color: var(--c-text-secondary);
+  font-size: var(--font-size-200);
+  line-height: 1;
 }
 
 .master-services__row-pending {
@@ -2994,6 +3046,41 @@ a {
 
 .draft-row__value--set {
   font-weight: 600;
+}
+
+.booking-form__hint {
+  margin: 0 0 var(--s-2);
+  color: var(--c-text-secondary);
+  font-size: var(--font-size-100);
+}
+
+.booking-selector__list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.booking-selector__new {
+  width: 100%;
+  margin-top: var(--s-3);
+}
+
+.booking-conflict__context {
+  margin-top: var(--s-3);
+  padding: var(--s-3);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-md);
+  background: var(--c-surface-1);
+}
+
+.booking-conflict__context p {
+  margin: 0;
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+
+.booking-conflict__context p + p {
+  margin-top: var(--s-1);
 }
 
 /* Mark-unavailable bottom sheet ------------------------------------------- */
@@ -9212,6 +9299,25 @@ a {
   list-style: none;
   margin: 0;
   padding: 0;
+}
+
+.working-hours__requests {
+  margin: var(--s-4) 0;
+}
+
+.working-hours__request-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  list-style: none;
+  margin: var(--s-2) 0 0;
+  padding: 0;
+}
+
+.working-hours__request {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
 }
 
 .working-hours__item + .working-hours__item {

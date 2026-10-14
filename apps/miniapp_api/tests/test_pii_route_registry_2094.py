@@ -676,6 +676,57 @@ CUSTOMER_ROUTES: dict[str, Entry] = {
             "For every outcome other than PLAN the answer is the outcome name alone"
         ),
     ),
+    # --- Plan Engine saved plan (DRF-2876, own) -------------------------
+    "customer_plan_current": own(
+        "plan.plan_id",
+        "plan.steps[].step_id / label / why / booked_at",
+        "proposal.plan_id / replaces_plan_id",
+        "proposal.steps[].step_id / label / why",
+        "draft.token",
+        "draft.steps[].label / why",
+        via="apps.miniapp_api.views_plan_engine:saved_plan_payload",
+        note=(
+            "the caller's own saved plan, read from the catalog under their "
+            "external_user_id: the plan id and, per step, its id and the curated "
+            "client label of the step's capability (catalog vocabulary, one text for "
+            "everyone). No capability keys, no goal text, no name, phone or health "
+            "answers; `plan` is null when nothing is saved"
+        ),
+    ),
+    # --- Plan Engine: replace / keep (DRF-2876, none) --------------------
+    "customer_plan_replace": none(
+        "acknowledgement only — {'replaced': bool} after the catalog made the caller's own "
+        "proposal the plan in effect; the two plan ids from the body are not echoed",
+        via="apps.miniapp_api.views_plan_engine:customer_plan_replace",
+    ),
+    "customer_plan_step": own(
+        "token",
+        "options[].service_name / salon_name / salon_city / master_name / price / "
+        "duration_minutes / place_address / synthetic",
+        "option (the chosen one, same fields)",
+        "days[] / day",
+        "slots[]",
+        "booked_at",
+        via="apps.orchestrator.plan_step_card:option_view",
+        note=(
+            "the services the catalog offers for a step of the caller's own plan, the free "
+            "times of the option they picked and the time of the booking just made for them: "
+            "catalog vocabulary about salons and their staff (a master's public display "
+            "name, price, duration, the confirmed address of the place) plus the caller's "
+            "own booking time. No catalog ids of the service or the master, no client name, "
+            "phone or health answers"
+        ),
+    ),
+    "customer_plan_save": none(
+        "acknowledgement only — {'saved': true} after the caller's own unsaved proposal was "
+        "saved by the catalog; the card token from the body is not echoed",
+        via="apps.miniapp_api.views_plan_engine:customer_plan_save",
+    ),
+    "customer_plan_keep": none(
+        "acknowledgement only — {'kept': true} after the caller's own proposal was archived; "
+        "nothing about the plan or the person is returned",
+        via="apps.miniapp_api.views_plan_engine:customer_plan_keep",
+    ),
     # --- Plan Lite proposal (DRF-2123, План-A, own) ---------------------
     "customer_plan_lite_proposal": own(
         "proposal.goal_key",
