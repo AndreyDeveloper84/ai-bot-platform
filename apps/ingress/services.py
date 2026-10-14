@@ -164,7 +164,9 @@ def record_webhook(
     Args:
       channel: ``"max"``, ``"telegram"``, ``"web"``.
       external_event_id: The channel's own unique identifier.
-      raw_payload: Full untouched payload — preserved for replay.
+      raw_payload: Тело вебхука. В журнал ложится без содержимого
+                   аудио-вложений (DRF-1943, ``ingress.redaction``):
+                   ссылку на запись голосового не храним.
       channel_token: The token from the webhook headers, used to
                      resolve tenant.
 
@@ -196,6 +198,11 @@ def record_webhook(
     if erased is not None:
         row, created = erased, False
     else:
+        # DRF-1943 — «голос не храним»: ссылка на аудиофайл в журнал не идёт.
+        # Считается до ``try``: сбой здесь не должен выглядеть дедупом.
+        from apps.ingress.redaction import journal_body
+
+        journal_payload = journal_body(raw_payload)
         try:
             # transaction.atomic — without it, IntegrityError aborts the
             # surrounding test transaction and blows up the test runner.
@@ -204,7 +211,7 @@ def record_webhook(
                 row = WebhookJournal.objects.create(
                     channel=channel,
                     external_event_id=external_event_id,
-                    raw_payload=raw_payload,
+                    raw_payload=journal_payload,
                     resolved_tenant=tenant,
                     trace_id=trace_id,
                 )
