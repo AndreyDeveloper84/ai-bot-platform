@@ -53,13 +53,20 @@ class TestUmirayuNarrowing:
             "умираю как хочу этот маникюр",
             "умираю хочу кофе",
             "умираю как хочу на массаж",
-            # DRF-2684: a comma no longer raises the crisis reply.
-            "Умираю, хочу кофе.",
+            # DRF-2684 (B): пробел после «умираю» — гипербола; знак у «как→хочу»
+            # границы «умираю» не касается и исключение не снимает.
             "Умираю как, хочу этот маникюр.",
         ],
     )
     def test_hyperbole_not_crisis(self, text):
         assert evaluate_inbound(text).allowed is True
+
+    @pytest.mark.parametrize("text", ["Умираю, хочу кофе."])
+    def test_a_typed_mark_after_umirayu_is_a_crisis(self, text):
+        # DRF-2684 (B, решение владельца): знак сразу после «умираю» в НАБРАННОМ
+        # тексте снова даёт кризис. Полный корпус — в test_umirayu_hyperbole_2684.py.
+        assert evaluate_inbound(text).allowed is False
+        assert evaluate_inbound(text).verdict == "handoff"
 
     @pytest.mark.parametrize(
         "text",

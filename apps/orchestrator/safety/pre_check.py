@@ -52,11 +52,23 @@ from __future__ import annotations
 
 import logging
 import re
+import sys
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
 from django.conf import settings
+
+# DRF-2684: the crisis patterns below use possessive quantifiers (``*+``,
+# ``++``, ``{m,n}+``), available only on CPython 3.11+. On an older runtime
+# ``re.compile`` raises and this single safety net would be unusable — refuse
+# to load a degraded gate (fail-closed) rather than run one.
+if sys.version_info < (3, 11):  # pragma: no cover - deployment guard
+    raise RuntimeError(
+        "safety pre_check requires Python >= 3.11 (possessive quantifiers in "
+        f"the crisis patterns); running {sys.version_info.major}."
+        f"{sys.version_info.minor} would load a degraded safety gate (DRF-2684)."
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -247,7 +259,11 @@ _ONLY_QUESTIONS_FOLLOW = (
     rf"(?:[^{_SENTENCE_END}]++\?[{_SENTENCE_END}\s]*+)*+\Z"
 )
 _UMIRAYU_HYPERBOLE = (
-    rf"{_GAP}(?:(?:как(?:{_GAP}же)?|так){_GAP})?хочу\b"
+    # DRF-2684 (owner decision, option B): only WHITESPACE joins «умираю» to the
+    # «(как/так) хочу» opener — a typed mark (comma, dash, «.») right after
+    # «умираю» keeps the crisis reply. Voice (punctuation stripped) and
+    # typed-with-space stay exempt; «Умираю, хочу кофе» now alarms.
+    rf"\s+(?:(?:как(?:{_GAP}же)?|так){_GAP})?хочу\b"
     rf"(?!.{{0,{_UMIRAYU_WINDOW}}}{_DISTRESS_NEAR})"
     rf"{_GAP}(?:{_WANT_FILLER}{_GAP}){{0,3}}{_BENIGN_WANT}\b{_ONLY_QUESTIONS_FOLLOW}"
 )

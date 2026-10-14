@@ -159,15 +159,16 @@ def test_strip_never_turns_a_stop_into_a_pass() -> None:
     assert passed_through == []
 
 
-def test_hyperbole_reads_the_same_with_and_without_marks() -> None:
-    # До DRF-2684 печатный текст с запятой давал тревогу, копия — нет: это была
-    # единственная вещь, которую копия ослабляла. Теперь вердикт один.
+def test_a_typed_mark_after_umirayu_makes_the_raw_stricter_than_the_copy() -> None:
+    # DRF-2684 (B, решение владельца): знак сразу после «умираю» в НАБРАННОМ тексте
+    # снова даёт кризис, а копия для голоса знак теряет и остаётся гиперболой. Здесь
+    # сырой текст СТРОЖЕ копии — обратная сторона того же зазора знаков (DRF-2922).
     for text in (
         "Умираю, хочу кофе.",
         "Умираю, как хочу этот маникюр!",
         "Умираю, как хочу на массаж.",
     ):
-        assert pre_check(text).verdict == SafetyVerdict.ALLOW
+        assert pre_check(text).verdict == SafetyVerdict.HANDOFF
         assert pre_check(strip_for_gate(text)).verdict == SafetyVerdict.ALLOW
 
 

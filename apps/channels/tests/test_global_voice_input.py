@@ -197,18 +197,20 @@ class TestGlobalVoice:
             concierge.call_args.args[0] == "Умираю, хочу кофе."
         )  # модели — оригинал, не копия без знаков
 
-    def test_k19_same_transcript_passes_without_the_copy_too(
+    def test_k19_a_typed_comma_stops_without_the_copy(
         self, sent, fake_redis, concierge, settings
     ):
-        # DRF-2684 (K19-А): правило «умираю» само не замечает знаков. До правки
-        # при выключенном флаге эта же расшифровка давала кризисный ответ.
+        # DRF-2684 (B, решение владельца): знак сразу после «умираю» снова даёт
+        # кризис. С выключенным флагом (без копии) гейт видит сырой знак — и эта
+        # расшифровка с запятой получает кризисный ответ, модель не вызывается.
+        # Копия (флаг включён) знак снимает и пропускает — см. ..._with_strip выше.
         settings.VOICE_GATE_STRIP_PUNCT = False
         _provider("Умираю, хочу кофе.")
         with patch(_DOWNLOAD, return_value=ogg_of(2)):
             max_handler.handle_global_max_event(_msg(user_id=70005, attachments=[AUDIO]))
-        assert concierge.call_count == 1
-        assert concierge.call_args.args[0] == "Умираю, хочу кофе."
-        assert Message.all_tenants.filter(action_type="safety_pre_check").count() == 0
+        assert [c["text"] for c in sent] == [CRISIS_REPLY_TEXT]
+        assert Message.all_tenants.filter(action_type="safety_pre_check").count() == 1
+        concierge.assert_not_called()
 
     @pytest.mark.parametrize(("user_id", "strip"), [(70015, True), (70016, False)])
     def test_k19_a_crisis_behind_the_hyperbole_stops_with_and_without_the_copy(

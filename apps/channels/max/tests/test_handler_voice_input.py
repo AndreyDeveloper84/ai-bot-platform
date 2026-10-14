@@ -279,19 +279,19 @@ class TestSafety:
         assert assistant[0].action_type != "safety_pre_check"
         assert [m.content for m in _messages(tenant, "user")] == ["Умираю, хочу кофе."]
 
-    def test_k19_same_transcript_passes_without_the_copy_too(
+    def test_k19_a_typed_comma_stops_without_the_copy(
         self, tenant, mock_send, fake_redis, settings
     ):
-        # DRF-2684 (K19-А): правило «умираю» само не замечает знаков. До правки
-        # при выключенном флаге эта же расшифровка давала кризисный ответ.
+        # DRF-2684 (B, решение владельца): знак сразу после «умираю» снова даёт
+        # кризис. С выключенным флагом (без копии) гейт видит сырой знак — и эта
+        # расшифровка с запятой получает кризисный ответ. Копия (флаг включён) знак
+        # снимает и пропускает — см. test_k19_comma_hyperbole_passes_the_gate_with_strip.
         settings.VOICE_GATE_STRIP_PUNCT = False
         _provider("Умираю, хочу кофе.")
         with patch(_DOWNLOAD, return_value=ogg_of(2)):
             _run(tenant, _payload(attachments=[AUDIO]))
-        assistant = _messages(tenant, "assistant")
-        assert len(assistant) == 1
-        assert assistant[0].action_type != "safety_pre_check"
-        assert [m.content for m in _messages(tenant, "user")] == ["Умираю, хочу кофе."]
+        assert [m.action_type for m in _messages(tenant, "assistant")] == ["safety_pre_check"]
+        assert [c["text"] for c in mock_send] == [CRISIS_REPLY_TEXT]
 
     def test_k19_a_crisis_behind_the_hyperbole_stops_without_the_copy(
         self, tenant, mock_send, fake_redis, settings
