@@ -146,6 +146,7 @@ class BookingDetail:
     status: str
     temporal_state: str
     minutes_until: int | None
+    appointment_version: int | None
     checked_at: datetime
 
     def to_dict(self, tz) -> dict[str, Any]:
@@ -167,6 +168,7 @@ class BookingDetail:
             "status": self.status,
             "temporal_state": self.temporal_state,
             "minutes_until": self.minutes_until,
+            "appointment_version": self.appointment_version,
             "checked_at": _iso(self.checked_at),
         }
 
@@ -276,6 +278,7 @@ def booking_detail(
         status=status,
         temporal_state=state,
         minutes_until=minutes_until,
+        appointment_version=proxy.appointment_version,
         checked_at=now,
     )
 

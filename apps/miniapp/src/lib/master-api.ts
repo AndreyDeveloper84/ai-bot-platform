@@ -37,10 +37,10 @@ interface ErrorBody {
   details?: Record<string, unknown>;
 }
 
-export async function request<T>(
+async function fetchMaster(
   path: string,
   init: RequestInit = {},
-): Promise<T> {
+): Promise<Response> {
   const headers = new Headers(init.headers);
   applyIdentityHeaders(headers);
   // Don't auto-set Content-Type for FormData (the browser writes the
@@ -51,8 +51,14 @@ export async function request<T>(
   if (body && !isFormData && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
   }
+  return await fetch(`${MASTER_API_BASE}${path}`, { ...init, headers });
+}
 
-  const res = await fetch(`${MASTER_API_BASE}${path}`, { ...init, headers });
+export async function request<T>(
+  path: string,
+  init: RequestInit = {},
+): Promise<T> {
+  const res = await fetchMaster(path, init);
   if (!res.ok) {
     let parsed: ErrorBody = { error: "http_error", detail: res.statusText };
     try {
@@ -310,6 +316,8 @@ export interface MasterBookingDetail {
   temporal_state: BookingTemporalState;
   /** Только для upcoming, по часам сервера; иначе null. */
   minutes_until: number | null;
+  /** Версия canonical appointment, которую описывает этот readback. */
+  appointment_version: number | null;
   /** Часы сервера в tz тенанта — точка отсчёта для «Сегодня/Завтра». */
   checked_at: string;
 }
@@ -323,6 +331,75 @@ export const getMasterBooking = (
     method: "GET",
     signal: opts.signal,
   });
+
+
+export type MasterBookingAction =
+  | "acknowledge"
+  | "cancel"
+  | "complete"
+  | "no-show"
+  | "reschedule";
+
+export interface MasterBookingActionBody {
+  action: MasterBookingAction;
+  expected_version?: number;
+  reason?: string;
+  new_start_datetime?: string;
+}
+
+export interface MasterBookingActionResult {
+  outcome: "committed" | "conflict" | "blocked" | "pending";
+  reason_code?: "stale_version" | "state_changed" | "version_unknown" | "action_unavailable" | "result_pending";
+  appointment_id?: string;
+  status?: string;
+  version?: number;
+  start_at?: string;
+}
+
+/**
+ * Consequential write for the master's own appointment.
+ *
+ * 202/409 are domain outcomes, not transport failures. A network failure or
+ * unreadable response is treated as unknown/pending because the canonical
+ * write may already have committed; the caller must read back before another
+ * mutation attempt.
+ */
+export const actOnMasterBooking = async (
+  id: string,
+  body: MasterBookingActionBody,
+): Promise<MasterBookingActionResult> => {
+  let res: Response;
+  try {
+    res = await fetchMaster(`/bookings/${encodeURIComponent(id)}/action`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+  } catch {
+    return { outcome: "pending", reason_code: "result_pending" };
+  }
+
+  try {
+    const data = (await res.json()) as Partial<MasterBookingActionResult> & {
+      error?: string;
+      detail?: string;
+    };
+
+    if (res.status === 403) {
+      throw new ApiError(403, data.error ?? "forbidden", data.detail ?? "action unavailable");
+    }
+    if (res.status === 404) {
+      throw new ApiError(404, data.error ?? "not_found", data.detail ?? "booking not found");
+    }
+    if (data.outcome) return data as MasterBookingActionResult;
+    if (!res.ok) {
+      return { outcome: "blocked", reason_code: "action_unavailable" };
+    }
+    return { outcome: "pending", reason_code: "result_pending" };
+  } catch (err) {
+    if (err instanceof ApiError) throw err;
+    return { outcome: "pending", reason_code: "result_pending" };
+  }
+};
 
 // --- M4 master profile (read-by-self + edit own bio/photo) --------------
 // Mirrors apps/master_api/views.py::me() + onboarding_profile() (PATCH).

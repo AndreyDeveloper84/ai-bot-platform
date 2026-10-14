@@ -23,6 +23,7 @@ vi.mock("../lib/master-api", async (importOriginal) => {
   const original = await importOriginal<typeof import("../lib/master-api")>();
   return {
     ...original,
+    getPendingAvailability: vi.fn(),
     getWorkingHours: vi.fn(),
     putWorkingHours: vi.fn(),
     requestAvailability: vi.fn(),
@@ -35,6 +36,7 @@ vi.mock("../lib/max-sdk", async (importOriginal) => {
 
 import { ApiError } from "../lib/api";
 import {
+  getPendingAvailability,
   getWorkingHours,
   putWorkingHours,
   type WorkingHoursDay,
@@ -50,6 +52,7 @@ import {
   CONTINUE_LATER_LABEL,
   SAVED_MESSAGE,
   SEMANTIC_NOTE,
+  availabilityWindowText,
   conflictsFrom,
   dayError,
   defaultInterval,
@@ -61,6 +64,7 @@ import {
 } from "./MasterWorkingHoursScreen";
 
 const mockedGet = vi.mocked(getWorkingHours);
+const mockedPending = vi.mocked(getPendingAvailability);
 const mockedPut = vi.mocked(putWorkingHours);
 
 function day(d: number, extra: Partial<WorkingHoursDay> = {}): WorkingHoursDay {
@@ -118,6 +122,7 @@ async function openDay(index: number) {
 beforeEach(() => {
   vi.clearAllMocks();
   mockedGet.mockResolvedValue(EMPTY);
+  mockedPending.mockResolvedValue({ items: [] });
   mockedPut.mockImplementation(async (schedule) => ({ ...EMPTY, schedule, schedule_confirmed: true }));
 });
 
@@ -127,7 +132,8 @@ describe("неделя", () => {
     await screen.findByRole("heading", { name: HOURS_COPY.title });
     const rows = screen.getAllByRole("button", { name: /^(Понедельник|Вторник|Среда|Четверг|Пятница|Суббота|Воскресенье)/ });
     expect(rows).toHaveLength(7);
-    expect(rows.every((r) => r.textContent?.includes(HOURS_COPY.dayOff))).toBe(true);
+    expect(rows.every((r) => r.textContent?.includes(HOURS_COPY.dayNotSet))).toBe(true);
+    expect(document.body.textContent).not.toMatch(/Выходной/);
     expect(document.body.textContent).not.toMatch(/10:00|19:00/);
     // Семантика §13.2: верная фраза есть, запрещённой нет.
     expect(screen.getByText(SEMANTIC_NOTE)).toBeInTheDocument();
@@ -298,6 +304,33 @@ describe("правила §13.3 и чистые помощники", () => {
     expect(
       conflictsFrom(new ApiError(409, "x", "y", { conflicts: [noDuration] })),
     ).toEqual([]);
+  });
+
+  it("availability lifecycle formats salon wall-clock without raw ISO/device conversion", () => {
+    const item = {
+      request_id: "r-1",
+      requested_start: "2026-10-12T10:00:00+03:00",
+      requested_end: "2026-10-12T14:00:00+03:00",
+      reason_class: "personal",
+      reason_text: "",
+      status: "pending",
+      decided_at: null,
+      decided_by_name: null,
+      rejection_reason: null,
+    };
+    expect(availabilityWindowText(item)).toBe("12 октября · 10:00–14:00");
+    expect(
+      availabilityWindowText({
+        ...item,
+        requested_end: "2026-10-13T09:30:00+03:00",
+      }),
+    ).toBe("12 октября · 10:00 — 13 октября · 09:30");
+    expect(
+      availabilityWindowText({
+        ...item,
+        requested_start: "broken",
+      }),
+    ).toBe("Период не удалось прочитать");
   });
 
   it("horizonFrom называет горизонт, когда сервер его прислал", () => {
