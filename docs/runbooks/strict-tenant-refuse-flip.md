@@ -86,6 +86,16 @@ redis-cli XDEL ingress:max:dlq <entry_id>
 The reaper never auto-replays — operator decides per entry. Auto-replay
 with the same payload would just re-fail at the dispatch layer.
 
+**Voice entries cannot be replayed (DRF-1943).** A failed entry whose body
+carries a voice attachment (`audio`, `video`, an audio/video `file`) is
+moved to `<stream>:dlq` by the consumer at once, and every DLQ copy —
+the consumer's and the reaper's — has the attachment replaced with
+`{"type": "audio", "redacted": "voice"}` and is marked
+`__reaper.voice_redacted=1`. There is no link left to download the
+recording from (MAX serves it for 24 h only anyway), so re-XADD of such a
+copy produces a voice turn with nothing to transcribe. The failure cause
+stays in `__reaper.classification`.
+
 ## Flip sequence (operator)
 
 When the pre-flip checklist below is satisfied:

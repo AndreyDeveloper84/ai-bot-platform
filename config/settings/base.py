@@ -289,7 +289,8 @@ STRICT_TENANT_SCOPE = os.environ.get("STRICT_TENANT_SCOPE", "audit")
 #           handler exception (no XACK; entry stays in the PEL for
 #           manual escalation). **No automatic DLQ retry is wired**
 #           — XAUTOCLAIM reaper is a follow-up; PEL retention is the
-#           current contract.
+#           current contract. Exception (DRF-1943): an entry carrying a
+#           voice attachment goes to <stream>:dlq at once, without the link.
 #
 # Flip to True only after the dev-side soak shows zero
 # ``worker.tenant_required_missing`` events in audit for a clean

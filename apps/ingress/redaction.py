@@ -26,13 +26,22 @@
 если по имени это аудио или видео либо имя неизвестно. Бот такие вложения не
 распознаёт, ссылка в журнале ему не нужна вовсе.
 
+Упавшие записи потока (DRF-1943, хвост): если обработчик воркера упал,
+запись не удаляется, а с ней — ссылка. Запись с голосовым воркер сразу
+переносит в ``<stream>:dlq`` копией без ссылки (``workers.consumer``), а
+разборщик зависших пишет в DLQ тело через то же правило
+(``workers.reaper``). Помощник для поля ``data`` записи —
+:func:`stream_data_without_voice`.
+
 Чего это НЕ покрывает (названо, а не скрыто): ``file`` с именем документа
 (``.pdf``, ``.docx`` …) и фото еды (``image``) — решения владельца о них не
-было.
+было; записи, которые воркер прочитал, но не успел обработать (убит посреди
+пачки), — до разборщика или до обрезки через ``INGRESS_RAW_RETENTION_HOURS``.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any
 
@@ -103,3 +112,33 @@ def journal_body(payload: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(body, dict):
         return dict(REDACTION_FAILED)
     return body
+
+
+def stream_data_without_voice(data: Any) -> tuple[Any, bool]:
+    """Поле ``data`` записи потока Redis без голосовых ссылок. Никогда не бросает.
+
+    Возвращает ``(значение, вырезано_ли)``. ``data`` — JSON тела вебхука,
+    его кладёт ``streams.enqueue``. Значение меняется, только если вырезание
+    что-то убрало: признак «голос» — это «правило сработало», а не «нашлось
+    вложение ``audio``», иначе уже вырезанная пометка ``{"redacted": "voice"}``
+    снова читалась бы голосом.
+
+    Не строка, пустое или не JSON — возвращается как есть: такое поле кладёт
+    не ``enqueue`` (учения, повреждённая запись), и судить, голос ли там, не
+    по чему. Сбой самого вырезания на разобранном теле — заглушка, как у
+    журнала: в сторону «не хранить».
+    """
+    if not isinstance(data, str) or not data:
+        return data, False
+    try:
+        parsed = json.loads(data)
+    except ValueError:
+        return data, False
+    try:
+        redacted = without_voice_links(parsed)
+    except Exception as exc:  # noqa: BLE001 — копия без ссылки важнее копии целиком
+        logger.warning("ingress.stream.redaction_failed err=%s", type(exc).__name__)
+        return json.dumps(REDACTION_FAILED), True
+    if redacted == parsed:
+        return data, False
+    return json.dumps(redacted, ensure_ascii=False, default=str), True
