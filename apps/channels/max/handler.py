@@ -380,8 +380,15 @@ def _last_user_content(
     try:
         from apps.conversations.models import Message
 
+        from apps.conversations.model_history import after_model_cutoff
+
+        # DRF-2700 — реплика до отсечки модели не отдаётся и повтором: сбой
+        # чтения отсечки уходит в ``except`` ниже («повторять нечего»).
         last = (
-            Message.all_tenants.filter(conversation_id=conversation_id, role="user")
+            after_model_cutoff(
+                Message.all_tenants.filter(conversation_id=conversation_id, role="user"),
+                conversation.bot_user,
+            )
             .order_by("-created_at")
             .values_list("id", "content")
             .first()
@@ -435,8 +442,15 @@ def _last_clarification_offer(conversation: Any) -> tuple[str, list[str]]:
     try:
         from apps.conversations.models import Message
 
+        from apps.conversations.model_history import after_model_cutoff
+
+        # DRF-2700 — вопрос, заданный до отсечки, заново не поднимается: сбой
+        # чтения отсечки уходит в ``except`` ниже («вопроса нет»).
         rows = (
-            Message.all_tenants.filter(conversation_id=conversation_id, role="assistant")
+            after_model_cutoff(
+                Message.all_tenants.filter(conversation_id=conversation_id, role="assistant"),
+                conversation.bot_user,
+            )
             .order_by("-created_at")
             .values_list("content", "action_data")[:_CLARIFY_LOOKBACK]
         )
@@ -1810,6 +1824,17 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
             channel=event.channel,
             channel_user_id=event.channel_user_id,
         )
+    # DRF-1885 — ход открывает новую ревизию DecisionReadiness и пишет в неё
+    # вердикт pre_check. Ответ не меняет. Читатели: теневой движок
+    # (DRE_SHADOW_ENABLED) и действия с планом вне хода (PLAN_ENGINE_ENABLED);
+    # без обоих флагов — ноль работы. Не бросает.
+    #
+    # DRF-2885 — запись стоит ДО первого выхода из хода: ход заблокированного
+    # человека и ход под оператором тоже несут вердикт, и экран плана не
+    # должен прочесть вместо него прежний.
+    from apps.orchestrator.dr_shadow import record_turn_safety
+
+    turn_safety_recorded = record_turn_safety(conversation, safety)
     if blocked_at is not None and not reaches_through_handoff(safety):
         _answer_blocked(
             conversation=conversation,
@@ -1929,15 +1954,25 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
     # message the tap came from instead of following it.
     clarify_redraw = False
     was_memory_command = False
+    memory_command_erased = False
     concierge_turn_ran = False
-    # ``safety`` посчитан выше, до проверки глушения handoff (DRF-2213 Q1).
-    # DRF-1885 — ход открывает новую ревизию DecisionReadiness и пишет в неё
-    # вердикт pre_check. Ответ не меняет: решение ниже принимает прежний
-    # путь; читатель вердикта сегодня — теневой движок (флаг
-    # DRE_SHADOW_ENABLED), без флага — ноль работы. Не бросает.
-    from apps.orchestrator.dr_shadow import record_turn_safety
+    # ``safety`` посчитан выше, до проверки глушения handoff (DRF-2213 Q1);
+    # там же, до первого выхода из хода, он записан (``turn_safety_recorded``).
 
-    record_turn_safety(conversation, safety)
+    def _plan_turn_safety() -> Any:
+        # DRF-2885 — тройка для действий с планом: вердикт и ревизия ЭТОГО
+        # хода. Зовётся лениво и только путём плана — на остальных ходах
+        # ревизия, как и раньше, открывается одним теневым контуром.
+        from apps.orchestrator.safety.plan_turn import plan_turn_safety
+
+        return plan_turn_safety(conversation, safety, recorded=turn_safety_recorded)
+
+    # Тот же источник — на объекте разговора: до инструмента модели
+    # «составить план» он доезжает вместе с ним, без новых аргументов.
+    from apps.orchestrator.safety.plan_turn import attach_turn_safety
+
+    attach_turn_safety(conversation, _plan_turn_safety)
+
     if not safety.allowed:
         _emit_safety_shortcircuit(bot_user, safety, is_global=True)
         reply = DiscoveryReply(text=safety.reply_text)
@@ -2390,6 +2425,7 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
         #      знаешь», «забудь {X}», «забудь всё». Best-effort — a failure
         #      degrades to normal discovery, never aborts the turn.
         mem_reply: DiscoveryReply | None = None
+        memory_command_erased = False
         if ayla_user_id is not None:
             try:
                 cmd = handle_memory_command(
@@ -2407,6 +2443,7 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
                     # is the state the owner ruling was opened against.
                     mem_reply = DiscoveryReply(text=cmd.text, action_data=cmd.action_data)
                     assistant_action_type = cmd.action_type
+                    memory_command_erased = cmd.erased
             except Exception:  # noqa: BLE001 — memory commands must never break the turn
                 logger.exception(
                     "channels.max.global.memory_command_failed bot_user=%s", bot_user.id
@@ -2513,6 +2550,7 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
                         bot_user=bot_user,
                         conversation=conversation,
                         trace_id=str(trace_id) if trace_id else "",
+                        plan_turn_safety=_plan_turn_safety,
                     )
                 except Exception:  # noqa: BLE001
                     logger.exception(
@@ -2709,6 +2747,17 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
                             bot_user.id,
                         )
                         nutrition_block = ""
+                    # DRF-2808 — цель словами человека на КАЖДОМ ходе, под тем же
+                    # гейтом памяти; кладётся рядом с блоком памяти, кроме хода,
+                    # где блок питания уже несёт ту же строку как рамку чисел.
+                    from apps.orchestrator.goal_context import (
+                        build_goal_block,
+                        merge_goal_into_memory,
+                    )
+
+                    memory_block = merge_goal_into_memory(
+                        memory_block, build_goal_block(bot_user), nutrition_block
+                    )
                     if nutrition_block:
                         # Cost attribution (DRF-1211): the block grows the prompt,
                         # and the growth lands in AIRequestMetric.llm_tokens_input.
@@ -3067,6 +3116,12 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
                 type(exc).__name__,
             )
     short_term.append(conversation.id, role="assistant", content=reply.text)
+    if memory_command_erased:
+        # DRF-2700 — ответ «забыла, что ты …» повторяет стёртое: отсечка ставится
+        # после его записи, окно Redis этого разговора очищается.
+        from apps.conversations.model_history import close_forget_turn
+
+        close_forget_turn(bot_user, conversation)
     if assistant_action_type == "safety_pre_check":
         # Crisis reply — alert loudly on delivery failure (#1082).
         _deliver_crisis_reply(

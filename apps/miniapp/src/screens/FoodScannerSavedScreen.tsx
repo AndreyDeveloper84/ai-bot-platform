@@ -58,9 +58,10 @@ export function FoodScannerSavedScreen() {
   const dishName = state.dishName ?? "Запись";
   const recapCalories = state.calories ?? null;
   // Default ED-mode TRUE — defence-in-depth for deep-link refresh
-  // (friendly CR #5). Router state is lost on refresh; if a customer
-  // with eating_disorder hits /saved fresh, we must NOT leak numbers
-  // until fetchHealthFlags confirms otherwise.
+  // (friendly CR #5). Router state is lost on refresh; if a customer who
+  // chose «Без чисел» (DRF-2766; before 04.10 — the eating_disorder flag)
+  // hits /saved fresh, we must NOT leak numbers until the diary's own
+  // `nutrition_numbers_hidden` says otherwise.
   const [edMode, setEdMode] = useState<boolean>(
     state.edMode === undefined ? true : Boolean(state.edMode),
   );

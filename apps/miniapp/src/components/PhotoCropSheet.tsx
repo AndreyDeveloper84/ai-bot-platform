@@ -41,9 +41,11 @@ interface Props {
   onReplace: () => void;
   onCancel: () => void;
   busy?: boolean;
+  /** DRF-2881 — почему сохранение не удалось; показывается внутри шторки. */
+  error?: string;
 }
 
-export function PhotoCropSheet({ file, onApply, onReplace, onCancel, busy }: Props) {
+export function PhotoCropSheet({ file, onApply, onReplace, onCancel, busy, error }: Props) {
   const [image, setImage] = useState<HTMLImageElement | null>(null);
   const [zoom, setZoom] = useState(1);
   const [rotation, setRotation] = useState(0);
@@ -114,9 +116,13 @@ export function PhotoCropSheet({ file, onApply, onReplace, onCancel, busy }: Pro
           />
         </label>
 
-        {err ? (
+        {/* DRF-2881 — ошибка сохранения показывается ЗДЕСЬ: шторка закрывает
+            экран, и сообщение под ней человек не видит вовсе. Своя ошибка
+            шторки (не открылось / не обрезалось) важнее — она о том, что на
+            экране сейчас. */}
+        {err || error ? (
           <p className="master-profile__error" role="alert">
-            {err}
+            {err || error}
           </p>
         ) : null}
 

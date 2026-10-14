@@ -5,6 +5,7 @@ from __future__ import annotations
 from decimal import Decimal
 from uuid import uuid4
 
+from apps.catalog.rating import NO_REVIEWS_LABEL
 from apps.llm.protocol import CompletionResult, ToolCall
 from apps.marketplace.dto import MasterCard
 from apps.orchestrator import discovery
@@ -246,6 +247,7 @@ class TestEmptyRatingIsNotShown:
             city=overrides.pop("city", "Пенза"),
             service_id=overrides.pop("service_id", None),
             service_name=overrides.pop("service_name", ""),
+            review_count=overrides.pop("review_count", 0),
         )
         assert not overrides, overrides
         return discovery._render_master_cards([card]).text.splitlines()[1]
@@ -257,7 +259,23 @@ class TestEmptyRatingIsNotShown:
         assert "★" not in self._line(rating=None)
 
     def test_real_rating_still_shown(self) -> None:
-        assert "★ 4.80" in self._line(rating=Decimal("4.80"))
+        """DRF-2875 — оценка показывается вместе с числом отзывов за ней."""
+        line = self._line(rating=Decimal("4.80"), review_count=12)
+        assert "★ 4.80 (12 отзывов)" in line
+        assert NO_REVIEWS_LABEL not in line
+
+    def test_rating_without_reviews_is_not_shown(self) -> None:
+        """Решение владельца 07.10, п.20. На пилоте: «★ 4.9» при нуле отзывов —
+        импортированная оценка, выданная за рейтинг Ayla."""
+        # Положительная пара на том же рендере: с отзывами та же оценка видна.
+        assert "★ 4.90" in self._line(rating=Decimal("4.90"), review_count=3)
+        line = self._line(rating=Decimal("4.90"), review_count=0)
+        assert "★" not in line
+        assert "4.90" not in line
+        assert line == f"• Архипкин Денис · {NO_REVIEWS_LABEL} · Пенза"
+
+    def test_owner_words_verbatim(self) -> None:
+        assert NO_REVIEWS_LABEL == "Пока нет отзывов"
 
     def test_zero_rating_leaves_no_dangling_separator(self) -> None:
         """The em-dash lesson: an omitted part must not leave its glue.
@@ -267,7 +285,7 @@ class TestEmptyRatingIsNotShown:
         that regressed before.
         """
         line = self._line(rating=Decimal("0.00"), specialization="", service_id=None, city="")
-        assert line == "• Архипкин Денис"
+        assert line == f"• Архипкин Денис · {NO_REVIEWS_LABEL}"
 
     def test_no_double_separator_in_any_combination(self) -> None:
         """All 16 on/off combinations of spec × service × rating × city."""
@@ -295,7 +313,7 @@ class TestEmptyRatingIsNotShown:
         on the pilot; same bug shape, one character away."""
         line = self._line(service_id=uuid4(), service_name="", city="Пенза")
         assert " ·  " not in line
-        assert line == "• Архипкин Денис · Пенза"
+        assert line == f"• Архипкин Денис · {NO_REVIEWS_LABEL} · Пенза"
 
     def test_pilot_reproduction_all_four_cards(self, monkeypatch) -> None:
         """End-to-end through the tool path, exactly as the pilot answered."""

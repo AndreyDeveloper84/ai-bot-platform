@@ -23,6 +23,8 @@ unlinked), ``ERROR`` (upstream failure, logged), ``OK`` (payload set).
 
 from __future__ import annotations
 
+import copy
+import dataclasses
 import logging
 import uuid
 from dataclasses import dataclass
@@ -113,6 +115,106 @@ def _gate(bot_user) -> uuid.UUID | None:
     return ayla_user_id
 
 
+def memory_green_open(bot_user) -> bool:
+    """Открыт ли гейт ``memory_green`` для человека — без похода за префами.
+
+    Для поверхностей, которые кладут в промпт заявленное человеком, но не
+    декларированные префы каталога (DRF-2808, цель): гейт тот же, что у
+    :func:`get_declared_prefs`, и закрыт так же — нет связки или согласия.
+    """
+    return _gate(bot_user) is not None
+
+
+# ─── DRF-2700: поле анкеты, которое забыто, но не очищается ─────────────────
+#
+# «Забудь про бюджет» стирает запись бота, а в анкете Ayla цена остаётся: у
+# контракта нет значения «очистить цену» (``null`` отвергается, пустая строка
+# ломает числовое поле). Замер 07.10 на ``4d41806f``: бот отвечал «забыла», а
+# «3000» продолжало уходить модели и показываться в «покажи, что знаешь».
+#
+# Пока контракт не умеет очищать, забытое поле не ЧИТАЕТСЯ: имя поля лежит в
+# ``UserPersonalContext.declared_fields_withheld``, и этот модуль — единственная
+# дверь чтения анкеты — вырезает его из ответа для всех потребителей разом.
+# Хранится имя поля, без значения. Человек назвал поле заново — оно снова
+# читается.
+
+
+def withhold_declared_fields(user_id: Any, fields: list[str]) -> None:
+    """Перестать читать эти поля анкеты, пока человек не назовёт их заново."""
+    from apps.identity.models import UserPersonalContext
+
+    if not user_id or not fields:
+        return
+    upc = UserPersonalContext.objects.filter(user_id=user_id).first()
+    if upc is None:
+        return
+    merged = sorted(set(upc.declared_fields_withheld or []) | set(fields))
+    if merged != list(upc.declared_fields_withheld or []):
+        UserPersonalContext.objects.filter(pk=upc.pk).update(declared_fields_withheld=merged)
+
+
+def unwithhold_declared_fields(user_id: Any, fields: list[str]) -> None:
+    """Снять отметку «не читать»: поле в анкете действительно очищено."""
+    from apps.identity.models import UserPersonalContext
+
+    if not user_id or not fields:
+        return
+    upc = UserPersonalContext.objects.filter(user_id=user_id).first()
+    if upc is None or not upc.declared_fields_withheld:
+        return
+    kept = [name for name in upc.declared_fields_withheld if name not in set(fields)]
+    if kept != list(upc.declared_fields_withheld):
+        UserPersonalContext.objects.filter(pk=upc.pk).update(declared_fields_withheld=kept)
+
+
+def _withheld(user_id: Any) -> set[str]:
+    """Имена забытых полей. Сбой чтения — «всё забыто»: анкета не открывается ошибкой."""
+    from apps.identity.models import UserPersonalContext
+
+    stored = (
+        UserPersonalContext.objects.filter(user_id=user_id)
+        .values_list("declared_fields_withheld", flat=True)
+        .first()
+    )
+    return {name for name in (stored or []) if isinstance(name, str)}
+
+
+def _without_withheld(user_id: Any, context: Any) -> Any:
+    """Тот же ответ анкеты без забытых полей."""
+    fields = getattr(context, "context", None)
+    if not isinstance(fields, dict):
+        return context
+    withheld = _withheld(user_id)
+    if not withheld or not (withheld & fields.keys()):
+        return context
+    kept = {name: value for name, value in fields.items() if name not in withheld}
+    raw = getattr(context, "raw", None)
+    if isinstance(raw, dict) and isinstance(raw.get("context"), dict):
+        raw = {**raw, "context": {k: v for k, v in raw["context"].items() if k not in withheld}}
+    if dataclasses.is_dataclass(context) and not isinstance(context, type):
+        return dataclasses.replace(context, context=kept, raw=raw if isinstance(raw, dict) else {})
+    clone = copy.copy(context)
+    clone.context = kept
+    return clone
+
+
+def _release_withheld(user_id: Any, updates: list[dict[str, Any]]) -> None:
+    """Поле, которому человек дал новое значение, снова читается."""
+    from apps.identity.models import UserPersonalContext
+
+    restated = {
+        str(update.get("field")) for update in updates if update.get("value") not in ("", [], None)
+    }
+    if not restated:
+        return
+    upc = UserPersonalContext.objects.filter(user_id=user_id).first()
+    if upc is None or not upc.declared_fields_withheld:
+        return
+    kept = [name for name in upc.declared_fields_withheld if name not in restated]
+    if kept != list(upc.declared_fields_withheld):
+        UserPersonalContext.objects.filter(pk=upc.pk).update(declared_fields_withheld=kept)
+
+
 def get_declared_prefs(
     bot_user,
     *,
@@ -127,9 +229,12 @@ def get_declared_prefs(
     try:
         return GatedResult(
             status=GateStatus.OK,
-            context=client.get_context(
-                ayla_user_id=str(ayla_user_id),
-                external_user_id=external_user_id_for(bot_user),
+            context=_without_withheld(
+                ayla_user_id,
+                client.get_context(
+                    ayla_user_id=str(ayla_user_id),
+                    external_user_id=external_user_id_for(bot_user),
+                ),
             ),
         )
     except PersonalContextError:
@@ -153,14 +258,14 @@ def patch_declared_prefs(
     owns = client is None
     client = client or PersonalContextHttpClient()
     try:
-        return GatedResult(
-            status=GateStatus.OK,
-            context=client.patch_context(
-                ayla_user_id=str(ayla_user_id),
-                external_user_id=external_user_id_for(bot_user),
-                updates=updates,
-            ),
+        patched = client.patch_context(
+            ayla_user_id=str(ayla_user_id),
+            external_user_id=external_user_id_for(bot_user),
+            updates=updates,
         )
+        # DRF-2700 — человек назвал поле заново: оно снова читается.
+        _release_withheld(ayla_user_id, updates)
+        return GatedResult(status=GateStatus.OK, context=_without_withheld(ayla_user_id, patched))
     except PersonalContextError:
         logger.exception("identity.personal_context.patch_failed")
         return GatedResult(status=GateStatus.ERROR)

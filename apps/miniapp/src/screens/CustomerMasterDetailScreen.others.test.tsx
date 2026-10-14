@@ -82,10 +82,14 @@ describe("число отзывов — только из данных", () => {
     expect(screen.getByLabelText("Рейтинг 4.9")).toBeInTheDocument();
   });
 
-  it("0 или отсутствие — скобок нет, рейтинг на месте", async () => {
+  // DRF-2875 — решение владельца 07.10, п.20. Раньше здесь держалось
+  // «скобок нет, рейтинг на месте»: «4.9» без единого отзыва.
+  it("0 отзывов — ни оценки, ни скобок: «Пока нет отзывов»", async () => {
     mockedMaster.mockResolvedValue(master({ review_count: 0 }) as never);
     renderScreen();
-    expect(await screen.findByLabelText("Рейтинг 4.9")).toBeInTheDocument();
+    expect(await screen.findByTestId("master-no-reviews")).toHaveTextContent("Пока нет отзывов");
+    expect(screen.queryByLabelText(/Рейтинг/)).toBeNull();
+    expect(screen.queryByText(/4\.9/)).toBeNull();
     expect(screen.queryByTestId("master-reviews")).toBeNull();
   });
 });

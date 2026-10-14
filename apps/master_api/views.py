@@ -947,6 +947,7 @@ def _catalog_profile_required(
     return wrapper
 
 
+@csrf_exempt
 @require_http_methods(["PATCH"])
 @require_master_init_data
 @_catalog_profile_required
@@ -2276,12 +2277,24 @@ def schedule(request: HttpRequest) -> HttpResponse:
             400,
         )
 
-    payload = build_schedule(
-        master,
-        from_date=from_date,
-        to_date=to_date,
-        now=dj_timezone.now(),
-    )
+    # DRF-2902 — рамку расписания держит каталог, и он вправе отказать: нет
+    # прав у того, от чьего имени читаем, салон не настроен, каталог недоступен.
+    # Дашборд и заявка на доступность этот отказ разбирают; здесь его не ловил
+    # никто, и мастер получал 500. Причина — в журнал, наружу одно имя.
+    try:
+        payload = build_schedule(
+            master,
+            from_date=from_date,
+            to_date=to_date,
+            now=dj_timezone.now(),
+        )
+    except SalonAPIError as exc:
+        logger.warning(
+            "master.schedule.frame_unreadable master=%s reason=%s",
+            master.id,
+            type(exc).__name__,
+        )
+        return _error("schedule_unavailable", "Расписание сейчас недоступно.", 503)
     return JsonResponse(payload.to_dict())
 
 
@@ -2675,6 +2688,7 @@ def payout_preview(request: HttpRequest) -> HttpResponse:
     return _billing_proxy_response(payout_preview_for_master(master))
 
 
+@csrf_exempt
 @require_http_methods(["POST"])
 @require_master_init_data
 def billing_pay_debt(request: HttpRequest) -> HttpResponse:
@@ -2716,6 +2730,7 @@ def billing_pay_debt(request: HttpRequest) -> HttpResponse:
     return _billing_proxy_response(pay_debt_for_master(master, return_url=return_url))
 
 
+@csrf_exempt
 @require_http_methods(["POST"])
 @require_master_init_data
 def billing_card_setup(request: HttpRequest) -> HttpResponse:

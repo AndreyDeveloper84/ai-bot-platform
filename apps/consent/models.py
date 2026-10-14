@@ -107,6 +107,25 @@ class ConsentRecord(models.Model):
             "personal_calculation",
             "Personal calculation (weight, height, age, sex, activity, goal)",
         )
+        # Умная память Ф4 (решение владельца 05.10.2026, DRF-2779): отдельное
+        # ДОБРОВОЛЬНОЕ согласие на то, чтобы Ayla анализировала обращения и
+        # действия и ПРЕДЛАГАЛА запомнить предпочтения. Не входит в каскад
+        # ``personal_data`` и не выдаётся вместе с ним: отказ не блокирует
+        # запись и прочие функции — у них свои основания. Текст — черновик
+        # владельца на юр-проверке (#947), см. ``apps.consent.preference_inference``.
+        PREFERENCE_INFERENCE = (
+            "preference_inference",
+            "Preference inference (Ayla proposes preferences to remember)",
+        )
+        # ИИ-оценка еды (решение владельца 07.10.2026, DRF-2845): отдельное
+        # ДОБРОВОЛЬНОЕ согласие на передачу названия блюда внешней модели для
+        # оценки калорий. Не ограничение по здоровью и не часть согласия на
+        # дневник; не выдаётся вместе с ``personal_data``. См.
+        # ``apps.consent.ai_food_estimation``.
+        AI_FOOD_ESTIMATION = (
+            "ai_food_estimation",
+            "AI food estimation (dish name goes to an external model)",
+        )
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     tenant = models.ForeignKey(

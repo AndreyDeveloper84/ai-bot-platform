@@ -390,10 +390,12 @@ def _render_goal_lines(goal: Any) -> list[str]:
     в промпт не идёт — это наш идентификатор, а не слова человека, и
     модель, увидев слоган, начнёт его цитировать.
     """
-    text = (getattr(goal, "text", None) or "").strip() if goal is not None else ""
-    if not text:
-        return []
-    return [f"Цель клиента своими словами: {text}"]
+    # DRF-2808 — та же строка рисуется и отдельным блоком цели консьержа;
+    # один отрисовщик, чтобы вызывающий мог убрать дубль точным совпадением.
+    from apps.orchestrator.goal_context import render_goal_line
+
+    line = render_goal_line(goal)
+    return [line] if line else []
 
 
 def _fetch_deficits(bot_user: Any) -> Any | None:

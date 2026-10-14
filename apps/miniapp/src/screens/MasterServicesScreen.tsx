@@ -72,7 +72,7 @@ const COPY = {
   noDirection: "Другое",
   continue: "Продолжить",
   selectAtLeastOne: "Выбери хотя бы одну услугу",
-  later: "Сохранить и продолжить позже",
+  later: "Сохранить и выйти",
   // DRF-1809 (M17): единственный выход из нулевого выбора — экран 03.
   chooseFromCatalog: "Выбрать из каталога",
   // DRF-1808 (M16): направления можно изменить в любое время (P13) — экран 02.
@@ -243,6 +243,7 @@ function DirectionSection({
                 ? `${formatPrice(service.offer.price)} ${COPY.priceUnit} · ${service.offer.duration_minutes} ${COPY.durationUnit} ✓`
                 : COPY.notConfigured}
             </span>
+            <span className="master-services__row-chevron" aria-hidden="true">›</span>
           </button>
         ))}
     </section>
@@ -651,7 +652,6 @@ export function MasterServicesScreen() {
           <h2 className="master-services__section-title">{COPY.pricesTitle}</h2>
           <div className="master-services__progress">
             <p>{`Настроено ${state.configured} из ${state.selected}`}</p>
-            <p>{`Осталось ${Math.max(state.selected - state.configured, 0)}`}</p>
           </div>
           {state.services.length === 0 ? (
             <p className="master-services__empty">{COPY.noServices}</p>
@@ -690,9 +690,11 @@ export function MasterServicesScreen() {
               </button>
             </>
           )}
-          <button type="button" className="btn-secondary" onClick={() => navigate(SETUP_PATH)}>
-            {COPY.later}
-          </button>
+          {!(state.selected > 0 && state.configured === state.selected) && (
+            <button type="button" className="btn-secondary" onClick={() => navigate(SETUP_PATH)}>
+              {COPY.later}
+            </button>
+          )}
         </div>
       )}
 

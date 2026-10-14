@@ -100,6 +100,7 @@ import asyncio
 import logging
 from typing import Any, ClassVar
 
+from apps.consent import ai_food_estimation
 from apps.integrations.ayla import (
     FoodNotRecognizedError,
     NutritionAPIError,
@@ -462,6 +463,7 @@ class FoodScannerSkill:
                     meal_type="other",  # P1 doesn't show meal-type buttons
                     idempotency_key=f"diary:{external_id}:{scan_id}",
                     entry_origin=entry_origin,
+                    ai_estimate_allowed=ai_food_estimation.estimate_permitted(context.bot_user),
                     **extra,
                 )
             )

@@ -725,10 +725,10 @@ def _greet_or_menu(event: CanonicalEvent, role_ctx, tenant, bot_user, entry) -> 
 
 
 def _greeting_attachments(buttons: list[dict[str, str]], role_ctx, entry) -> list | None:
-    """Кнопки приветствия — все в Mini App; без Mini App у бота — меню персонала.
+    """Кнопки приветствия: действия в чате и экраны Mini App (DRF-2787); пусто — меню.
 
-    Иначе владелец без ``web_app`` / ``miniapp_url`` получал бы приветствие
-    без единой кнопки, а «📅 Сегодня» в чате у него было всю жизнь.
+    Чатовые кнопки есть у каждого набора приветствия, так что пустой список —
+    защита на будущее: без кнопок вовсе человек получит меню, а не тупик.
     """
 
     if buttons:
@@ -1703,7 +1703,9 @@ def _handle_button(event: CanonicalEvent, role_ctx, bot_user, tenant, entry) -> 
         _reply(
             event,
             staff_actions.salon_readiness(tenant),
-            attachments=_greeting_attachments(salon_greeting.admin_buttons(entry), role_ctx, entry),
+            attachments=_greeting_attachments(
+                salon_greeting.greeting_admin_buttons(entry), role_ctx, entry
+            ),
         )
         return
     elif action.startswith(CB_APPROVE_PREFIX) and is_admin_side:

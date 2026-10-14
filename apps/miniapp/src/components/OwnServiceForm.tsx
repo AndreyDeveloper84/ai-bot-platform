@@ -1,5 +1,5 @@
 /**
- * «Добавить мою» — форма своей услуги (DRF-1896, M18a), вынесена из экрана 04
+ * «Добавить свою услугу» — форма своей услуги (DRF-1896, M18a), вынесена из экрана 04
  * для экрана 03 (DRF-1809, M17) без изменения поведения.
  *
  * Своя услуга — не строка каталога, а ЗАЯВКА о разрыве канона к владельцу
@@ -29,8 +29,8 @@ export const OWN_TITLE = "Свои услуги";
 export const OWN_NOTE =
   "Услуги, которых нет в каталоге. Их проверяет владелец; клиенты увидят услугу только после подтверждения.";
 export const OWN_EMPTY = "Своих услуг пока нет.";
-export const ADD_OWN_LABEL = "Добавить мою";
-export const ADD_ANYWAY_LABEL = "Всё равно добавить мою";
+export const ADD_OWN_LABEL = "+ Добавить свою услугу";
+export const ADD_ANYWAY_LABEL = "Отправить свою на проверку";
 export const PICK_CANON_LABEL = "Выбрать эту услугу";
 export const PICK_CANON_UNAVAILABLE = "Выбор услуги из каталога сейчас недоступен.";
 export const SALON_MANAGED_MESSAGE =

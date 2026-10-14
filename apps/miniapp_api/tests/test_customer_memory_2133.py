@@ -432,5 +432,6 @@ class TestSurface:
             for route, cb in _walk(get_resolver().url_patterns)
             if "customer/memory" in route
         ]
-        assert len(memory_routes) == 3
+        # 3 (DRF-2133) + confirm/correct предложения (DRF-2781).
+        assert len(memory_routes) == 5
         assert all(getattr(cb, GUARD_ATTR, None) == "customer" for _, cb in memory_routes)
