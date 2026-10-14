@@ -3,9 +3,9 @@
  *
  * Состояние дня — ПЕРВЫМ, одно из четырёх: ближайшая запись (имя, услуга,
  * начало–конец, «до визита N мин») + следующие спокойнее · «Сейчас по
- * расписанию» (без «Сейчас идёт визит» и «До конца ≈») · «На сегодня записей
- * нет» (кнопка «Добавить запись» появится с М-3 / DRF-2155 — мёртвых и лживых
- * кнопок не рисуем, DRF-1181) · «Сегодня выходной» + «Рабочие часы →» ·
+ * расписанию» (без «Сейчас идёт визит» и «До конца ≈») · «Сегодня у вас пока
+ * нет записей.» (кнопка «Добавить запись» появилась с М-3 / DRF-2155 — мёртвых
+ * кнопок не рисуем, DRF-1181) · «Сегодня у вас выходной по графику.» + «Рабочие часы →» ·
  * рамка дня не прочитана → «Не удалось проверить расписание» + «Проверить снова».
  *
  * Убрано: «ТРЕБУЮТ ВНИМАНИЯ» (переписки), 💬 в шапке, «Открыть диалог ›», тап
@@ -137,7 +137,7 @@ describe("«Вам ещё не назначили услуги» — по чис
    * её видел каждый мастер без записей на сегодня.
    */
   const NOT_ASSIGNED = /не назначили услуги/;
-  const EMPTY_DAY = "На сегодня записей нет";
+  const EMPTY_DAY = "Сегодня у вас пока нет записей.";
 
   function master(over: Partial<DashboardResponse["master"]>): DashboardResponse["master"] {
     return { id: "m-1", name: "Архипкин", specialization: "", photo_url: "", ...over };
@@ -187,14 +187,13 @@ describe("«Вам ещё не назначили услуги» — по чис
 });
 
 describe("порядок: состояние дня — первым", () => {
-  it("блок дня стоит выше карточки настройки и «Спросить Ayla»", async () => {
+  it("блок дня стоит выше постоянной нижней навигации", async () => {
     mockedDashboard.mockResolvedValue(doc({ next_visit: NEXT }));
     renderAt();
     const day = await screen.findByRole("region", { name: /сегодня/i });
-    const ayla = screen.getByRole("button", { name: /Спросить Ayla/ });
-    // DOM order: day block precedes the Ayla entry.
+    const aylaTab = screen.getByRole("button", { name: "Ayla" });
     expect(
-      day.compareDocumentPosition(ayla) & Node.DOCUMENT_POSITION_FOLLOWING,
+      day.compareDocumentPosition(aylaTab) & Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
   });
 });
@@ -312,7 +311,7 @@ describe("состояние 4 — записей нет", () => {
     renderAt();
 
     const day = await screen.findByRole("region", { name: /сегодня/i });
-    expect(within(day).getByText("На сегодня записей нет")).toBeInTheDocument();
+    expect(within(day).getByText("Сегодня у вас пока нет записей.")).toBeInTheDocument();
     // С М-3 (DRF-2155) кнопка — дверь в «Новую запись» (тап по свободному
     // окну в «Расписании» тоже ведёт в создание, не в «недоступно»).
     expect(
@@ -323,7 +322,7 @@ describe("состояние 4 — записей нет", () => {
     expect(screen.queryByText(/отдохните/)).toBeNull();
   });
 
-  it("выходной: «Сегодня выходной» + «Рабочие часы →»; для соло — экран часов", async () => {
+  it("выходной: «Сегодня у вас выходной по графику.» + «Рабочие часы →»; для соло — экран часов", async () => {
     mockedDashboard.mockResolvedValue(
       doc({
         states: {
@@ -336,8 +335,8 @@ describe("состояние 4 — записей нет", () => {
     renderAt("/solo/my-day");
 
     const day = await screen.findByRole("region", { name: /сегодня/i });
-    expect(within(day).getByText("Сегодня выходной")).toBeInTheDocument();
-    expect(screen.queryByText("На сегодня записей нет")).toBeNull();
+    expect(within(day).getByText("Сегодня у вас выходной по графику.")).toBeInTheDocument();
+    expect(screen.queryByText("Сегодня у вас пока нет записей.")).toBeNull();
     await userEvent.click(
       within(day).getByRole("button", { name: /Рабочие часы/ }),
     );
@@ -390,12 +389,12 @@ describe("состояние 4 — записей нет", () => {
     expect(
       within(day).getByText("Не удалось проверить расписание"),
     ).toBeInTheDocument();
-    expect(screen.queryByText("На сегодня записей нет")).toBeNull();
-    expect(screen.queryByText("Сегодня выходной")).toBeNull();
+    expect(screen.queryByText("Сегодня у вас пока нет записей.")).toBeNull();
+    expect(screen.queryByText("Сегодня у вас выходной по графику.")).toBeNull();
     await userEvent.click(
       within(day).getByRole("button", { name: "Проверить снова" }),
     );
-    expect(await screen.findByText("Сегодня выходной")).toBeInTheDocument();
+    expect(await screen.findByText("Сегодня у вас выходной по графику.")).toBeInTheDocument();
     expect(mockedDashboard).toHaveBeenCalledTimes(2);
   });
 });
@@ -434,11 +433,11 @@ describe("убрано по макету и §50 п.5", () => {
     expect(screen.queryByText(/★/)).toBeNull();
     expect(screen.queryByText(/[Вв]ыплат/)).toBeNull();
     expect(screen.queryByRole("button", { name: /Диалоги/ })).toBeNull();
-    // Положительный сторож той же отрисовки: шапка и «Спросить Ayla» на месте.
+    // DRF-2955: отдельной карточки «Спросить Ayla» больше нет — вход живёт
+    // в постоянной вкладке и не дублируется на Today.
     expect(screen.getByText("Архипкин")).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: /Спросить Ayla/ }),
-    ).toBeInTheDocument();
+    expect(screen.queryByText("Спросить Ayla")).toBeNull();
+    expect(screen.getByRole("button", { name: "Ayla" })).toBeInTheDocument();
   });
 });
 
@@ -503,7 +502,7 @@ describe("системные состояния — через SystemState по 
 });
 
 describe("переписок на «Сегодня» нет (DRF-1255)", () => {
-  it("inbox_preview с сервера не влияет на состояние дня: без записей — «На сегодня записей нет»", async () => {
+  it("inbox_preview с сервера не влияет на состояние дня: без записей — «Сегодня у вас пока нет записей.»", async () => {
     mockedDashboard.mockResolvedValue(
       doc({
         inbox_preview: [
@@ -521,7 +520,7 @@ describe("переписок на «Сегодня» нет (DRF-1255)", () => {
     );
     renderAt();
     const day = await screen.findByRole("region", { name: /сегодня/i });
-    expect(within(day).getByText("На сегодня записей нет")).toBeInTheDocument();
+    expect(within(day).getByText("Сегодня у вас пока нет записей.")).toBeInTheDocument();
     expect(screen.queryByText(/Ксения/)).toBeNull();
     expect(screen.queryByText(/Здравствуйте/)).toBeNull();
   });

@@ -101,7 +101,12 @@ function renderApp({ strict = false }: { strict?: boolean } = {}) {
 
 async function expectConsentScreen() {
   // Экран согласия дневника: кнопка «Разрешить» на адресе сканера.
-  expect(await screen.findByRole("button", { name: /разреш/i })).toBeInTheDocument();
+  // Первый кадр — холодная загрузка ленивых экранов: под нагрузкой соседних
+  // файлов секунды по умолчанию не хватает (замер DRF-2918: 2 падения из 6
+  // прогонов четырёх файлов разом). Потолок ожидания, не пауза.
+  expect(
+    await screen.findByRole("button", { name: /разреш/i }, { timeout: 4000 }),
+  ).toBeInTheDocument();
   expect(screen.getByTestId("path")).toHaveTextContent(SCANNER);
 }
 
