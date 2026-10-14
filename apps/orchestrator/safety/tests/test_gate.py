@@ -70,6 +70,11 @@ class TestUmirayuNarrowing:
 # #1081 — expanded self-harm / suicidal-ideation coverage. Coverage-first: a
 # MISS here is a safety failure; a false-positive is only a UX cost.
 _RU_CRISIS = [
+    # DRF-2920 — по фразе на каждую из трёх новых записей (полный набор —
+    # test_direct_crisis_phrases_2920.py); корпус пробы паритета берёт их отсюда.
+    "хочу просто умереть",
+    "хочу уйти из жизни",
+    "хочу прыгнуть под поезд",
     "хочу умереть",
     "хочу умирать",
     "лучше умереть",

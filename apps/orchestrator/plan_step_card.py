@@ -171,21 +171,30 @@ def _reply(lines: list[str], outcome: str, buttons: list[dict[str, str]]) -> Ski
 
 
 def s1_restriction_of(bot_user: Any) -> str:
-    """Длительное ограничение S1 этого человека словом каталога.
+    """Длительное ограничение S1 этого ЧЕЛОВЕКА словом каталога.
 
     ``none`` — ограничения нет; иначе ``open`` или ``stop``. Сбой чтения —
     ``stop``: молчание об ограничении не читается как его отсутствие.
+
+    Ограничение хранится на записи, а записей у человека несколько: чат пишет
+    на глобальную, экран Mini App несёт запись салона приложения. Поэтому
+    читаются все записи человека — тем же списком, что у гейта согласия, — и
+    побеждает более строгое: ``stop`` на любой записи — ``stop``, иначе
+    ``open`` на любой — ``open``. Запись запроса сама по себе ответом «нет»
+    не является (H5: ограничение не снимается сменой поверхности).
     """
     try:
+        from apps.consent.services import person_channel_shells
         from apps.orchestrator.safety.s1_restriction import restriction
 
-        found = restriction(bot_user)
+        found = [restriction(record) for record in person_channel_shells(bot_user)]
     except Exception:  # noqa: BLE001 — не прочитали → закрыто
         logger.warning("orchestrator.plan_step_card.s1_read_failed", exc_info=True)
         return "stop"
-    if found is None:
+    statuses = {one.status for one in found if one is not None}
+    if not statuses:
         return "none"
-    return "stop" if found.status == "stop" else "open"
+    return "stop" if "stop" in statuses else "open"
 
 
 def _four(bot_user: Any, turn_safety: TurnSafetyProvider | None) -> dict[str, Any] | None:
@@ -266,10 +275,10 @@ def try_handle_plan_step(
     turn_safety: TurnSafetyProvider | None,
 ) -> SkillResult | None:
     """Тапы шага, услуги и времени; ``None`` — не наше (форма / механизм выключен)."""
-    from apps.orchestrator.plan_engine_card import engine_enabled
+    from apps.orchestrator.plan_engine_card import plan_open_for
 
     match = STEP_CALLBACK_RE.match((text or "").strip())
-    if match is None or not engine_enabled():
+    if match is None or not plan_open_for(bot_user):
         return None
     return _dispatch(
         kind=match.group(1),
@@ -360,9 +369,9 @@ def step_action(
     ``safety`` — тройка вердикта, которую несёт экран: последнего хода
     разговора; ``None`` — каталог не спрашивается.
     """
-    from apps.orchestrator.plan_engine_card import PLAN_ENGINE_UNAVAILABLE, engine_enabled
+    from apps.orchestrator.plan_engine_card import PLAN_ENGINE_UNAVAILABLE, plan_open_for
 
-    if not engine_enabled() or kind not in ("step", "offer", "day", "slot"):
+    if not plan_open_for(bot_user) or kind not in ("step", "offer", "day", "slot"):
         return StepAction(PLAN_ENGINE_UNAVAILABLE, None)
     result = _dispatch(
         kind=kind,

@@ -1995,6 +1995,17 @@ SYNTHETIC_TEST_TRIGGER_ACCOUNTS = tuple(
     if item.strip()
 )
 
+# DRF-2885 — замок приёмки Плана (решение владельца 10.10): включённый
+# ``PLAN_ENGINE_ENABLED`` сам никому План не открывает. Механизм отвечает только
+# аккаунтам из этого списка: ``канал:идентификатор`` через запятую, например
+# ``max:12345``. Пусто (умолчание) — НИКОМУ. Назвать аккаунты — отдельное явное
+# действие; читается в ``apps.orchestrator.plan_access``.
+PLAN_ACCEPTANCE_ACCOUNTS = tuple(
+    item.strip()
+    for item in os.environ.get("PLAN_ACCEPTANCE_ACCOUNTS", "").split(",")
+    if item.strip()
+)
+
 PLAN_ENGINE_ENABLED = os.environ.get("PLAN_ENGINE_ENABLED", "false").lower() in (
     "true",
     "1",
@@ -2806,6 +2817,11 @@ LOGGING = {
         "context": {
             "()": "apps.observability.logging.ContextFilter",
         },
+        # DRF-1943 — адрес запроса в логе без строки запроса (подпись ссылки
+        # на голосовое / фото из вебхука MAX): см. ``url_log_filter``.
+        "request_url": {
+            "()": "apps.observability.url_log_filter.RequestUrlFilter",
+        },
     },
     "formatters": {
         "json": {
@@ -2845,6 +2861,12 @@ LOGGING = {
     # остаётся. Realtime-клиент openai (в боте не используется) на DEBUG пишет
     # сообщения сокета с транскриптами — его логгеры прибиты тем же правилом.
     # httpx/httpcore тела не пишут и не пинятся.
+    #
+    # DRF-1943 — но ``httpx`` на INFO пишет АДРЕС каждого запроса, а ссылка на
+    # голосовое из вебхука MAX — это и есть запись: 24 часа без авторизации.
+    # На логгере ``httpx`` висит фильтр, обрезающий строку запроса (подпись).
+    # Фильтр на логгере, а не на ``console``: адрес обрезан для любого
+    # получателя. Уровень не трогаем — строка «HTTP Request: POST …» остаётся.
     "loggers": {
         **{
             name: {"handlers": ["console"], "level": "INFO", "propagate": False}
@@ -2859,6 +2881,7 @@ LOGGING = {
                 "openai.resources.beta.realtime.realtime",
             )
         },
+        "httpx": {"filters": ["request_url"]},
     },
 }
 
