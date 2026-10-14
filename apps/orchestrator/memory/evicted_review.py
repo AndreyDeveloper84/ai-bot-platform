@@ -104,57 +104,23 @@ logger = logging.getLogger(__name__)
 #: её же выдумках.
 _HUMAN_ROLE = "user"
 
-#: Причины удаления, которые означают «человек попросил забыть ЭТО».
-#:
-#: Из них и только из них следует запрет на возврат: остальные причины —
-#: не воля человека. ``ttl_purge`` — срок хранения, ``minor_protection`` —
-#: защита несовершеннолетнего, ``unknown_legacy`` — след переноса; вернуть
-#: факт после них не значит вернуть стёртое по просьбе.
-#:
-#: ``withdrawal`` и ``forget_all`` здесь для полноты, хотя до них дело не
-#: доходит: отзыв согласия ловит гейт согласия, «забудь всё» — надгробие на
-#: человеке целиком. Перечислены, чтобы список читался как ответ на вопрос
-#: «какие стирания — воля человека», а не как сегодняшний минимум.
-_ERASURE_BY_REQUEST = frozenset(
-    {
-        "user_delete",
-        "user_request_miniapp",
-        "forget_all",
-        "withdrawal",
-    }
-)
-
 
 def _erased_by_request(bot_user: Any) -> frozenset[tuple[str, Any, Any]]:
     """Ключи фактов, которые человек просил забыть, — их возвращать нельзя.
 
-    Дедуп писателя строится **по живым** строкам и надгробия не видит; сторож
-    забвения стоит на человеке целиком (``upc.soft_deleted_at`` /
-    ``forget_all_requested_at``), а поштучное стирание в него не попадает.
+    Правило одно на всех, кто пишет без нового заявления человека, и живёт в
+    :mod:`apps.identity.services.erased_by_request` (DRF-2837): его же читает
+    писатель выводов.
 
-    На живом ходу это терпимо: факт вернётся только если человек **повторит**
+    На живом ходу запрета нет: факт вернётся, только если человек **повторит**
     его сам, а повторное заявление — его право. Мост дочитывает СТАРОЕ
     сообщение, которого никто не повторял, поэтому здесь терпимого нет:
     стёртое вернулось бы без нового заявления, и выглядело бы это как обычная
     запись.
     """
-    user_id = getattr(bot_user, "ayla_user_id", None)
-    if not user_id:
-        return frozenset()
+    from apps.identity.services.erased_by_request import keys_erased_by_request
 
-    from apps.identity.models import MemoryEntry
-
-    rows = MemoryEntry.objects.filter(
-        user_id=user_id,
-        sensitivity_zone=MemoryEntry.SENSITIVITY_GREEN,
-        soft_deleted_at__isnull=False,
-        deletion_reason__in=sorted(_ERASURE_BY_REQUEST),
-    )
-    keys: set[tuple[str, Any, Any]] = set()
-    for row in rows:
-        content = row.content or {}
-        keys.add((row.kind, content.get("key"), content.get("value")))
-    return frozenset(keys)
+    return keys_erased_by_request(getattr(bot_user, "ayla_user_id", None))
 
 
 def review_evicted(bot_user: Any, dropped: list[dict[str, Any]]) -> int:

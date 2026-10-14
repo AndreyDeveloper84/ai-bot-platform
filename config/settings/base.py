@@ -1090,6 +1090,15 @@ FOOD_DIARY_CANONICAL_CONSENT = os.environ.get("FOOD_DIARY_CANONICAL_CONSENT", "f
     "1",
 )
 
+# 4. ``AI_FOOD_ESTIMATION_CONSENT_REQUIRED`` — отдельное добровольное согласие
+#    на ИИ-оценку еды (DRF-2845, решение владельца 07.10). Пока ВЫКЛЮЧЕН:
+#    текст согласия не утверждён и выдать его нечем. False → бот разрешает
+#    каталогу ИИ-оценку всем, как до листа. True → только при действующем
+#    согласии ``ai_food_estimation``. Включение — решение владельца.
+AI_FOOD_ESTIMATION_CONSENT_REQUIRED = os.environ.get(
+    "AI_FOOD_ESTIMATION_CONSENT_REQUIRED", "false"
+).lower() in ("true", "1")
+
 FOOD_PHOTO_SCAN_ENABLED = os.environ.get("FOOD_PHOTO_SCAN_ENABLED", "false").lower() in (
     "true",
     "1",
@@ -1973,6 +1982,35 @@ PLAN_LITE_ENABLED = os.environ.get("PLAN_LITE_ENABLED", "false").lower() in (
     "1",
 )
 
+# DRF-2879 — Plan Engine (сборка плана в каталоге): тот же ключ, что в
+# каталоге. Default CLOSED. Выключен → прокси customer/plan/decision отвечает
+# 404 plan_engine_disabled ДО чтения реестра правил и ДО вызова каталога.
+# DRF-2885 — кому отвечает временный вход сборки плана в разговоре (сквозная
+# проверка на подготовленных данных). ``канал:идентификатор`` через запятую,
+# например ``max:12345``. Пусто (умолчание) — входа нет ни у кого. Это только
+# ВИДИМОСТЬ команды: допуск синтетических данных решает каталог.
+SYNTHETIC_TEST_TRIGGER_ACCOUNTS = tuple(
+    item.strip()
+    for item in os.environ.get("SYNTHETIC_TEST_TRIGGER_ACCOUNTS", "").split(",")
+    if item.strip()
+)
+
+# DRF-2885 — замок приёмки Плана (решение владельца 10.10): включённый
+# ``PLAN_ENGINE_ENABLED`` сам никому План не открывает. Механизм отвечает только
+# аккаунтам из этого списка: ``канал:идентификатор`` через запятую, например
+# ``max:12345``. Пусто (умолчание) — НИКОМУ. Назвать аккаунты — отдельное явное
+# действие; читается в ``apps.orchestrator.plan_access``.
+PLAN_ACCEPTANCE_ACCOUNTS = tuple(
+    item.strip()
+    for item in os.environ.get("PLAN_ACCEPTANCE_ACCOUNTS", "").split(",")
+    if item.strip()
+)
+
+PLAN_ENGINE_ENABLED = os.environ.get("PLAN_ENGINE_ENABLED", "false").lower() in (
+    "true",
+    "1",
+)
+
 # DRF-1301 — the same two switches in front of the post-visit follow-up
 # («как прошёл вчерашний визит?»), for the same reason and in the same
 # order. See apps/bookings/followups.py for the consent gate they guard.
@@ -2779,6 +2817,11 @@ LOGGING = {
         "context": {
             "()": "apps.observability.logging.ContextFilter",
         },
+        # DRF-1943 — адрес запроса в логе без строки запроса (подпись ссылки
+        # на голосовое / фото из вебхука MAX): см. ``url_log_filter``.
+        "request_url": {
+            "()": "apps.observability.url_log_filter.RequestUrlFilter",
+        },
     },
     "formatters": {
         "json": {
@@ -2818,6 +2861,12 @@ LOGGING = {
     # остаётся. Realtime-клиент openai (в боте не используется) на DEBUG пишет
     # сообщения сокета с транскриптами — его логгеры прибиты тем же правилом.
     # httpx/httpcore тела не пишут и не пинятся.
+    #
+    # DRF-1943 — но ``httpx`` на INFO пишет АДРЕС каждого запроса, а ссылка на
+    # голосовое из вебхука MAX — это и есть запись: 24 часа без авторизации.
+    # На логгере ``httpx`` висит фильтр, обрезающий строку запроса (подпись).
+    # Фильтр на логгере, а не на ``console``: адрес обрезан для любого
+    # получателя. Уровень не трогаем — строка «HTTP Request: POST …» остаётся.
     "loggers": {
         **{
             name: {"handlers": ["console"], "level": "INFO", "propagate": False}
@@ -2832,6 +2881,7 @@ LOGGING = {
                 "openai.resources.beta.realtime.realtime",
             )
         },
+        "httpx": {"filters": ["request_url"]},
     },
 }
 

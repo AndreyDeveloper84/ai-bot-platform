@@ -37,8 +37,25 @@ describe("MasterCard rating", () => {
     expect(screen.queryByText(/★/)).toBeNull();
   });
 
-  it("still renders a real rating", () => {
+  it("still renders a real rating — together with its review count", () => {
+    render(<MasterCard master={{ ...base, rating: "4.90", review_count: 12 }} onSelect={vi.fn()} />);
+    expect(screen.getByLabelText("Рейтинг 4.9")).toHaveTextContent("★ 4.9 (12 отзывов)");
+    expect(screen.queryByTestId("master-no-reviews")).toBeNull();
+  });
+
+  // DRF-2875 — решение владельца 07.10, п.20: импортированная оценка без
+  // отзывов за рейтинг Ayla не выдаётся.
+  it("оценка без отзывов: ни звезды, ни числа — «Пока нет отзывов»", () => {
+    render(<MasterCard master={{ ...base, rating: "4.90", review_count: 0 }} onSelect={vi.fn()} />);
+    expect(screen.getByTestId("master-no-reviews")).toHaveTextContent("Пока нет отзывов");
+    expect(screen.queryByText(/★/)).toBeNull();
+    expect(screen.queryByText(/4\.9/)).toBeNull();
+    expect(screen.queryByLabelText(/Рейтинг/)).toBeNull();
+  });
+
+  it("числа отзывов нет в ответе — тоже «Пока нет отзывов»", () => {
     render(<MasterCard master={{ ...base, rating: "4.90" }} onSelect={vi.fn()} />);
-    expect(screen.getByText(/★ 4\.9/)).toBeTruthy();
+    expect(screen.getByTestId("master-no-reviews")).toBeInTheDocument();
+    expect(screen.queryByText(/★/)).toBeNull();
   });
 });

@@ -95,14 +95,81 @@ def withdraw(bot_user: "BotUser") -> int:
 
     Возвращает число снятых грантов. Только этот тип: ``personal_data`` и
     всё, что на нём держится, отзыв Ф4 не трогает.
+
+    DRF-2783: вместе с согласием уходит и производная память — решение
+    владельца «при отзыве согласия Ф4 … удалить производную память по
+    процедуре». Стирание идёт и при повторном отзыве (0 снятых грантов):
+    оно идемпотентно, и так повтор дочищает то, что не стёрлось в первый раз.
     """
+    from django.db import transaction
+
     from apps.consent.services import withdraw_person_consent
 
-    return withdraw_person_consent(
-        bot_user,
-        consent_type=PREFERENCE_INFERENCE,
-        source=WITHDRAW_SOURCE,
-    )
+    with transaction.atomic():
+        withdrawn = withdraw_person_consent(
+            bot_user,
+            consent_type=PREFERENCE_INFERENCE,
+            source=WITHDRAW_SOURCE,
+        )
+        _erase_derived_memory(bot_user)
+    # DRF-2700 — «перестать использовать такие выводы, в том числе из прошлых
+    # ответов» (решение владельца 07.10, п.23). Строки переписки закрывает
+    # отсечка по времени отзыва; окно Redis очищается здесь.
+    from apps.conversations.model_history import clear_model_context_for_person
+
+    clear_model_context_for_person(bot_user)
+    return withdrawn
+
+
+def _erase_derived_memory(bot_user: "BotUser") -> int:
+    """Надгробие всем выводам Ф4 человека — по всем его оболочкам (DRF-2783).
+
+    Память ключуется ``ayla_user_id``, а согласие — оболочкой; у человека их
+    несколько (Mini App и чат), и выводы могли лечь под любой из них. Оболочки
+    без связки с Ayla памяти не имеют — пропускаются.
+
+    Сбой стирания НЕ откатывает отзыв (своя точка сохранения): человек,
+    нажавший «отключить», обязан остаться без согласия, даже если стереть не
+    вышло, — использование выводов уже остановлено гейтом разговора (Ф4a-3,
+    согласие проверяется в точке использования), а повторный отзыв дочистит.
+    Сбой пишется в лог с исключением, не глотается молча.
+    """
+    import logging
+
+    from django.db import transaction
+
+    from apps.identity.models import BotUser
+    from apps.identity.services.memory_deleter import soft_delete_inferences_for_withdrawal
+
+    logger = logging.getLogger(__name__)
+    try:
+        with transaction.atomic():
+            try:
+                from apps.identity.services.privacy import person_shell_ids
+
+                shell_ids = person_shell_ids(bot_user)
+            except Exception:  # noqa: BLE001 — резолв личности сужается до самой строки
+                logger.exception("consent.preference_inference.shell_resolution_failed")
+                shell_ids = {bot_user.pk}
+            # ``values_list`` типизирован ``UUID | None`` и после ``isnull=False``:
+            # фильтр в Python — то же условие, но видимое проверке типов.
+            ayla_user_ids = {
+                uid
+                for uid in BotUser.all_tenants.filter(pk__in=shell_ids).values_list(
+                    "ayla_user_id", flat=True
+                )
+                if uid is not None
+            }
+            erased = 0
+            for uid in ayla_user_ids:
+                erased += soft_delete_inferences_for_withdrawal(uid)
+            return erased
+    except Exception:  # noqa: BLE001 — стирание не откатывает отзыв; см. докстринг
+        logger.exception(
+            "consent.preference_inference.derived_memory_erase_failed bot_user=%s",
+            bot_user.pk,
+        )
+        return 0
 
 
 def is_granted(bot_user: "BotUser") -> bool:

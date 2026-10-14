@@ -199,3 +199,84 @@ def test_a_spoken_day_of_the_month_becomes_the_date_people_type(said: str, expec
 )
 def test_an_ordinal_that_is_not_a_date_is_left_as_said(said: str) -> None:
     assert normalize_numbers(said) == said
+
+
+# --- DRF-2788: составное порядковое в любом роде и падеже, «тысяч» без множителя ---
+
+
+@pytest.mark.parametrize(
+    "said",
+    [
+        # Замер 06.10: до правки из этих фраз выходило «20 вторая неделя»,
+        # «30 второй неделе», «20 девятый год», «в 20 пятом году», «100 первый».
+        "двадцать вторая неделя беременности",
+        "я на тридцать второй неделе",
+        "мне двадцать девятый год",
+        "двадцать пятый раз",
+        "в двадцать пятом году",
+        "тридцать шестой размер",
+        "сорок пятая школа",
+        "на двадцать втором этаже",
+        "сто первый километр",
+        "в сто десятом кабинете",
+        "к двадцать пятому октября",
+        "ДВАДЦАТЬ ПЯТЫЙ РАЗ",
+        # Годы: «в 2020 шестом году» и «в 1900 девяностом году» — не годы.
+        "в две тысячи двадцать шестом году",
+        "я родилась в тысяча девятьсот девяностом году",
+        "две тысячи пятый",
+    ],
+)
+def test_a_compound_ordinal_in_any_gender_and_case_is_left_as_said(said: str) -> None:
+    assert normalize_numbers(said) == said
+
+
+def test_a_year_after_a_spoken_date_is_not_cut_into_1900() -> None:
+    # До правки: «5 мая 1900 девяностого года», и разбор даты видел 1900-й год.
+    said = "пятого мая тысяча девятьсот девяностого года"
+    assert normalize_numbers(said) == "5 мая тысяча девятьсот девяностого года"
+
+
+@pytest.mark.parametrize(
+    ("said", "expected"),
+    [
+        # После единиц и 10–19 порядковое число не продолжает — счёт остаётся счётом.
+        ("два первых занятия", "2 первых занятия"),
+        ("пять первых дней", "5 первых дней"),
+        ("мне сорок, первый раз у вас", "мне 40, первый раз у вас"),
+        # Количественные с теми же основами оцифровываются как раньше.
+        ("двадцать пять раз", "25 раз"),
+        ("мне сорок два года", "мне 42 года"),
+        ("в девяносто лет", "в 90 лет"),
+        ("пятьсот грамм", "500 грамм"),
+    ],
+)
+def test_an_ordinal_nearby_does_not_stop_an_ordinary_count(said: str, expected: str) -> None:
+    assert normalize_numbers(said) == expected
+
+
+@pytest.mark.parametrize(
+    "said",
+    [
+        # До правки: «около двух 1000 калорий», «несколько 1000 рублей», «1000 людей».
+        "около двух тысяч калорий",
+        "несколько тысяч рублей",
+        "тысячи людей",
+        "до пяти тысяч шагов",
+    ],
+)
+def test_thousands_without_a_multiplier_are_not_one_thousand(said: str) -> None:
+    assert normalize_numbers(said) == said
+
+
+@pytest.mark.parametrize(
+    ("said", "expected"),
+    [
+        ("тысяча двести калорий", "1200 калорий"),
+        ("две тысячи рублей", "2000 рублей"),
+        ("пять тысяч шагов", "5000 шагов"),
+        ("на тысячу рублей", "на 1000 рублей"),
+    ],
+)
+def test_thousands_with_a_multiplier_are_still_numbers(said: str, expected: str) -> None:
+    assert normalize_numbers(said) == expected

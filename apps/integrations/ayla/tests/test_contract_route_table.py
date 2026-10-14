@@ -712,7 +712,14 @@ async def _exercise_nutrition() -> None:
             pass
 
     await guard(c.scan_photo(external_user_id=_EXT_USER, image_bytes=b"x"))
-    await guard(c.log_meal(external_user_id=_EXT_USER, dish_name="apple", meal_type="snack"))
+    await guard(
+        c.log_meal(
+            external_user_id=_EXT_USER,
+            dish_name="apple",
+            meal_type="snack",
+            ai_estimate_allowed=True,
+        )
+    )
     await guard(c.daily_summary(external_user_id=_EXT_USER))
     await guard(c.weekly_deficits(external_user_id=_EXT_USER))
     await guard(c.get_profile(external_user_id=_EXT_USER))

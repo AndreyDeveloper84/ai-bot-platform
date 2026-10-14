@@ -33,7 +33,7 @@ import {
   type CustomerMaster,
 } from "../lib/customer-booking";
 import { masterCardP1Enabled } from "../lib/feature-flags";
-import { publicRating, reviewCountLabel } from "../lib/rating";
+import { NO_REVIEWS_LABEL, publicRating, reviewCountLabel } from "../lib/rating";
 import { alignMaster, alignService, setEntryPoint, useBookingDraft } from "../state/booking";
 import { backTo } from "../lib/screen-back";
 
@@ -160,7 +160,7 @@ export function CustomerMasterDetailScreen() {
 
   const m = state.master;
   // DRF-1224 — same 1..5 domain rule as the catalog card.
-  const ratingValue = publicRating(m.rating);
+  const ratingValue = publicRating(m.rating, m.review_count);
   const rating = ratingValue === null ? null : ratingValue.toFixed(1);
 
   return (
@@ -188,19 +188,21 @@ export function CustomerMasterDetailScreen() {
       <section className="customer-master__intro">
         <div className="customer-master__identity">
           <div className="customer-master__name">{m.name}</div>
-          {rating && (
+          {/* DRF-2875 — оценка только вместе с числом отзывов; иначе слова владельца. */}
+          {rating ? (
             <div
               className="customer-master__rating"
               aria-label={`Рейтинг ${rating}`}
             >
               <span aria-hidden="true">⭐ </span>
               {rating}
-              {/* DRF-1778 — число отзывов только из данных, иначе без скобок. */}
-              {reviewCountLabel(m.review_count) && (
-                <span className="customer-master__reviews" data-testid="master-reviews">
-                  {" "}({reviewCountLabel(m.review_count)})
-                </span>
-              )}
+              <span className="customer-master__reviews" data-testid="master-reviews">
+                {" "}({reviewCountLabel(m.review_count)})
+              </span>
+            </div>
+          ) : (
+            <div className="customer-master__reviews" data-testid="master-no-reviews">
+              {NO_REVIEWS_LABEL}
             </div>
           )}
           {m.specialization && (

@@ -35,6 +35,7 @@ def _card() -> SimpleNamespace:
         name="Анна",
         specialization="Массаж",
         rating=4.9,
+        review_count=12,
         city="Пенза",
         service_id=None,
         service_name="",
@@ -111,7 +112,8 @@ class TestBuildToolResultMessage:
         assert "Массаж" in msg
         assert "Пенза" in msg
         # Zero-rating is the absence of a rating (DRF-1224) — never rendered.
-        assert "★ 4.9" in msg
+        # DRF-2875 — и только вместе с числом отзывов.
+        assert "★ 4.9 (12 отзывов)" in msg
 
     def test_empty_result_says_so(self) -> None:
         msg = _build_tool_result_message("покажи мастеров", [], {"city": "Пенза"})

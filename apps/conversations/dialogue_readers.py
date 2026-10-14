@@ -490,6 +490,18 @@ DIALOGUE_READERS: dict[str, DialogueReader] = {
         reaches_prompt=False,
         why="Unread badge counters — timestamps and roles, not bodies.",
     ),
+    "apps.miniapp_api.views_customer_assistant:customer_assistant_history": DialogueReader(
+        storage="db_message",
+        reaches_prompt=False,
+        why=(
+            "DRF-2799: история разговора с Ayla в Mini App — реплики человека и Ayla "
+            "из разговоров его же оболочек (person_channel_shells), показанные самому "
+            "человеку. Человеческая поверхность, не промпт: ход из Mini App читает "
+            "историю тем же глобальным ходом бота, что и чат. После «удалить всё» ходы "
+            "не позже anonymized_through отфильтрованы запросом (колонки у них пусты), "
+            "а реплики до последнего отзыва personal_data отсечены (DRF-2700)."
+        ),
+    ),
     "apps.miniapp_api.views_last_topic:_recent_assistant_turns": DialogueReader(
         storage="db_message",
         reaches_prompt=False,

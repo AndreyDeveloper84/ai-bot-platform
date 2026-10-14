@@ -41,7 +41,7 @@ from django.http import HttpRequest, HttpResponse, JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 
-from apps.admin_api.auth import require_admin_role
+from apps.admin_api.auth import require_booking_desk
 from apps.booking.models import RemoteBookingProxy
 from apps.identity.models import BotUser
 from apps.integrations.ayla.user_proxy import external_user_id_for
@@ -85,7 +85,7 @@ def _outcome(
 
 @csrf_exempt
 @require_http_methods(["POST"])
-@require_admin_role
+@require_booking_desk
 def cancel_booking(request: HttpRequest, appointment_id: str) -> HttpResponse:
     """Cancel a booking on behalf of the calling administrator."""
 
