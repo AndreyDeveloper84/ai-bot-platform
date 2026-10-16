@@ -197,9 +197,7 @@ class TestGlobalVoice:
             concierge.call_args.args[0] == "Умираю, хочу кофе."
         )  # модели — оригинал, не копия без знаков
 
-    def test_k19_a_typed_comma_stops_without_the_copy(
-        self, sent, fake_redis, concierge, settings
-    ):
+    def test_k19_a_typed_comma_stops_without_the_copy(self, sent, fake_redis, concierge, settings):
         # DRF-2684 (B, решение владельца): знак сразу после «умираю» снова даёт
         # кризис. С выключенным флагом (без копии) гейт видит сырой знак — и эта
         # расшифровка с запятой получает кризисный ответ, модель не вызывается.
