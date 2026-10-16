@@ -289,7 +289,8 @@ STRICT_TENANT_SCOPE = os.environ.get("STRICT_TENANT_SCOPE", "audit")
 #           handler exception (no XACK; entry stays in the PEL for
 #           manual escalation). **No automatic DLQ retry is wired**
 #           — XAUTOCLAIM reaper is a follow-up; PEL retention is the
-#           current contract.
+#           current contract. Exception (DRF-1943): an entry carrying a
+#           voice attachment goes to <stream>:dlq at once, without the link.
 #
 # Flip to True only after the dev-side soak shows zero
 # ``worker.tenant_required_missing`` events in audit for a clean
@@ -2534,8 +2535,10 @@ VOICE_STT_MONTHLY_MINUTES_CAP = int(os.environ.get("VOICE_STT_MONTHLY_MINUTES_CA
 #   уверенность не отдаёт). По умолчанию always — решение владельца 28.09
 #   (DRF-2425): ошибка распознавания видна до того, как уедет в дневник.
 # VOICE_GATE_STRIP_PUNCT — K19-Б (решение владельца 22.09): гейту safety
-#   отдаётся копия расшифровки без знаков препинания. Выключить, когда окно
-#   safety поправит исключение гиперболы в pre_check.py (вариант А).
+#   отдаётся копия расшифровки без знаков препинания. Держать включённым и
+#   после DRF-2684 (вариант А, правило гиперболы знаков больше не замечает):
+#   остальные шаблоны pre_check.py ждут между словами пробел, и распознанное
+#   «Не хочу, жить.» без копии проходит мимо гейта.
 # VOICE_TURN_BUDGET_S — общий лимит на скачивание + распознавание в одном
 #   ходе; потребитель очереди один на всех, зависший ход задерживает всех.
 _VOICE_TRUE = ("true", "1", "yes")
@@ -2817,6 +2820,11 @@ LOGGING = {
         "context": {
             "()": "apps.observability.logging.ContextFilter",
         },
+        # DRF-1943 — адрес запроса в логе без строки запроса (подпись ссылки
+        # на голосовое / фото из вебхука MAX): см. ``url_log_filter``.
+        "request_url": {
+            "()": "apps.observability.url_log_filter.RequestUrlFilter",
+        },
     },
     "formatters": {
         "json": {
@@ -2856,6 +2864,12 @@ LOGGING = {
     # остаётся. Realtime-клиент openai (в боте не используется) на DEBUG пишет
     # сообщения сокета с транскриптами — его логгеры прибиты тем же правилом.
     # httpx/httpcore тела не пишут и не пинятся.
+    #
+    # DRF-1943 — но ``httpx`` на INFO пишет АДРЕС каждого запроса, а ссылка на
+    # голосовое из вебхука MAX — это и есть запись: 24 часа без авторизации.
+    # На логгере ``httpx`` висит фильтр, обрезающий строку запроса (подпись).
+    # Фильтр на логгере, а не на ``console``: адрес обрезан для любого
+    # получателя. Уровень не трогаем — строка «HTTP Request: POST …» остаётся.
     "loggers": {
         **{
             name: {"handlers": ["console"], "level": "INFO", "propagate": False}
@@ -2870,6 +2884,7 @@ LOGGING = {
                 "openai.resources.beta.realtime.realtime",
             )
         },
+        "httpx": {"filters": ["request_url"]},
     },
 }
 

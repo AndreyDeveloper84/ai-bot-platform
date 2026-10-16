@@ -161,6 +161,9 @@ def _world(monkeypatch: pytest.MonkeyPatch, settings) -> None:
     monkeypatch.setattr(plan_gate, "plan_processing_refusal", lambda bot_user: None)
     monkeypatch.setattr(plan_gate, "plan_consent_basis", lambda bot_user: dict(BASIS))
     monkeypatch.setattr(s1_restriction, "restriction", lambda bot_user: None)
+    # Записей у человека этих узлов одна; чтение по всем записям человека —
+    # test_plan_step_from_screen_2876 (r1–r3), там база настоящая.
+    monkeypatch.setattr("apps.consent.services.person_channel_shells", lambda bot_user: [bot_user])
     monkeypatch.setattr(ayla_link, "ensure_ayla_link", lambda bot_user, trigger="": AYLA_USER)
     monkeypatch.setattr(step, "_today", lambda: date(2026, 10, 10))
     monkeypatch.setattr(
