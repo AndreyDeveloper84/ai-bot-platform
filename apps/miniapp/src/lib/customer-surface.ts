@@ -18,3 +18,21 @@
 export function isCustomerSurfacePath(pathname: string): boolean {
   return pathname.startsWith("/customer/") || pathname.startsWith("/feedback/");
 }
+
+/**
+ * Адрес принадлежит рабочей поверхности — кабинету мастера, салона или
+ * соло-мастера (DRF-2818).
+ *
+ * Зеркало `isCustomerSurfacePath`: сохранённый режим «Клиент» не должен
+ * отдавать клиентское дерево на рабочем адресе. Туда человека с ролью
+ * привела рабочая кнопка салонного бота, а в клиентском дереве `/master/*`
+ * и `/admin/*` — это экран «Доступ ещё не подтверждён», сделанный для того,
+ * кому роль не выдана. `/solo/` обязателен: вкладки соло-панели ведут туда.
+ */
+export function isStaffSurfacePath(pathname: string): boolean {
+  return (
+    pathname.startsWith("/master/") ||
+    pathname.startsWith("/admin/") ||
+    pathname.startsWith("/solo/")
+  );
+}

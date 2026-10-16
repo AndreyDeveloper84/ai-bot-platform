@@ -17,8 +17,9 @@
  * → apps/master_api/services/dashboard.py::build_dashboard).
  *
  * DRF-2152 (М-1, макет DRF-1182 — решение владельца 20.09): «Сегодня» — это
- * СОСТОЯНИЕ ДНЯ, и оно стоит ПЕРВЫМ. Порядок: шапка → блок дня → карточка
- * настройки (пока не готов) → «Принимаю записи» → «Спросить Ayla» → панель.
+ * СОСТОЯНИЕ ДНЯ, и оно стоит ПЕРВЫМ. По DRF-2955 дублирующий вход
+ * «Спросить Ayla» снят: Ayla уже постоянная вкладка. Setup/accepting остаются
+ * transition-layer до отдельного переноса в avatar/management surface.
  *
  * Блок дня — одно из состояний (`DayBlock`):
  *   - ближайшая запись: имя, услуга, начало–конец, «До визита N мин»;
@@ -26,10 +27,10 @@
  *   - «Сейчас по расписанию»: текущая запись теми же полями. Флаг сервера
  *     ставится ПО ЧАСАМ (dashboard.py), поэтому не «идёт визит» и без «До
  *     конца ≈» — макет прямо запрещает состояние «визит идёт» и таймер;
- *   - «На сегодня записей нет» — только текст: кнопка «Добавить запись»
+ *   - «Сегодня у вас пока нет записей.» — рабочий день без записей; кнопка «Добавить запись»
  *     появится с М-3 (DRF-2155). Сегодня тап по свободному окну открывает
  *     «недоступно», а не создание — кнопка сюда была бы ложью (DRF-1181);
- *   - «Сегодня выходной» + «Рабочие часы →» (соло → экран часов, салонный →
+ *   - «Сегодня у вас выходной по графику.» + «Рабочие часы →» (соло → экран часов, салонный →
  *     «Расписание», где заявка владельцу);
  *   - рамка дня не прочитана (`states.day_off === null`) — «Не удалось
  *     проверить расписание» + «Проверить снова»: молчание источника — не
@@ -108,10 +109,10 @@ const COPY = {
     // §61: формат DRF-1185 («1 ч 20 мин») общим helper'ом с «Деталями записи».
     untilVisit: (min: number) =>
       min > 0 ? `До визита ${formatDurationRu(min)}` : "Уже сейчас",
-    noVisits: "На сегодня записей нет",
+    noVisits: "Сегодня у вас пока нет записей.",
     // DRF-2155 (М-3) — дверь в «Новую запись» (макет DRF-1182/1184).
     addBooking: "Добавить запись",
-    dayOff: "Сегодня выходной",
+    dayOff: "Сегодня у вас выходной по графику.",
     hoursCta: "Рабочие часы →",
     frameUnknown: "Не удалось проверить расписание",
     recheck: "Проверить снова",
@@ -267,13 +268,6 @@ export function MasterDashboardScreen() {
     navigate(isSolo ? "/solo/working-hours" : "/master/working-hours");
   }, [navigate, isSolo]);
 
-  // Вход в раздел «Ayla» (DRF-1180). Временно карточкой, а не вкладкой:
-  // нижняя навигация станет трёхразделной вместе с DRF-1255.
-  const onAylaOpen = useCallback(() => {
-    hapticSelection();
-    navigate("/master/ayla");
-  }, [navigate]);
-
   // --- Resolve current data + flags --------------------------------------
 
   const data: DashboardResponse | null =
@@ -408,30 +402,11 @@ export function MasterDashboardScreen() {
       {/* DRF-1845 — «Принимаю записи»: сам грузится, прячется при отказе. */}
       <AcceptingBookingsToggle />
 
-      <AylaEntrySection onOpen={onAylaOpen} />
 
       <MasterTabBar
         scheduleHasPendingChange={tab_badges.schedule_has_pending_change}
       />
     </DashboardFrame>
-  );
-}
-
-function AylaEntrySection({ onOpen }: { onOpen: () => void }) {
-  return (
-    <section className="master-dashboard__section">
-      <button type="button" className="ayla-entry" onClick={onOpen}>
-        <span>
-          <span className="ayla-entry__title">Спросить Ayla</span>
-          <span className="ayla-entry__sub">
-            День, загрузка, свободные окна
-          </span>
-        </span>
-        <span className="ayla-entry__chevron" aria-hidden="true">
-          ›
-        </span>
-      </button>
-    </section>
   );
 }
 
