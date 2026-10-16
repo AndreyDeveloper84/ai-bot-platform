@@ -155,7 +155,7 @@ class SafetyResult:
 # uses. It reads sentence ends, so it works on typed text only — the
 # punctuation-free copy of a voice transcript (``voice_turn.strip_for_gate``)
 # has none and is judged by the two lists alone. That is where voice was before
-# this change, not a new gap (DRF-2922 is the way to close it).
+# this change, not a new gap (DRF-2978).
 #
 # ``_GAP`` is whitespace plus every mark ``strip_for_gate`` removes: marks
 # BETWEEN the words of the phrase itself never change the verdict. ``_GAP_IN``
