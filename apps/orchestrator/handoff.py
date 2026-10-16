@@ -1140,11 +1140,24 @@ def try_continue_booking(
         AWAITING_SCHEDULE,
         AWAITING_SERVICE,
         load_booking_context,
+        save_booking_context,
     )
+    from apps.orchestrator.turn_commands import names_a_booking_stop
 
     try:
         ctx = load_booking_context(conversation)
         if ctx is None:
+            return None
+        if names_a_booking_stop(text):
+            # DRF-2981 — «отмени / удали запись на завтра» продолжала СОЗДАНИЕ
+            # записи на завтра: «завтра» читалось как ответ на «какой день».
+            # Ход уходит дальше, а контекст снимается: иначе следующая реплика
+            # («ту, что на завтра») продолжила бы запись на ход позже. Снимается
+            # на ЭТОМ экземпляре разговора — ``forget_pending_booking`` пишет в
+            # другой, и обработчик позже в том же ходу перезаписывает состояние.
+            # Глагол без записи («нет, отмени, лучше на послезавтра») — это
+            # исправление дня, запись продолжается.
+            save_booking_context(conversation, None)
             return None
         if ctx.awaiting == AWAITING_SERVICE:
             return _continue_pending_service(
