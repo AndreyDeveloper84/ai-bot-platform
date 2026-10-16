@@ -190,9 +190,14 @@ _FORGET_FIELD_RE = re.compile(
 _NON_FIELD_TARGETS = frozenset({"это", "этот", "эту", "эти", "то", "об этом", "про это"})
 
 # Green-fact matchers for «забудь {X}»: (key, value) → keyword stems for a
-# SPECIFIC fact («забудь, что я веган»), plus per-key DOMAIN stems («забудь
-# всё про питание» removes the whole domain). Match if the target contains
-# any stem.
+# SPECIFIC fact («забудь, что я веган»), plus per-key DOMAIN patterns («забудь
+# всё про питание» removes the whole domain).
+#
+# DRF-2980 — стебель факта совпадает только С НАЧАЛА СЛОВА (``_has_stem``), а
+# не подстрокой: «кето» сидит в «букетов», «пакетов», «анкетой», и «забудь,
+# что у меня проблема с анкетой» стирала кето. Цена: «полувеган»,
+# «лактовегетарианка» факт не находят и уходят в уточнение — недобор, а не
+# стирание чужого.
 _FACT_KEYWORDS: dict[tuple[str, str], tuple[str, ...]] = {
     ("diet", "vegan"): ("веган",),
     ("diet", "vegetarian"): ("вегетар",),
@@ -222,14 +227,101 @@ _FACT_KEYWORDS: dict[tuple[str, str], tuple[str, ...]] = {
         "особой диет",
     ),
 }
-_KEY_KEYWORDS: dict[str, tuple[str, ...]] = {
-    "diet": ("диет", "питани", "пищ", "еда", "ем "),
-    "preferred_time_slots": ("времен", "удобное время"),
-    "preferred_districts": ("район", "метро", "округ", "географ"),
-    "price_range": ("бюджет", "цен", "стоимост", "деньг", "рубл"),
-    "favorite_masters": ("мастер",),
-    "city": ("город",),
-    "visit_context": ("когда прихож", "после работ", "вечер", "выходн"),
+#: Стебель факта — с начала слова; шаблоны собраны заранее, а не на каждый ход.
+_FACT_PATTERNS: dict[tuple[str, str], re.Pattern[str]] = {
+    fact: re.compile(r"(?<!\w)(?:" + "|".join(re.escape(stem) for stem in stems) + ")")
+    for fact, stems in _FACT_KEYWORDS.items()
+}
+
+_W = r"(?<!\w)"  # начало слова
+_E = r"(?!\w)"  # конец слова
+
+#: DRF-2980 — домены памяти. Раньше здесь были стебли, и сравнение шло
+#: ПОДСТРОКОЙ в любом месте предмета: «живу в центре» стирала бюджет («цен»),
+#: «по средам» — питание («еда»), «огород» — город, «вокруг парка» — районы
+#: («округ»), «мастер-класс» — мастеров. Настоящая команда памяти стирала не
+#: тот домен, а названный оставляла.
+#:
+#: Теперь каждый шаблон — с начала слова, а у двусмысленных — закрытые
+#: окончания: «цен» — это «цена, цены, ценник, ценовой», но не «центр»,
+#: «ценю», «ценности», «оценку». Перебор хуже недобора: недобор уходит в
+#: уточнение со списком памяти, перебор стирает чужое без возврата.
+#:
+#: Ищется по ``field_match.group(0)`` — глагол, предлог и предмет, — ради
+#: одного слова: «еду» существительное только после «про / мою / свою / всю»,
+#: иначе это глагол («забудь, что я еду в отпуск»), а предлог предмет уже
+#: потерял (``_FORGET_FIELD_RE``). В глаголах и предлогах стеблей нет.
+_KEY_KEYWORDS: dict[str, re.Pattern[str]] = {
+    "diet": re.compile(
+        _W + r"(?:(?:кето)?диет|питани"
+        r"|пищ(?:а|и|у|ей|е)"
+        + _E
+        + r"|пищев(?:ой|ая|ое|ые|ых|ую|ым|ыми|ого|ом)"
+        + _E
+        + r"|ед(?:а|е|ой)"
+        + _E
+        # «после еды», «до еды» — о приёме лекарства, а не о питании
+        + r"|(?<!\bдо )(?<!\bпосле )еды"
+        + _E
+        + r"|ем"
+        + _E
+        + r")"
+        r"|(?:(?<=\bпро )|(?<=\bмою )|(?<=\bсвою )|(?<=\bвсю ))еду" + _E
+    ),
+    "preferred_time_slots": re.compile(
+        _W
+        + r"(?:удобн\w*\s+(?:мне\s+|для\s+меня\s+)?врем(?:я|ени|енем|ена)"
+        + _E
+        + r"|врем(?:я|ени)\s+(?:мне\s+)?удобн\w*|удобн\w*\s+по\s+времени"
+        # слова, которыми удобное время сохраняет ``said_memory`` (_SLOT_PHRASES)
+        r"|по\s+утрам|утром|днем|по\s+вечерам|вечером)" + _E
+    ),
+    "preferred_districts": re.compile(
+        _W
+        + r"(?:(?:микро)?район(?:а|у|ом|е|ы|ов|ам|ами|ах)?"
+        + _E
+        + r"|метро"
+        + _E
+        + r"|округ(?:а|е|у|ом|и|ов|ам|ах)?"
+        + _E
+        # «центре» районом сохраняет ``said_memory`` («мне удобно в центре»)
+        + r"|географ|в\s+центре"
+        + _E
+        + r")"
+    ),
+    "price_range": re.compile(
+        _W
+        + r"(?:бюджет|цен(?:а|ы|е|у|ой|ам|ами|ах|ник\w*|ов\w*)?"
+        + _E
+        + r"|стоимост|деньг|денег"
+        + _E
+        + r"|рубл)"
+    ),
+    "favorite_masters": re.compile(
+        # не «мастер-класс» и не «мастер класс» (голос — без дефиса),
+        # не «мастерская», «мастерство»
+        _W
+        + r"мастер(?:а|у|ом|е|ов|ам|ами|ах|иц(?:а|ы|е|у|ей|ам|ами|ах)?)?"
+        + _E
+        + r"(?![\s-]*класс)"
+    ),
+    "city": re.compile(
+        # не «огород», «городской»; не «за городом» (дача за городом)
+        _W + r"(?<!\bза )город(?:а|у|ом|е|ов|ам|ами|ах|ок|ка|ке|ку)?" + _E
+    ),
+    "visit_context": re.compile(
+        # DRF-2979 — подпись кнопки «Забыть: когда приходишь»: стебель «когда
+        # прихож» (через «ж») её не ловил, и кнопка ничего не стирала.
+        _W
+        + r"(?:когда\s+(?:я\s+|ты\s+)?(?:обычно\s+)?прихо(?:жу|дишь)"
+        + _E
+        + r"|после\s+(?:работ|офис)"
+        + r"|вечер(?:а|у|е|ом|ов|ам|ами|ах|ком|очком)?"
+        + _E
+        # «вечерний макияж / образ / платье» — услуга, а не время визита
+        + r"|вечерн(?:ий|ие|ее|яя|юю|его|ему|ей|ем|им|ими|их)"
+        r"\s+(?:время|времени|часы|часов|визит\w*|приход\w*)" + _E + r"|выходн)"
+    ),
 }
 
 # Scanner-correction keys (DRF-1454) carry the dish in the key itself
@@ -327,14 +419,31 @@ def _spoken(norm: str) -> str:
     return re.sub(r"\s+", " ", _POLITENESS_RE.sub(" ", without_marks)).strip()
 
 
-def _fact_keywords(content: dict) -> tuple[str, ...]:
-    """Value-specific stems only («забудь, что я веган» → the vegan row)."""
+def _has_stem(target: str, stem: str) -> bool:
+    """Стебель факта в предмете — с начала слова (DRF-2980), не подстрокой."""
+
+    return re.search(r"(?<!\w)" + re.escape(stem), target) is not None
+
+
+def _names_fact(content: dict, target: str) -> bool:
+    """The row's own value is named («забудь, что я веган» → the vegan row)."""
 
     key = content.get("key")
     value = content.get("value")
     if isinstance(key, str) and isinstance(value, str):
-        return _FACT_KEYWORDS.get((key, value), ())
-    return ()
+        pattern = _FACT_PATTERNS.get((key, value))
+        return pattern is not None and pattern.search(target) is not None
+    return False
+
+
+def _named_domains(subject: str) -> set[str]:
+    """Домены памяти, которые назвала команда (DRF-2980). Чистая функция.
+
+    ``subject`` — команда от глагола: «забудь про еду», а не «еду» (см.
+    ``_KEY_KEYWORDS``).
+    """
+
+    return {domain for domain, pattern in _KEY_KEYWORDS.items() if pattern.search(subject)}
 
 
 def _entry_key(entry: Any) -> str | None:
@@ -685,7 +794,7 @@ def handle_memory_command(
         # value-stem matches. A DOMAIN named («забудь всё про моё питание») →
         # delete EVERY live row of the matching key(s) — proof step 4: the
         # whole domain goes, history rows and other domains stay untouched.
-        fact_matched = [e for e in entries if any(kw in target for kw in _fact_keywords(e.content))]
+        fact_matched = [e for e in entries if _names_fact(e.content, target)]
         if fact_matched:
             keys = sorted({k for e in fact_matched if (k := _entry_key(e)) is not None})
             soft_delete_green_entries(user_id, [e.id for e in fact_matched])
@@ -699,13 +808,14 @@ def handle_memory_command(
         # ловят слова про визит («к мастеру», «на вечер»), а не про память.
         # Домен не стирается — уточнение со списком, как при нуле совпадений.
         if not _FOREIGN_NOUN_ANYWHERE_RE.search(target):
+            # Ключ строки не из семи доменов (``memory_inferred`` пишет любые) —
+            # просто не назван; не KeyError, который обработчик проглотил бы,
+            # отдав команду стирания модели.
+            named = _named_domains(field_match.group(0))
             for e in entries:
                 entry_key = _entry_key(e)
-                if entry_key is None:
-                    continue
-                domain = _domain_of(entry_key)
-                if any(kw in target for kw in _KEY_KEYWORDS.get(domain, ())):
-                    matched_domains.add(domain)
+                if entry_key is not None and _domain_of(entry_key) in named:
+                    matched_domains.add(_domain_of(entry_key))
         domain_keys = sorted(matched_domains)
         if len(domain_keys) == 1:
             doomed = [
