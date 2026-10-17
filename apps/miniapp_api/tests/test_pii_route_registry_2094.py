@@ -133,6 +133,15 @@ CUSTOMER_ROUTES: dict[str, Entry] = {
                 "and the consent key carries a date, not a document"
             ),
         ),
+        own(
+            "account_deletion_available",
+            via=V + "_me_payload",
+            note=(
+                "a boolean derived from the caller's own working roles across salons (DRF-2919): "
+                "false tells the caller's own screen that this account is deleted from the "
+                "cabinet, not from the customer profile; it names no salon and no role"
+            ),
+        ),
         third_party(
             "favorites.master_name",
             via=V + "_profile_to_dict",

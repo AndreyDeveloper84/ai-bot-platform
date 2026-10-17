@@ -2625,7 +2625,7 @@ def me(request: HttpRequest) -> HttpResponse:
 
     if request.method == "GET":
         snap = get_profile(bot_user)
-        return JsonResponse(_profile_to_dict(snap))
+        return JsonResponse(_me_payload(bot_user, snap))
 
     try:
         body = json.loads(request.body or b"{}")
@@ -2637,7 +2637,7 @@ def me(request: HttpRequest) -> HttpResponse:
         snap = update_profile(bot_user, body)
     except ProfileUpdateError as exc:
         return _error("invalid_field", str(exc), 400)
-    return JsonResponse(_profile_to_dict(snap))
+    return JsonResponse(_me_payload(bot_user, snap))
 
 
 @csrf_exempt
@@ -2662,6 +2662,18 @@ def delete_me(request: HttpRequest) -> HttpResponse:
         return _error("malformed", "body is not valid JSON", 400)
     if not isinstance(body, dict):
         return _error("malformed", "body must be a JSON object", 400)
+    # DRF-2919 — сотрудник отсюда не удаляется (решение 08.10).
+    # Здесь это ещё и защита кабинета: после ``deleted_at`` строка
+    # перестаёт быть рабочей, а ``TenantStaff`` остаётся активным —
+    # человек получал бы 403 в собственном салоне.
+    from apps.identity.services.bot_user_resolver import person_holds_working_role
+
+    if person_holds_working_role(bot_user):
+        return _error(
+            "staff_account",
+            "an account with a working role is not deleted from the customer profile",
+            409,
+        )
     confirmation = body.get("confirmation", "")
     try:
         soft_delete_user(bot_user, confirmation)
@@ -2793,7 +2805,10 @@ def deletion_request(request: HttpRequest) -> HttpResponse:
     Ответы ``POST``: 201 заявка заведена / 200 уже была открыта (тот же
     номер) — тело одно; 400 токен; 409 ``not_linked`` /
     ``identity_conflict`` (повтор не поможет — человек не связан с Ayla
-    или связан дважды); 502 ``upstream_unavailable`` (повтор поможет).
+    или связан дважды) / ``staff_account`` (у человека рабочая роль:
+    сотрудник удаляет аккаунт из кабинета, DRF-2919); 502
+    ``upstream_unavailable`` (повтор поможет). ``GET`` открыт и
+    сотруднику: уже заведённую заявку человек должен видеть.
     В каждом отказе ``status: "not_started"`` — единственное слово о
     состоянии данных, и оно правдиво.
     """
@@ -3474,6 +3489,25 @@ def _regrant_data_storage(bot_user: BotUser, body: dict) -> HttpResponse:
         )
         return JsonResponse(document, status=502)
     return JsonResponse(document, status=200)
+
+
+def _me_payload(bot_user: BotUser, snap) -> dict:
+    """Тело ``/customer/me``: снимок профиля плюс признак про удаление (DRF-2919).
+
+    ``account_deletion_available`` — может ли человек удалить аккаунт из
+    клиентского профиля. ``False`` у того, у кого есть действующая рабочая
+    роль в любом салоне: его путь — кабинет (решение 08.10).
+    Экрану признак нужен, чтобы не предлагать действие, которое сервер
+    отклонит; право устанавливает не он, а сама ручка заявки.
+
+    Отсутствие поля читается как «как раньше»: закешированный бандл о нём
+    не знает и показывает кнопку, а сервер отвечает ``not_started``.
+    """
+    from apps.identity.services.bot_user_resolver import person_holds_working_role
+
+    payload = _profile_to_dict(snap)
+    payload["account_deletion_available"] = not person_holds_working_role(bot_user)
+    return payload
 
 
 def _profile_to_dict(snap) -> dict:

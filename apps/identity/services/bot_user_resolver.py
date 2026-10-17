@@ -292,11 +292,49 @@ def person_bot_users(bot_user: BotUser):
     )
 
 
+def person_holds_working_role(bot_user: BotUser) -> bool:
+    """Есть ли у человека действующая рабочая роль — в любом салоне (DRF-2919).
+
+    «Рабочая» — то же определение, что у :func:`resolve_working_bot_user`:
+    ``resolve_role(строка).primary_role`` выше ``customer``. Отозванный
+    сотрудник и мастер с архивной карточкой — клиенты; мягко удалённая
+    строка рабочей не бывает. Отдельная функция, а не вызов того
+    резолвера: тот отвечает «какая строка» и при двух рабочих бросает
+    :class:`SalonChoiceRequired`, а здесь вопрос «есть ли хоть одна», и
+    две рабочие строки — это «да», а не исключение.
+
+    Человек — аккаунт мессенджера (:func:`person_bot_users`), а не одна
+    строка: клиентский Mini App подписан клиентским ботом, и строка, с
+    которой пришёл запрос, у мастера другого салона — клиентская. Строка
+    без ``channel_user_id`` ни с кем не связана — смотрим только её.
+
+    Своя строка проверяется первой: у обычного клиента с одной строкой это
+    и весь ответ.
+    """
+    from apps.identity.services.role_resolver import resolve_role
+
+    def working(row: BotUser) -> bool:
+        return row.deleted_at is None and resolve_role(row).primary_role != "customer"
+
+    if working(bot_user):
+        return True
+    if not bot_user.channel_user_id:
+        return False
+    others = (
+        person_bot_users(bot_user)
+        .filter(deleted_at__isnull=True)
+        .exclude(pk=bot_user.pk)
+        .select_related("tenant")
+    )
+    return any(working(row) for row in others)
+
+
 __all__ = [
     "SALON_CHOICE_HEADER",
     "SalonChoiceRequired",
     "is_staff_surface",
     "person_bot_users",
+    "person_holds_working_role",
     "resolve_bot_user",
     "resolve_tenant_slug_for_init_data",
     "resolve_working_bot_user",
