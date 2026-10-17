@@ -195,7 +195,7 @@ describe("«Расписание»: свободное окно ведёт в з
     await screen.findByRole("button", { name: "Записать на 14:00–17:00" });
     // Имена для AT различают окна: «Записать на 14:00–17:00» / «Недоступно: 14:00–17:00»;
     // видимый текст окна на месте.
-    expect(screen.getByText(/14:00 · свободно/)).toBeInTheDocument();
+    expect(screen.getByText(/14:00–17:00 · свободно/)).toBeInTheDocument();
     screen.getByRole("button", { name: "Недоступно: 14:00–17:00" }).click();
     await waitFor(() =>
       expect(

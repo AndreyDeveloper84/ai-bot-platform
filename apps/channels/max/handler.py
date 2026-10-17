@@ -560,6 +560,8 @@ def _emit_safety_shortcircuit(bot_user: Any, safety: Any, *, is_global: bool) ->
             "verdict": safety.verdict,
             "matched_count": len(safety.matched_patterns),
             "is_global_bot": is_global,
+            # DRF-2922 — вердикт дала копия без знаков внутри предложения.
+            "normalized": bool(getattr(safety, "normalized", False)),
         },
     )
 
