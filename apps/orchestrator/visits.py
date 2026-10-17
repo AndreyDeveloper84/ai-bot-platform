@@ -25,6 +25,7 @@ from apps.booking.services.records import (
     DEFAULT_VISIT_LIMIT,
     RepeatResult,
     Visit,
+    VisitsResult,
     list_upcoming,
     list_visits,
     prepare_repeat,
@@ -235,6 +236,7 @@ def route_visits(
     *,
     global_bot_user,
     trace_id: str | uuid.UUID | None = None,
+    upcoming: VisitsResult | None = None,
 ) -> DiscoveryReply:
     """Answer «покажи мои записи» / «мои визиты» from the backend.
 
@@ -249,7 +251,8 @@ def route_visits(
     пустое прошлое названо вслух, а приложение предлагается ровно тогда,
     когда список длиннее одной реплики.
     """
-    upcoming = list_upcoming(bot_user=global_bot_user, limit=DEFAULT_VISIT_LIMIT)
+    if upcoming is None:
+        upcoming = list_upcoming(bot_user=global_bot_user, limit=DEFAULT_VISIT_LIMIT)
     # На один больше, чем показываем. Шестой визит нужен не человеку, а
     # ответу: он и есть признак «история длиннее чата», и узнать его
     # иначе неоткуда — ``VisitsResult`` не несёт общего счётчика, а
@@ -304,6 +307,26 @@ def route_visits(
         text="\n\n".join(blocks),
         action_data=_records_buttons(upcoming.visits, past_shown, tail=tail_buttons),
     )
+
+
+def route_visits_to_cancel(
+    *,
+    global_bot_user,
+    trace_id: str | uuid.UUID | None = None,
+) -> DiscoveryReply | None:
+    """«Отмени запись на завтра» → тот же список, если есть что отменять (DRF-2982).
+
+    Отмена — на карточке визита (§37 п.1: сначала запись, потом действие), и
+    список, который отвечает на «покажи мои записи», и есть путь к ней. Но
+    ответ этого списка, когда впереди ничего нет, — про прошлые визиты и
+    «посмотри наши салоны», на отмену он не отвечает. Поэтому без предстоящих
+    записей — ``None``: ход идёт дальше, как до этой правки, и нового текста
+    не нужно. Бэкенд недоступен — честное «не смогла получить записи».
+    """
+    upcoming = list_upcoming(bot_user=global_bot_user, limit=DEFAULT_VISIT_LIMIT)
+    if upcoming.status != "backend_unavailable" and not upcoming.visits:
+        return None
+    return route_visits(global_bot_user=global_bot_user, trace_id=trace_id, upcoming=upcoming)
 
 
 def route_visit_callback(

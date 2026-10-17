@@ -317,7 +317,8 @@ def ai_unavailable_action_data(turn_id: str | None = None) -> dict[str, Any]:
 #:   «Покажи мои записи» -> ``is_personal_booking_lookup`` -> реальные записи
 #:   «Хочу записаться»   -> консьерж (услуга не названа) -> уточнение
 #:   «Перенести запись»  -> консьерж
-#:   «Отменить запись»   -> консьерж
+#:   «Отменить запись»   -> список визитов с «Отменить» (DRF-2982), если
+#:                          впереди есть записи; иначе — консьерж
 #:   «Что ты умеешь?»    -> консьерж
 def _global_menu_text() -> dict[str, str]:
     from apps.skills.menu.matching import CALLBACK_MENU_HELP, MENU_CALLBACK_TEXT
