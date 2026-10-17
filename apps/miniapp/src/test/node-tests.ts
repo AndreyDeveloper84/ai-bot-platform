@@ -73,6 +73,7 @@ export const NODE_ENVIRONMENT_TESTS: readonly string[] = [
   "src/lib/salon-today.test.ts",
   "src/lib/salonOwnerHint.test.ts",
   "src/lib/saved-meals.test.ts",
+  "src/lib/viteConfigRefusal2654.build.test.ts",
   "src/no-person-names.guard.test.ts",
   "src/screens/admin/adminBackDeclared2368.test.tsx",
   "src/screens/backContract.test.ts",

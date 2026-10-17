@@ -146,6 +146,14 @@ set -a; source /etc/ai-bot-platform/dev.env; set +a
 > here empties the live `dist` while it runs, which took `miniapp-dev` and
 > `proapp` down for eight seconds on 2026-08-21. See
 > [miniapp-deploy.md](miniapp-deploy.md).
+>
+> **Build variables live with the runner build, not here.** The production
+> build refuses without `VITE_SUPPORT_DEEPLINK` — the live MAX support channel
+> the profile privacy sheets open (#949, DRF-2654). It is a repository
+> variable (*Settings → Secrets and variables → Actions → Variables*), passed
+> to the build step of `deploy-dev`; nothing to set on this host. What it is,
+> who sets it and how to check the bundle —
+> [miniapp-build-env.md](miniapp-build-env.md).
 
 ```bash
 cd /home/taximeter/ai-bot-platform-dev/apps/miniapp
