@@ -63,6 +63,12 @@ CANCEL = [
     "Отмени запись к мастеру Анне на 15:00",
     "можешь отменить запись",
     "отмена брони на завтра",
+    # «сними / снять» рядом с записью — отмена (ревью кода)
+    "сними, пожалуйста, мою запись",
+    "снимите бронь на субботу",
+    # подстрока не отсекает: «неправильно» — не «правила», «наблюдением» — не «блюдо»
+    "я неправильно записалась, отмени запись",
+    "отмени запись, а за наблюдением приду потом",
 ]
 
 NOT_CANCEL = [
@@ -128,6 +134,13 @@ NOT_CANCEL = [
     "салон отменил бронь",
     "я отменила запись",
     "бронь отменена",
+    # чужой предмет где угодно в реплике (ревью кода)
+    "отмени напоминание о записи",
+    "удали мой номер телефона из записи",
+    # «снять» без записи рядом — услуга
+    "на завтра, нужно снять гель-лак, запись к Анне",
+    "нужна запись на завтра снять гель-лак",
+    "не снимай запись",
 ]
 
 
@@ -141,12 +154,50 @@ def test_anything_else_is_not(text: str) -> None:
     assert not names_a_booking_cancel(text)  # empty-assert-ok: близнецы — CANCEL выше
 
 
-@pytest.mark.parametrize("text", CANCEL + NOT_CANCEL)
+@pytest.mark.parametrize("text", CANCEL + ["отмени запись к врачу"])
 def test_a_cancel_is_always_a_booking_stop_and_a_command(text: str) -> None:
     """Иначе продолжение записи или вопрос памяти забрали бы ход раньше."""
-    if names_a_booking_cancel(text):
-        assert names_a_booking_stop(text)
-        assert names_a_command(text)
+    assert names_a_booking_cancel(text)
+    assert names_a_booking_stop(text)
+    assert names_a_command(text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "на завтра, нужно снять гель-лак, запись к Анне",
+        "нужна запись на завтра снять гель-лак",
+        "запишите на завтра снять наращивание",
+        "хочу записаться снять покрытие, запись на пятницу",
+    ],
+)
+def test_snyat_as_a_service_does_not_stop_a_booking(text: str) -> None:
+    """«Снять гель-лак» — услуга: посреди записи это ответ «какой день»."""
+    assert names_a_booking_stop("хочу снять запись")  # близнец: рядом с записью — стоп
+
+    assert not names_a_booking_stop(text)  # empty-assert-ok: близнец строкой выше
+
+
+def test_the_patterns_stay_linear_on_one_long_word() -> None:
+    import time
+
+    def run(n: int) -> float:
+        hostile = [
+            "голосов" + "а" * n + " запис",
+            "при" + "ё" * n + " пищи",
+            "отмени запись " + "а" * n,
+            "сними" + " пожалуйста" * (n // 10) + " запись",
+        ]
+        started = time.perf_counter()
+        for text in hostile:
+            names_a_booking_cancel(text)
+            names_a_booking_stop(text)
+        return time.perf_counter() - started
+
+    run(500)  # прогрев
+    small, large = run(4_000), run(8_000)
+
+    assert large < max(small, 0.005) * 3, (small, large)
 
 
 #: Принятая цена: «запись к врачу / на курсы» — не визит в салон, но ответ на неё

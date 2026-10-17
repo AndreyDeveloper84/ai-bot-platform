@@ -27,6 +27,7 @@ directly, so the fix stays pinned while the code is still in the tree.
 
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import timedelta
 
@@ -37,6 +38,7 @@ from apps.booking.models import BookingRequest, RemoteBookingProxy
 from apps.booking.services.records import Visit, VisitsResult
 from apps.channels.max import handler as max_handler
 from apps.conversations.models import Conversation, Message
+from apps.orchestrator.turn_commands import names_a_booking_cancel
 from apps.handoff.models import AdminTask
 from apps.handoff.services import resolve_admin_task
 from apps.identity.models import BotUser
@@ -512,6 +514,7 @@ class TestCancelGoesToVisits:
             .first()
         )
         assert last is not None and last.action_type == "booking_cancel_lookup"
+        assert "cb:visit:cancel:" in json.dumps(last.action_data, ensure_ascii=False)
 
     def test_with_nothing_ahead_the_turn_goes_on_as_before(
         self, mock_send, fake_redis, spy_concierge, backend
@@ -592,6 +595,28 @@ class TestCancelGoesToVisits:
         assert "УЗ-кавитация" in mock_send[-1]["text"]
         assert spy_concierge.call_count == 1  # «на завтра» — визит, консьерж не звался
 
+    def test_after_the_menu_a_cancel_still_shows_the_visits(
+        self, mock_send, fake_redis, spy_concierge, backend
+    ):
+        """Текст «Меню» называет «дневник питания»; строка с типом
+        ``marketplace_menu`` — не дневник, «отмени запись» после неё — визит."""
+        backend["upcoming"] = VisitsResult(status="ok", visits=(_visit(),))
+        _run_global("привет", mid="c10a")
+        conversation = _global_conversation()
+        Message.all_tenants.create(
+            tenant=conversation.tenant,
+            conversation=conversation,
+            role="assistant",
+            content="Вот что я умею:\n• подобрать мастера\n• дневник питания — запишу еду",
+            action_type="marketplace_menu",
+        )
+        spy_concierge.reset_mock()
+
+        _run_global("отмени запись", mid="c10b")
+
+        assert "УЗ-кавитация" in mock_send[-1]["text"]
+        spy_concierge.assert_not_called()
+
     def test_the_cancel_turn_writes_no_facts_about_the_person(
         self, mock_send, fake_redis, spy_concierge, backend, monkeypatch
     ):
@@ -624,6 +649,16 @@ class TestCancelGoesToVisits:
         assert "УЗ-кавитация" in mock_send[-1]["text"]
         assert "Привет! Я Ayla" not in mock_send[-1]["text"]
 
+    def test_twin_a_first_contact_cancel_with_nothing_ahead_still_gets_the_welcome(
+        self, mock_send, fake_redis, spy_concierge, backend, settings
+    ):
+        """Нечего отменять — первое сообщение встречает приветствие, как раньше."""
+        settings.GLOBAL_BOT_ONBOARDING = True
+
+        _run_global("отмени запись на завтра", mid="c11", user_id=555, chat_id=555)
+
+        assert "Привет! Я Ayla" in mock_send[-1]["text"]
+
     def test_with_memory_on_forget_all_is_still_a_memory_command(
         self, mock_send, fake_redis, spy_concierge, backend
     ):
@@ -638,7 +673,11 @@ class TestCancelGoesToVisits:
         record_global_consent(bot_user, source="welcome")
         backend["upcoming"] = VisitsResult(status="ok", visits=(_visit(),))
 
-        _run_global("удали всё", mid="c9", user_id=444, chat_id=444)
+        # «удали все свои записи» — и команда памяти («забудь всё», DRF-2891), и
+        # по словам отмена: решает порядок лестницы — память выше.
+        assert names_a_booking_cancel("удали все свои записи")
+
+        _run_global("удали все свои записи", mid="c9", user_id=444, chat_id=444)
 
         assert mock_send[-1]["text"] == FORGET_ALL_PROMPT
         assert backend["subjects"] == []  # empty-assert-ok: ответила команда памяти — assert выше

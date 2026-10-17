@@ -394,12 +394,6 @@ def needs_onboarding(bot_user: Any, text: str, conversation: Any = None) -> bool
 
     if looks_like_booking_request(stripped):
         return False
-    # DRF-2982 — «отмени запись на завтра» тоже намерение: приветствие съедало
-    # его, а «покажи мои записи» (ветка выше онбординга) — нет.
-    from apps.orchestrator.turn_commands import names_a_booking_cancel
-
-    if names_a_booking_cancel(stripped):
-        return False
     # DRF-1207 (второй путь) — приветствие не просыпается посреди разговора.
     if conversation is not None and _conversation_already_under_way(conversation):
         return False

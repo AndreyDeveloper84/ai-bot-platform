@@ -346,10 +346,11 @@ def _last_assistant_content(history: list[dict[str, Any]] | None) -> str | None:
 
 #: DRF-2982 — тип ответа ассистента, когда «отмени запись» показала список визитов.
 CANCEL_LOOKUP_ACTION_TYPE = "booking_cancel_lookup"
-#: Признаки дневника в тексте последнего ответа — запасной путь, когда тип и
-#: кнопки строки ``Message`` не сказали ничего: фото — «Записала: Борщ — 250
-#: ккал.», правка — «Исправила: …», совет — «…уже в дневнике — удали запись».
-_DIARY_REPLY_MARKERS = ("дневник", "ккал", "записала:", "исправила:", "калорийност")
+#: Признаки дневника в тексте последнего ответа — запасной путь, когда строки
+#: ``Message`` нет или у неё нет типа: фото — «Записала: Борщ — 250 ккал.»,
+#: правка — «Исправила: …», совет — «…уже в дневнике — удали запись». Не голое
+#: «дневник»: текст «Меню» и «Что ты умеешь?» называет «дневник питания».
+_DIARY_REPLY_MARKERS = ("записала:", "исправила:", "ккал", "в дневнике")
 
 
 def _diary_turn(conversation: Any, history: list[dict[str, Any]] | None) -> bool:
@@ -379,6 +380,9 @@ def _diary_turn(conversation: Any, history: list[dict[str, Any]] | None) -> bool
 
         if has_pending_text_entry(conversation) or has_pending_correction(conversation):
             return True
+        if last is not None and last["action_type"]:
+            # Строка с типом уже сказала «не дневник» («Меню», список визитов…).
+            return False
         after = (_last_assistant_content(history) or "").lower()
         return any(marker in after for marker in _DIARY_REPLY_MARKERS)
     except Exception:  # noqa: BLE001 — признак не должен ронять ход
@@ -2028,6 +2032,10 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
     # message the tap came from instead of following it.
     clarify_redraw = False
     was_memory_command = False
+    # DRF-2982 — ход «отмени запись» показал список визитов: фактов о человеке и
+    # времени из такой реплики не пишем. Флаг, а не ``assistant_action_type``:
+    # тип перезаписывает сторож исходящего.
+    cancel_turn = False
     memory_command_erased = False
     concierge_turn_ran = False
     # ``safety`` посчитан выше, до проверки глушения handoff (DRF-2213 Q1);
@@ -2397,7 +2405,22 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
     elif getattr(settings, "GLOBAL_BOT_ONBOARDING", False) and needs_onboarding(
         bot_user, event.text, conversation
     ):
-        reply = run_onboarding_turn(conversation, bot_user, event.text, trace_id)
+        # DRF-2982 — первое сообщение «отмени запись на завтра»: есть что
+        # отменять — список визитов, а не приветствие; нечего — приветствие,
+        # как раньше.
+        first_cancel = _route_cancel_to_visits(
+            bot_user=bot_user,
+            conversation=conversation,
+            history=history,
+            text=event.text,
+            trace_id=trace_id,
+        )
+        if first_cancel is not None:
+            reply = first_cancel
+            assistant_action_type = CANCEL_LOOKUP_ACTION_TYPE
+            cancel_turn = True
+        else:
+            reply = run_onboarding_turn(conversation, bot_user, event.text, trace_id)
         _record_live_path_metric(
             bot_user=bot_user,
             conversation=conversation,
@@ -2405,7 +2428,7 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
             message_text=event.text,
             t_start=t_start,
             outcome=AIRequestMetric.OUTCOME_SUCCESS,
-            skill_selected="onboarding",
+            skill_selected=CANCEL_LOOKUP_ACTION_TYPE if cancel_turn else "onboarding",
         )
     elif is_voice_only(event.text, event.attachments):
         # DRF-1939 — голосовое: честный ответ до фото-ветки и консьержа (иначе
@@ -2624,6 +2647,7 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
             elif cancel_reply is not None:
                 reply = cancel_reply
                 assistant_action_type = CANCEL_LOOKUP_ACTION_TYPE
+                cancel_turn = True
                 _record_live_path_metric(
                     bot_user=bot_user,
                     conversation=conversation,
@@ -3029,7 +3053,11 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
     # days out at 11:30. Runs on every turn of this surface, right before the
     # reply is persisted, so it sees the FINAL reply and cannot change which
     # branch produced it.
-    reply = _remember_time_preference(conversation, bot_user, event.text, reply)
+    #
+    # DRF-2982 — кроме хода отмены: «отмени запись на завтра вечером» не просьба
+    # о завтрашнем вечере; запомненное время поехало бы в следующий выбор дня.
+    if not cancel_turn:
+        reply = _remember_time_preference(conversation, bot_user, event.text, reply)
 
     # DRF-1210 — the last thing between the assistant and a person on the ONLY
     # surface where the person is a client. Every branch above lands here: the
@@ -3148,9 +3176,9 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
         not in (
             "safety_pre_check",
             "ai_unavailable",
-            # DRF-2982 — «отмени запись на вечер» — не «приходит вечером».
-            CANCEL_LOOKUP_ACTION_TYPE,
         )
+        # DRF-2982 — «отмени запись на вечер» — не «приходит вечером».
+        and not cancel_turn
     ):
         memory_pre_send_ran = True
         sink = record_turn_facts(
@@ -3344,7 +3372,7 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
     # the 152-ФЗ erasure. A forget/show turn must never write memory.
     # DRF-2982 — и не ход отмены: «отмени запись на вечер, к Ольге» — не факты о
     # человеке («приходит вечером», «любимый мастер — Ольга»), а смысл наоборот.
-    if not was_memory_command and assistant_action_type != CANCEL_LOOKUP_ACTION_TYPE:
+    if not was_memory_command and not cancel_turn:
         if memory_link_timed_out or not memory_pre_send_ran:
             record_turn_facts(
                 bot_user,

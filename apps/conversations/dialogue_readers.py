@@ -389,6 +389,18 @@ DIALOGUE_READERS: dict[str, DialogueReader] = {
             "«больше не спрошу»."
         ),
     ),
+    "apps.channels.max.handler:_diary_turn": DialogueReader(
+        storage="db_message",
+        reaches_prompt=False,
+        why=(
+            "DRF-2982: был ли прошлый ответ бота записью дневника питания — тогда "
+            "«удали запись» о ней, а не о визите. Читает ``action_type`` и "
+            "``action_data`` последней строки ассистента и сводит их к булеву "
+            "(тип ``food_*`` / кнопка ``cb:food:*``); в промпт не идёт ни строкой. "
+            "После обезличивания колонки пусты — признак «не дневник», и решает "
+            "текст реплики, как без истории."
+        ),
+    ),
     "apps.conversations.admin:MessageAdmin.get_queryset": DialogueReader(
         storage="db_message",
         reaches_prompt=False,

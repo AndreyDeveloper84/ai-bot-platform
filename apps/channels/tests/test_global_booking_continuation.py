@@ -801,6 +801,18 @@ class TestAStopCommandMidBooking:
         assert load_booking_context(_global_conversation()) is None
         assert wired.concierge == []  # empty-assert-ok: ответил список визитов — assert выше
 
+    def test_snyat_as_a_service_still_continues_the_booking(self, wired, salon) -> None:
+        """«Снять гель-лак» — услуга, а не «снять запись» (ревью кода DRF-2982)."""
+        tenant, master, catalog = salon
+        _tap_with_service(tenant, master, catalog["lymph"].id)
+
+        GlobalMaxHandler()(
+            _raw(_typed("на завтра, нужно снять гель-лак, запись к Анне", "mm-snyat"))
+        )
+
+        assert load_booking_context(_global_conversation()) is not None
+        assert wired.concierge == []  # empty-assert-ok: запись продолжилась — контекст жив выше
+
     def test_twin_a_day_correction_still_continues_the_booking(self, wired, salon) -> None:
         tenant, master, catalog = salon
         _tap_with_service(tenant, master, catalog["lymph"].id)
