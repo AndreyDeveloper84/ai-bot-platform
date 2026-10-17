@@ -1519,6 +1519,7 @@ export type AylaCard =
 /** Выбор из карточки — уходит модели уточнением, в нить пишется только текст кнопки. */
 export interface AylaSelect {
   client_id?: string;
+  service_id?: string;
   start_at?: string;
 }
 

@@ -203,8 +203,8 @@ def assistant_ask(request: HttpRequest) -> HttpResponse:
         recent_staff_history,
     )
 
-    # DRF-2153: выбор из карточки (клиент из «Кого вы имеете в виду?», время
-    # из «Свободно рядом») уходит модели уточнением — в нить пишется только
+    # DRF-2153 / DRF-2945: выбор из карточки (клиент, услуга, время)
+    # уходит модели уточнением — в нить пишется только
     # то, что мастер видел на кнопке.
     raw_select = body.get("select")
     select: dict[str, Any] = raw_select if isinstance(raw_select, dict) else {}
@@ -212,9 +212,12 @@ def assistant_ask(request: HttpRequest) -> HttpResponse:
     # Значения из карточки — короткие id/метки; предел, чтобы тело не
     # раздувало запрос к модели мимо лимита на text.
     client_id = str(select.get("client_id") or "").strip()[:64]
+    service_id = str(select.get("service_id") or "").strip()[:64]
     start_at = str(select.get("start_at") or "").strip()[:64]
     if client_id:
         hints.append(f"клиент выбран — client_id={client_id}")
+    if service_id:
+        hints.append(f"услуга выбрана — service_id={service_id}")
     if start_at:
         hints.append(f"время выбрано — start_at={start_at}")
     model_text = text
