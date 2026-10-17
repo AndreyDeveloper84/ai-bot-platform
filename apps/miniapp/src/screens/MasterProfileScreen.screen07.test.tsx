@@ -315,6 +315,65 @@ describe("6.2 — кроп 1:1", () => {
     expect(sent?.type).toBe("image/jpeg");
     expect(screen.queryByRole("dialog", { name: PROFILE_COPY.crop.title })).toBeNull();
   });
+
+  /**
+   * DRF-2881. Живой проход владельца 07.10: «Сохранить» на кропе — и ничего.
+   * При сбое шторка оставалась открытой, а сообщение рисовалось в экране ПОД
+   * ней; и любой сбой назывался «проверьте интернет».
+   */
+  async function saveCrop(container: HTMLElement) {
+    vi.mocked(loadImage).mockResolvedValue({ width: 1200, height: 800 } as unknown as HTMLImageElement);
+    vi.mocked(renderSquareCrop).mockResolvedValue(
+      new Blob([new Uint8Array([1, 2, 3])], { type: "image/jpeg" }),
+    );
+    const input = container.querySelector('input[type="file"][data-role="avatar"]') as HTMLInputElement;
+    fireEvent.change(input, {
+      target: { files: [new File([new Uint8Array([9, 9])], "me.jpg", { type: "image/jpeg" })] },
+    });
+    await settleScenario();
+    fireEvent.click(screen.getByText(PROFILE_COPY.crop.apply));
+    await settleScenario();
+    return screen.getByRole("dialog", { name: PROFILE_COPY.crop.title });
+  }
+
+  it("P2: сервер отказал — причина видна ВНУТРИ шторки, и это не «проверьте интернет»", async () => {
+    vi.mocked(uploadMasterProfilePhoto).mockRejectedValue(
+      new ApiError(503, "catalog_unavailable", "Каталог сейчас недоступен — попробуйте позже."),
+    );
+    const { container } = mountScreen();
+    await settleScenario();
+
+    const sheet = await saveCrop(container);
+
+    // Шторка открыта, запрос ушёл — и сообщение лежит в ней, а не под ней.
+    expect(uploadMasterProfilePhoto).toHaveBeenCalledTimes(1);
+    expect(within(sheet).getByRole("alert")).toHaveTextContent(PROFILE_COPY.states.saveError);
+    expect(within(sheet).queryByText(PROFILE_COPY.states.photoNetwork)).toBeNull();
+  });
+
+  it("P3: ответа не было — внутри шторки «проверьте интернет»", async () => {
+    vi.mocked(uploadMasterProfilePhoto).mockRejectedValue(new TypeError("Failed to fetch"));
+    const { container } = mountScreen();
+    await settleScenario();
+
+    const sheet = await saveCrop(container);
+
+    expect(within(sheet).getByRole("alert")).toHaveTextContent(PROFILE_COPY.states.photoNetwork);
+  });
+
+  it("P4: «Отмена» после сбоя уносит сообщение вместе со шторкой", async () => {
+    vi.mocked(uploadMasterProfilePhoto).mockRejectedValue(new TypeError("Failed to fetch"));
+    const { container } = mountScreen();
+    await settleScenario();
+    const sheet = await saveCrop(container);
+    expect(within(sheet).getByRole("alert")).toBeInTheDocument();
+
+    fireEvent.click(within(sheet).getByText(PROFILE_COPY.crop.cancel));
+    await settleScenario();
+
+    expect(screen.queryByRole("dialog", { name: PROFILE_COPY.crop.title })).toBeNull();
+    expect(screen.queryByText(PROFILE_COPY.states.photoNetwork)).toBeNull();
+  });
 });
 
 describe("ошибки", () => {

@@ -1012,8 +1012,15 @@ class CatalogHttpClient:
         actor: str,
         correlation_id: str,
         idempotency_key: str,
+        role: str = "admin",
+        assigned_by_external_user_id: str = "",
     ) -> LinkedSalonAdminDTO:
         """Свежий администратор салона в каталоге + связь с MAX-личностью (DRF-2085).
+
+        DRF-2826: ``role="receptionist"`` заводит ресепшна — только вместе с
+        ``assigned_by_external_user_id`` администратора ЭТОГО салона; каталог
+        проверяет его сам (``assigner_not_admin``). Для ``admin`` тело
+        прежнее, лишних полей нет.
 
         ``POST /api/v1/internal/tenants/<slug>/salon-admins/`` под
         ``AYLA_SALON_ADMIN_LINK_TOKEN`` — не под общим Bearer и не под
@@ -1046,15 +1053,19 @@ class CatalogHttpClient:
         except AylaUrlError as exc:
             raise CatalogTransportError(f"invalid AYLA_BASE_URL: {exc}") from exc
 
+        body = {
+            "external_user_id": external_user_id,
+            "actor": actor,
+            "correlation_id": correlation_id,
+            "idempotency_key": idempotency_key,
+        }
+        if role != "admin":
+            body["role"] = role
+            body["assigned_by_external_user_id"] = assigned_by_external_user_id
         try:
             response = self._client().post(
                 url,
-                json={
-                    "external_user_id": external_user_id,
-                    "actor": actor,
-                    "correlation_id": correlation_id,
-                    "idempotency_key": idempotency_key,
-                },
+                json=body,
                 headers=with_request_id(
                     {
                         "Authorization": f"Bearer {token}",

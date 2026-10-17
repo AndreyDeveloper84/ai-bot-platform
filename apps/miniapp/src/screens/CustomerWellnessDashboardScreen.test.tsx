@@ -716,6 +716,62 @@ describe("CustomerWellnessDashboardScreen — degraded reads (DRF-1546)", () => 
     expect(screen.queryByText("Не удалось загрузить")).not.toBeInTheDocument();
   });
 
+  describe("«Без чисел» — выбор человека (DRF-2873)", () => {
+    /**
+     * Решение владельца 04.10: добровольное скрытие калорий, БЖУ и числовых
+     * целей — на ВСЕХ экранах. Главный экран флаг `nutrition_numbers_hidden`
+     * не читал вовсе и рисовал числа у человека, который их выключил.
+     */
+    const DAY = {
+      calories_eaten: 1240,
+      calories_target: 2100,
+      pfc: { protein_g: 65, fat_g: 40, carbs_g: 120 },
+      water_glasses_eaten: 4,
+      water_glasses_target: 8,
+      active_goals: [],
+      display_name: "Анна",
+    };
+
+    it("режим включён: строка «Питание» есть, а чисел, БЖУ и шкалы в ней нет", async () => {
+      serve({ ...DAY, nutrition_numbers_hidden: true }, { this_week_booking_count: 0 });
+      await renderScreen(false);
+
+      // ПРИСУТСТВИЕ на тех же данных: день отрисован (вода видна), и строка
+      // питания на месте — названа, но без чисел.
+      expect(await screen.findByText(/4 \/ 8 стаканов/)).toBeInTheDocument();
+      const food = screen.getByLabelText("Питание");
+      expect(food).toHaveTextContent("Питание");
+
+      // ОТСУТСТВИЕ: ни калорий, ни цели, ни процента, ни БЖУ, ни шкалы.
+      expect(food.textContent).not.toMatch(/ккал/);
+      expect(food.textContent).not.toMatch(/1240|2100|59/);
+      expect(screen.queryByText(/Б 65 · Ж 40 · У/)).not.toBeInTheDocument();
+      expect(screen.queryByRole("progressbar", { name: /Калории/ })).not.toBeInTheDocument();
+      // Скринридер слышит то же, что видно глазу: числа не произносятся.
+      expect(screen.queryByLabelText(/килокалорий/)).not.toBeInTheDocument();
+    });
+
+    it("режим выключен явно: числа на месте", async () => {
+      serve({ ...DAY, nutrition_numbers_hidden: false }, { this_week_booking_count: 0 });
+      await renderScreen(false);
+
+      expect(await screen.findByText(/1240 \/ 2100 ккал · 59 %/)).toBeInTheDocument();
+      expect(screen.getByText(/Б 65 · Ж 40 · У/)).toBeInTheDocument();
+    });
+
+    it("режим включён, день пуст: сказано словами, без чисел", async () => {
+      serve(
+        { ...DAY, calories_eaten: 0, water_glasses_eaten: 0, nutrition_numbers_hidden: true },
+        { this_week_booking_count: 0 },
+      );
+      await renderScreen(false);
+
+      const food = await screen.findByLabelText("Питание: Сегодня ещё ничего не записано");
+      expect(food).toHaveTextContent("Сегодня ещё ничего не записано");
+      expect(food.textContent).not.toMatch(/ккал/);
+    });
+  });
+
   it("zero is still zero: an empty day reads as an empty day", async () => {
     // Ноль — настоящее значение и обязан рисоваться, иначе «опускаем
     // при сбое» превратилось бы в «прячем всегда».

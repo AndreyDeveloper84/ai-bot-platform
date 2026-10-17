@@ -42,27 +42,45 @@ class TestCrisisHandoff:
 
 
 class TestUmirayuNarrowing:
-    """`умираю` hyperbole vs real emergency (#1081 FP narrowing)."""
+    """`умираю` hyperbole vs real emergency (#1081 FP narrowing).
+
+    The full corpus of the rule lives in ``test_umirayu_hyperbole_2684.py``.
+    """
 
     @pytest.mark.parametrize(
         "text",
-        ["умираю как хочу этот маникюр", "умираю хочу кофе", "умираю как хочу на массаж"],
+        [
+            "умираю как хочу этот маникюр",
+            "умираю хочу кофе",
+            "умираю как хочу на массаж",
+            # DRF-2684 (B): пробел после «умираю» — гипербола; знак у «как→хочу»
+            # границы «умираю» не касается и исключение не снимает.
+            "Умираю как, хочу этот маникюр.",
+        ],
     )
     def test_hyperbole_not_crisis(self, text):
         assert evaluate_inbound(text).allowed is True
 
+    @pytest.mark.parametrize("text", ["Умираю, хочу кофе."])
+    def test_a_typed_mark_after_umirayu_is_a_crisis(self, text):
+        # DRF-2684 (B, решение владельца): знак сразу после «умираю» в НАБРАННОМ
+        # тексте снова даёт кризис. Полный корпус — в test_umirayu_hyperbole_2684.py.
+        assert evaluate_inbound(text).allowed is False
+        assert evaluate_inbound(text).verdict == "handoff"
+
     @pytest.mark.parametrize(
         "text",
-        ["помогите, умираю", "кажется, умираю"],
+        ["помогите, умираю", "кажется, умираю", "умираю, помогите", "умираю, всё"],
     )
     def test_real_emergency_still_caught(self, text):
         # Guard: narrowing must NOT drop a genuine bare «умираю» — crisis bucket.
         assert evaluate_inbound(text).allowed is False
         assert evaluate_inbound(text).verdict == "handoff"
 
-    def test_dying_of_pain_is_the_medical_emergency(self):
+    @pytest.mark.parametrize("text", ["умираю от боли в груди", "умираю, от боли в груди"])
+    def test_dying_of_pain_is_the_medical_emergency(self, text):
         # DRF-2000 (S-2): «умираю от боли» is a body, not despair — 103 / 112.
-        outcome = evaluate_inbound("умираю от боли в груди")
+        outcome = evaluate_inbound(text)
         assert outcome.allowed is False
         assert outcome.verdict == "medical"
 
@@ -70,6 +88,11 @@ class TestUmirayuNarrowing:
 # #1081 — expanded self-harm / suicidal-ideation coverage. Coverage-first: a
 # MISS here is a safety failure; a false-positive is only a UX cost.
 _RU_CRISIS = [
+    # DRF-2920 — по фразе на каждую из трёх новых записей (полный набор —
+    # test_direct_crisis_phrases_2920.py); корпус пробы паритета берёт их отсюда.
+    "хочу просто умереть",
+    "хочу уйти из жизни",
+    "хочу прыгнуть под поезд",
     "хочу умереть",
     "хочу умирать",
     "лучше умереть",

@@ -154,6 +154,7 @@ def read_current_view(user_id: uuid.UUID) -> PersonalContextView:
             # and used to throw it away right here — the single point where the
             # bot lost «who said this» (P0-3). Carry it to the consumer.
             source=entry.source,
+            source_tenant_id=entry.source_tenant_id,
         )
         for entry in select_current_facts(
             [e for e in read_green_entries(user_id) if is_surfaceable(e, inference_allowed=allowed)]

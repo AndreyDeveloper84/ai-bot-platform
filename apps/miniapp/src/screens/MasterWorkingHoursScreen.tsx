@@ -57,12 +57,15 @@ import { Snackbar } from "../components/Snackbar";
 import { SystemState } from "../components/master/SystemState";
 import { ApiError } from "../lib/api";
 import {
+  getPendingAvailability,
   getWorkingHours,
   putWorkingHours,
   requestAvailability,
+  type PendingAvailabilityItem,
   type WorkingHoursDay,
   type WorkingHoursResponse,
 } from "../lib/master-api";
+import { parseSalonWallClock } from "../lib/format";
 import { signalReady } from "../lib/max-sdk";
 
 export const DAY_LABELS = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"] as const;
@@ -99,6 +102,7 @@ export const HOURS_COPY = {
   weekNote:
     "Здесь задаётся ваш обычный график на неделю. Конкретные даты можно изменить отдельно.",
   dayOff: "Выходной",
+  dayNotSet: "Не задано",
   day: {
     scope: "Изменение только на этот день",
     usual: "По обычному графику",
@@ -140,6 +144,12 @@ export const HOURS_COPY = {
   },
   salon: {
     note: "Часы мастера салона ведёт салон. Заявку на изменение увидит администратор.",
+    lifecycleTitle: "Заявки на изменение",
+    pending: "Ожидает решения салона",
+    approved: "Изменение одобрено",
+    rejected: "Изменение отклонено",
+    rejectedEdit: "Изменить и отправить снова",
+    noRequests: "Активных заявок нет.",
     request: "Запросить изменение",
     sent: "Заявка отправлена администратору.",
     pickDay: "Или выберите день в списке — заявка уйдёт на него.",
@@ -355,11 +365,15 @@ export function MasterWorkingHoursScreen() {
 
   const [phase, setPhase] = useState<Phase>({ kind: "loading" });
   const [week, setWeek] = useState<WeekDraft>(emptyWeek());
+  const [scheduleSet, setScheduleSet] = useState(false);
+  const [availabilityItems, setAvailabilityItems] = useState<PendingAvailabilityItem[]>([]);
+  const [availabilityError, setAvailabilityError] = useState<unknown | null>(null);
   const [draft, setDraft] = useState<DayDraft | null>(null);
   const [sheet, setSheet] = useState<Sheet>(null);
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
   const [reason, setReason] = useState("");
+  const [requestDate, setRequestDate] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [snack, setSnack] = useState<string | null>(null);
@@ -376,6 +390,26 @@ export function MasterWorkingHoursScreen() {
     try {
       const data = await getWorkingHours();
       setWeek(weekFrom(data.schedule));
+      setScheduleSet(
+        data.schedule.some(
+          (day) =>
+            day.is_working_day ||
+            Boolean(day.start_time || day.end_time || day.break_start || day.break_end),
+        ),
+      );
+      if (!isSolo) {
+        try {
+          const lifecycle = await getPendingAvailability();
+          setAvailabilityItems(lifecycle.items);
+          setAvailabilityError(null);
+        } catch (err) {
+          setAvailabilityItems([]);
+          setAvailabilityError(err);
+        }
+      } else {
+        setAvailabilityItems([]);
+        setAvailabilityError(null);
+      }
       setPhase({ kind: "ready", timezone: data.timezone });
     } catch (err) {
       // 403 not_linked на загрузке — свой текст экрана, как на save и как у
@@ -389,7 +423,7 @@ export function MasterWorkingHoursScreen() {
       }
       setPhase({ kind: "error", err });
     }
-  }, []);
+  }, [isSolo]);
 
   useEffect(() => {
     void load();
@@ -414,6 +448,7 @@ export function MasterWorkingHoursScreen() {
     setFrom("");
     setTo("");
     setReason("");
+    setRequestDate(null);
     // Ошибка принадлежала листу: оставить её на экране недели значило бы
     // показать «alert» без того, к чему он относится.
     setSaveError(null);
@@ -434,6 +469,7 @@ export function MasterWorkingHoursScreen() {
       start: row?.start_time ?? "",
       end: row?.end_time ?? "",
     });
+    setRequestDate(isoDate(nextDateFor(weekday)));
     setFrom(working ? (row.start_time as string) : "00:00");
     setTo(working ? (row.end_time as string) : "23:59");
     setReason("");
@@ -512,7 +548,7 @@ export function MasterWorkingHoursScreen() {
   const sendRequest = async (origin: "day" | "unavailable") => {
     if (!draft || busy) return;
     const wholeDay = origin === "day";
-    const date = isoDate(nextDateFor(draft.weekday));
+    const date = requestDate ?? isoDate(nextDateFor(draft.weekday));
     const startHm = wholeDay ? "00:00" : from;
     const endHm = wholeDay ? "23:59" : to;
     if (!startHm || !endHm || startHm >= endHm) {
@@ -532,6 +568,13 @@ export function MasterWorkingHoursScreen() {
       });
       if (!isSolo) {
         setSnack(HOURS_COPY.salon.sent);
+        try {
+          const lifecycle = await getPendingAvailability();
+          setAvailabilityItems(lifecycle.items);
+          setAvailabilityError(null);
+        } catch (err) {
+          setAvailabilityError(err);
+        }
       } else {
         // Соло сам себе владелец: заявка применяется сразу (§83) — и тогда
         // «отправлено» было бы неправдой.
@@ -630,7 +673,7 @@ export function MasterWorkingHoursScreen() {
                 <span
                   className={`working-hours__summary${err ? " working-hours__summary--error" : ""}`}
                 >
-                  {err ?? summary(day)}
+                  {err ?? (scheduleSet ? summary(day) : HOURS_COPY.dayNotSet)}
                 </span>
               </button>
             </li>
@@ -641,6 +684,33 @@ export function MasterWorkingHoursScreen() {
       <p className="working-hours__note">{HOURS_COPY.weekNote}</p>
       <p className="working-hours__note">{SEMANTIC_NOTE}</p>
       {!isSolo && <p className="working-hours__note">{HOURS_COPY.salon.note}</p>}
+
+      {!isSolo ? (
+        <AvailabilityLifecycle
+          items={availabilityItems}
+          error={availabilityError}
+          busy={busy}
+          onRetry={() => void load()}
+          onEditRejected={(item) => {
+            const startIso = item.requested_start;
+            const endIso = item.requested_end;
+            const startWall = startIso ? parseSalonWallClock(startIso) : null;
+            const endWall = endIso ? parseSalonWallClock(endIso) : null;
+            const weekday = startWall
+              ? weekdayFromYmd(startWall.ymd)
+              : todayWeekday();
+            openUnavailable(weekday, null);
+            if (startWall) {
+              setRequestDate(startWall.ymd);
+              setFrom(startWall.hm);
+            }
+            if (endWall) {
+              setTo(endWall.hm);
+            }
+            setReason(item.reason_text ?? "");
+          }}
+        />
+      ) : null}
 
       {saveError && sheet === null && (
         <p className="working-hours__error" role="alert">
@@ -697,6 +767,7 @@ export function MasterWorkingHoursScreen() {
       {sheet?.kind === "unavailable" && draft && (
         <UnavailableSheet
           weekday={draft.weekday}
+          dateIso={requestDate}
           from={from}
           to={to}
           reason={reason}
@@ -731,6 +802,101 @@ export function MasterWorkingHoursScreen() {
       <MasterTabBar scheduleHasPendingChange={false} />
     </main>
   );
+}
+
+
+function AvailabilityLifecycle({
+  items,
+  error,
+  busy,
+  onRetry,
+  onEditRejected,
+}: {
+  items: PendingAvailabilityItem[];
+  error: unknown | null;
+  busy: boolean;
+  onRetry: () => void;
+  onEditRejected: (item: PendingAvailabilityItem) => void;
+}) {
+  const visible = items.filter((item) =>
+    ["pending", "approved", "rejected"].includes(item.status),
+  );
+
+  return (
+    <section className="working-hours__requests" aria-labelledby="working-hours-requests-title">
+      <h2 id="working-hours-requests-title">{HOURS_COPY.salon.lifecycleTitle}</h2>
+      {error ? (
+        <SystemState
+          kind="load_error"
+          what="schedule"
+          err={error}
+          busy={busy}
+          onRetry={onRetry}
+        />
+      ) : visible.length === 0 ? (
+        <p className="working-hours__note">{HOURS_COPY.salon.noRequests}</p>
+      ) : (
+        <ul className="working-hours__request-list">
+          {visible.map((item) => (
+            <li key={item.request_id} className="m-card working-hours__request">
+              <strong>
+                {item.status === "pending"
+                  ? HOURS_COPY.salon.pending
+                  : item.status === "approved"
+                    ? HOURS_COPY.salon.approved
+                    : HOURS_COPY.salon.rejected}
+              </strong>
+              <p>{availabilityWindowText(item)}</p>
+              {item.reason_text ? <p>{item.reason_text}</p> : null}
+              {item.status === "rejected" && item.rejection_reason ? (
+                <p role="note">Причина: {item.rejection_reason}</p>
+              ) : null}
+              {item.status === "rejected" ? (
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  onClick={() => onEditRejected(item)}
+                >
+                  {HOURS_COPY.salon.rejectedEdit}
+                </button>
+              ) : null}
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
+export function availabilityWindowText(item: PendingAvailabilityItem): string {
+  if (!item.requested_start || !item.requested_end) return "Период не указан";
+  const start = parseSalonWallClock(item.requested_start);
+  const end = parseSalonWallClock(item.requested_end);
+  if (!start || !end) return "Период не удалось прочитать";
+  const startMonth = MONTHS_GENITIVE[start.month - 1] ?? "";
+  if (start.ymd !== end.ymd) {
+    const endMonth = MONTHS_GENITIVE[end.month - 1] ?? "";
+    return `${start.day} ${startMonth} · ${start.hm} — ${end.day} ${endMonth} · ${end.hm}`;
+  }
+  return `${start.day} ${startMonth} · ${start.hm}–${end.hm}`;
+}
+
+function weekdayFromYmd(ymd: string): number {
+  const match = ymd.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) return todayWeekday();
+  let year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  if (!year || month < 1 || month > 12 || day < 1 || day > 31) return todayWeekday();
+
+  // Sakamoto's algorithm: 0=Sunday…6=Saturday, then convert to Monday-first.
+  const offsets = [0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4] as const;
+  if (month < 3) year -= 1;
+  const sundayFirst =
+    (year + Math.floor(year / 4) - Math.floor(year / 100) + Math.floor(year / 400) +
+      (offsets[month - 1] ?? 0) + day) %
+    7;
+  return (sundayFirst + 6) % 7;
 }
 
 /**
@@ -914,6 +1080,7 @@ function DaySheet({
 /** Экран 3 макета — «Недоступно (часть дня)». */
 function UnavailableSheet({
   weekday,
+  dateIso,
   from,
   to,
   reason,
@@ -927,6 +1094,7 @@ function UnavailableSheet({
   onClose,
 }: {
   weekday: number;
+  dateIso: string | null;
   from: string;
   to: string;
   reason: string;
@@ -939,7 +1107,7 @@ function UnavailableSheet({
   onSave: () => void;
   onClose: () => void;
 }) {
-  const date = nextDateFor(weekday);
+  const date = dateIso ? new Date(`${dateIso}T12:00:00`) : nextDateFor(weekday);
   return (
     <SheetChrome
       headlineId="working-hours-unavailable-headline"

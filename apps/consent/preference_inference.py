@@ -112,6 +112,12 @@ def withdraw(bot_user: "BotUser") -> int:
             source=WITHDRAW_SOURCE,
         )
         _erase_derived_memory(bot_user)
+    # DRF-2700 — «перестать использовать такие выводы, в том числе из прошлых
+    # ответов» (решение владельца 07.10, п.23). Строки переписки закрывает
+    # отсечка по времени отзыва; окно Redis очищается здесь.
+    from apps.conversations.model_history import clear_model_context_for_person
+
+    clear_model_context_for_person(bot_user)
     return withdrawn
 
 

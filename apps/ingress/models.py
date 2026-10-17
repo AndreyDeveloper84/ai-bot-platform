@@ -6,7 +6,9 @@ the channel's own idempotency hint is the key.
 
 Why both ``raw_payload`` and ``resolved_tenant_id``:
   - raw_payload is preserved for replay (Sprint 5) and forensics —
-    Sprint 1 contract per review revision 1A.
+    Sprint 1 contract per review revision 1A. Не дословно: содержимое
+    аудио-вложений (ссылка на запись голосового) в журнал не пишется —
+    решение владельца «голос не храним» (DRF-1943, ``ingress.redaction``).
   - resolved_tenant_id is derived at ingest time so workers don't
     have to repeat the channel-token → tenant lookup.
 
@@ -37,7 +39,8 @@ class WebhookJournal(models.Model):
     raw_payload = models.JSONField(
         default=dict,
         blank=True,
-        help_text="Full untouched webhook payload. Preserved for replay (Sprint 5).",
+        help_text="Тело вебхука для разбора инцидентов; живёт INGRESS_RAW_RETENTION_HOURS. "
+        "Содержимое аудио-вложений (ссылка на запись голосового) сюда не пишется (DRF-1943).",
     )
     resolved_tenant = models.ForeignKey(
         "tenancy.Tenant",

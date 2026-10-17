@@ -249,14 +249,30 @@ class TestClearOnForget:
             {"field": "preferred_time_slots", "value": [], "source": "explicit"},
         ]
 
-    def test_price_range_has_no_clear_encoding(self, settings, caplog):
-        """Contract gap: null is rejected by the serializer and "" breaks the
-        Decimal column — the skip must be logged, never guessed."""
+    def test_price_range_is_cleared_by_null_in_its_own_request(self, settings):
+        """DRF-2886: the catalog resets a field on ``value: null``. The price
+        goes in a request of its own, so an older catalog refusing null cannot
+        take the diet/district clear down with it."""
         bu = _bot_user("clr-2")
         _consents(bu, settings)
         client = _StubClient()
+
+        n = clear_declared_fields(bu, ["price_range", "diet"], client=client)
+
+        assert n == 3
+        price_patch, other_patch = _patches(client)
+        assert price_patch[2] == [
+            {"field": "price_range_min", "value": None, "source": "explicit"},
+            {"field": "price_range_max", "value": None, "source": "explicit"},
+        ]
+        assert other_patch[2] == [{"field": "diet_type", "value": "", "source": "explicit"}]
+
+    def test_favorite_masters_is_still_not_cleared(self, settings, caplog):
+        bu = _bot_user("clr-2b")
+        _consents(bu, settings)
+        client = _StubClient()
         with caplog.at_level("WARNING", logger="apps.orchestrator.memory.ayla_bridge"):
-            n = clear_declared_fields(bu, ["price_range"], client=client)
+            n = clear_declared_fields(bu, ["favorite_masters"], client=client)
         assert n == 0
         assert client.calls == []
         assert "clear_skipped" in caplog.text

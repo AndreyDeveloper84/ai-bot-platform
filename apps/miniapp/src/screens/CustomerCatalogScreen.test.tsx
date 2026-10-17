@@ -45,7 +45,7 @@ const SERVICES: Service[] = [
 ];
 
 const MASTERS: Master[] = [
-  { id: "mst-1", name: "Анна Соколова", specialization: "nail-мастер", bio: "", experience: "5 лет", rating: "4.9", photo_url: "" },
+  { id: "mst-1", name: "Анна Соколова", specialization: "nail-мастер", bio: "", experience: "5 лет", rating: "4.9", photo_url: "", review_count: 37 },
   { id: "mst-2", name: "Карина Ли", specialization: "бровист", bio: "", experience: "3 года", rating: null, photo_url: "" },
 ];
 

@@ -8,7 +8,7 @@
  */
 import { describe, expect, it } from "vitest";
 
-import { isCustomerSurfacePath } from "./customer-surface";
+import { isCustomerSurfacePath, isStaffSurfacePath } from "./customer-surface";
 import { parseStartRoute } from "./max-sdk";
 
 const MAX_SDK = import.meta.glob("./max-sdk.ts", {
@@ -40,6 +40,29 @@ describe("isCustomerSurfacePath", () => {
       expect(isCustomerSurfacePath(path)).toBe(false);
     },
   );
+});
+
+describe("isStaffSurfacePath", () => {
+  it.each(["/master/schedule", "/admin/today", "/solo/my-day"])(
+    "%s — рабочая поверхность",
+    (path) => {
+      expect(isStaffSurfacePath(path)).toBe(true);
+    },
+  );
+
+  it.each(["/", "/master", "/administrator/x", "/customer/main", "/feedback/1", "/solo"])(
+    "%s — не рабочая поверхность",
+    (path) => {
+      expect(isStaffSurfacePath(path)).toBe(false);
+    },
+  );
+
+  it("клиентская и рабочая поверхности не пересекаются", () => {
+    const paths = ["/customer/main", "/feedback/1", "/master/schedule", "/admin/today", "/solo/my-day"];
+    const both = paths.filter((p) => isCustomerSurfacePath(p) && isStaffSurfacePath(p));
+    expect(paths.length).toBe(5);
+    expect(both).toEqual([]);
+  });
 });
 
 describe("цели кнопок чата", () => {

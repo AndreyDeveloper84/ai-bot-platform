@@ -262,6 +262,11 @@ def customer_memory_entry(request: HttpRequest, entry_id: uuid.UUID) -> HttpResp
         )
     if not deleted:
         return _error("not_found", "Такой записи нет.", 404)
+    # DRF-2700 — отсечку для строк переписки поставила дверь стирания; у окна
+    # Redis времени нет, оно очищается целиком.
+    from apps.conversations.model_history import clear_model_context_for_person
+
+    clear_model_context_for_person(bot_user)
     return JsonResponse({"id": str(entry_id), "deleted": True})
 
 

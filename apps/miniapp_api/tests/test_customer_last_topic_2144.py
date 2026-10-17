@@ -267,6 +267,21 @@ class TestLastTopic:
 
         assert topic == "Подберу мастера по массажу."
 
+    def test_a_dictation_with_a_blank_line_does_not_become_the_topic(
+        self, client, tenant, bot_user, settings
+    ):
+        """DRF-2817: эхо — один абзац, и обрывок слов человека темой не становится."""
+        from apps.channels.max.voice_turn import with_voice_echo
+
+        settings.VOICE_ECHO_MODE = "always"
+        conv = _conversation(tenant, bot_user)
+        text = with_voice_echo("Подберу мастера по массажу.", "хочу на массаж\n\nи ещё маникюр")
+        _turn(conv, Message.Role.ASSISTANT, text, minutes_ago=1)
+
+        topic = _get(client, bot_user).json()["last_topic"]["text"]
+
+        assert topic == "Подберу мастера по массажу."
+
     def test_memory_question_paragraph_is_not_part_of_the_topic(self, client, tenant, bot_user):
         conv = _conversation(tenant, bot_user)
         text = (

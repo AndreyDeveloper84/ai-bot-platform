@@ -49,6 +49,7 @@ import {
   hapticImpact,
   hapticSelection,
   openExternalLink,
+  parseStartRoute,
   signalReady,
 } from "../lib/max-sdk";
 import {
@@ -122,13 +123,31 @@ export interface AylaChatConfirmResult {
 
 /**
  * Кнопка под ответом (DRF-2799, клиентский диалог): подпись и либо `payload`
- * — тап уходит тем же `ask`, как тап кнопки в чате бота, — либо `url`.
+ * — тап уходит тем же `ask`, как тап кнопки в чате бота, — либо `url`,
+ * либо `open_app` (DRF-2885): слаг экрана, на который в чате бота вела бы
+ * кнопка «открыть Mini App». Здесь это переход внутри приложения.
  * Стафф-ассистент кнопок не присылает, у него этот ряд пуст.
  */
 export interface AylaQuickReply {
   label: string;
   payload?: string;
   url?: string;
+  open_app?: string;
+}
+
+/**
+ * Куда ведёт кнопка `open_app` — или `null`, если вести некуда: слаг не
+ * знаком карте маршрутов. Такая кнопка не рисуется: нажатие без действия
+ * хуже отсутствия кнопки.
+ */
+export function quickReplyRoute(reply: AylaQuickReply): string | null {
+  return reply.open_app ? parseStartRoute(reply.open_app) : null;
+}
+
+/** Кнопку можно нажать: у неё есть действие, которое этот экран умеет исполнить. */
+function isActionable(reply: AylaQuickReply, canOpen: boolean): boolean {
+  if (reply.url || reply.payload) return true;
+  return canOpen && quickReplyRoute(reply) !== null;
 }
 
 export interface AylaChatApi {
@@ -453,21 +472,24 @@ export function AylaChat({
                 ) : null}
                 {/* DRF-2799: кнопки — только под последним ответом, как
                     клавиатура в чате бота; старые не жмутся заново. */}
-                {m.buttons && m.buttons.length > 0 && m.id === lastId ? (
+                {m.id === lastId &&
+                (m.buttons ?? []).some((b) => isActionable(b, onOpen !== undefined)) ? (
                   <ul className="ayla-card__list" aria-label="Варианты ответа">
-                    {m.buttons.map((b) => (
-                      <li key={`${b.label}-${b.payload ?? b.url ?? ""}`}>
+                    {(m.buttons ?? [])
+                      .filter((b) => isActionable(b, onOpen !== undefined))
+                      .map((b) => (
+                      <li key={`${b.label}-${b.payload ?? b.url ?? b.open_app ?? ""}`}>
                         <button
                           type="button"
                           className="ayla-card__option"
                           disabled={sending}
-                          onClick={() =>
-                            b.url
-                              ? openExternalLink(b.url)
-                              : b.payload
-                                ? void send(b.payload, undefined, b.label)
-                                : undefined
-                          }
+                          onClick={() => {
+                            if (b.url) return openExternalLink(b.url);
+                            if (b.payload) return void send(b.payload, undefined, b.label);
+                            // DRF-2885 — переход внутри Mini App, не новый ход.
+                            const route = quickReplyRoute(b);
+                            if (route && onOpen) onOpen(route);
+                          }}
                         >
                           <span className="ayla-card__row-main">{b.label}</span>
                         </button>

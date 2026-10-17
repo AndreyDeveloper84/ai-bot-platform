@@ -16,6 +16,8 @@
  * «Последняя тема» на Главной и история здесь — один и тот же разговор.
  */
 
+import { useNavigate } from "react-router-dom";
+
 import { AylaChat } from "../components/AylaChat";
 import { useScreenBack } from "../hooks/useScreenBack";
 import { customerAylaApi } from "../lib/customer-assistant";
@@ -25,6 +27,8 @@ const GREETING = "Напиши, чем помочь, — продолжим зд
 
 export function CustomerAylaScreen() {
   useScreenBack(backTo("/customer/main"));
+  // DRF-2885 — кнопки бота «открыть Mini App» здесь ведут на экран внутри него.
+  const navigate = useNavigate();
   return (
     <main className="screen ayla-screen">
       <header className="ayla-header">
@@ -34,7 +38,12 @@ export function CustomerAylaScreen() {
         <p className="ayla-header__sub">Запись, уход и питание</p>
       </header>
 
-      <AylaChat api={customerAylaApi} greeting={GREETING} logLabel="Разговор с Ayla" />
+      <AylaChat
+        api={customerAylaApi}
+        greeting={GREETING}
+        logLabel="Разговор с Ayla"
+        onOpen={(route) => navigate(route)}
+      />
     </main>
   );
 }
