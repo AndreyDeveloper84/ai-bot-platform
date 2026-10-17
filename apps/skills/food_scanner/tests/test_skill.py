@@ -615,6 +615,17 @@ class TestCorrectedGramsReachTheLog:
 
     GRAMS = {"scan-1": {"grams": 500, "portion_g": 250}}
 
+    def test_drf2766_numbers_hidden_logs_and_says_so_without_the_number(self) -> None:
+        """«Без чисел»: запись ложится как обычно, реплика — без калорий."""
+        with patch(
+            "apps.nutrition_proactive.prefs.get_prefs", return_value={"numbers_hidden": True}
+        ):
+            result, captured, written = self._to_diary(grams_map=self.GRAMS)
+
+        assert captured[0]["scan_id"] == "scan-1"
+        assert ("food_scan_logged", {"scan-1": "log-1"}) in written
+        assert result.reply_text == "Записала: Борщ."
+
     def test_corrected_grams_set_the_portion_and_the_origin(self) -> None:
         result, captured, written = self._to_diary(grams_map=self.GRAMS)
 

@@ -20,7 +20,7 @@ deltas:
 ### State enum — minimal per ADR-0007
 
 `State` ships only `{IDLE, CONSULTING, ESCALATED}` in Sprint 2. The
-PHASE0_DESIGN.md §3.2 7-state enum is decomposed across Sprint 3+
+mysite/docs/arch/PHASE0_DESIGN.md §3.2 7-state enum is decomposed across Sprint 3+
 (BOOKING_FLOW + AWAITING_CONFIRMATION + HUMAN_HANDOFF) and Sprint 4+
 (FOOD_LOGGING) — each lands alongside its writer code via a trivial
 `alter_choices` migration. See `docs/adr/ADR-0007-conversation-state-enum.md`.
@@ -397,7 +397,7 @@ class Message(models.Model):
 
     Persists every turn — user, assistant, tool, system. Ported from
     `Ayla origin/dev:ai/models.py::Message` shape with two additions
-    per PHASE0_DESIGN.md §3.3:
+    per mysite/docs/arch/PHASE0_DESIGN.md §3.3:
 
     1. **`rendered_text`** — the canonical text the client actually saw
        after channel-specific rendering (markdown stripped, buttons

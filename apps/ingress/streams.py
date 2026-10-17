@@ -12,7 +12,10 @@ Why Redis Streams (not Celery, not a plain pub/sub):
     the raw webhook body — message text, name, a shared contact — so it
     is deleted once processed, and whatever is left (failed entries in
     the PEL, the reaper's ``:dlq`` copies) is trimmed after
-    ``settings.INGRESS_RAW_RETENTION_HOURS``. Nothing reads a stream's
+    ``settings.INGRESS_RAW_RETENTION_HOURS``. (DRF-1943) A failed entry
+    with a voice attachment does not wait in the PEL: the consumer moves
+    it to ``:dlq`` at once, and every ``:dlq`` copy is written without the
+    link to the recording. Nothing reads a stream's
     history back: an earlier line here promised a replay that reads these
     streams, and no such code exists.
   - `redis-py` is already a dep via `celery[redis]`; no new lib.

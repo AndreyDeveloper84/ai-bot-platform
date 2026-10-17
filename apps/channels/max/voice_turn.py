@@ -11,10 +11,12 @@
 сообщения, гейт safety, дневник, консьерж — ни одного ``if voice`` ниже.
 Единственное исключение — K19-Б (решение владельца 22.09): гейту
 отдаётся копия текста без знаков препинания (``gate_text``), потому что
-исключение для гиперболы «умираю как хочу…» в ``pre_check.py`` не
-допускает запятую, а OpenAI ставит знаки всегда. Когда окно safety
-поправит регулярку (вариант А), ``VOICE_GATE_STRIP_PUNCT=false`` — и
-голос с текстом проверяются одинаково. Второе исключение — DRF-2488
+OpenAI ставит знаки всегда, а шаблоны ``pre_check.py`` ждут между
+словами пробел. Правило про гиперболу «умираю как хочу…», ради которого
+копию завели, с DRF-2684 (вариант А) знаков не замечает само. Но
+``VOICE_GATE_STRIP_PUNCT`` остаётся включённым: остальным шаблонам копия
+нужна по-прежнему — распознанное «Не хочу, жить.» гейт без неё
+пропускает (проба ``test_gate_strip_parity.py``). Второе исключение — DRF-2488
 (решение владельца 28.09): запись реплики человека помечается
 ``Message.input_channel=voice``, чтобы выгрузка, оператор и админка
 видели, что в ``content`` расшифровка, а не набранный текст. На ход это
@@ -50,7 +52,6 @@
 from __future__ import annotations
 
 import logging
-import re
 import time
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
@@ -108,12 +109,6 @@ REFUSAL_TEXTS: Final[dict[str, str]] = {
 }
 
 ECHO_LINE: Final[str] = "Я услышала: «{text}»"
-
-# Только знаки препинания МЕЖДУ словами. Апостроф и дефис внутри слова
-# остаются: «don't want to live» и «self-harm» — шаблоны гейта, и без
-# апострофа кризис по-английски терялся (проба DRF-2423 это поймала).
-_PUNCT = re.compile(r"[,.!?;:…\"«»“”„()\[\]{}<>—–]|(?<!\w)['\-’]|['\-’](?!\w)")
-_WS = re.compile(r"\s+")
 
 
 @dataclass(frozen=True, slots=True)
@@ -198,16 +193,29 @@ def strip_for_gate(text: str) -> str:
     """Копия текста без знаков препинания между словами для ``evaluate_inbound`` (K19-Б).
 
     Апостроф и дефис внутри слова сохраняются («don't», «self-harm») — иначе
-    английские шаблоны гейта перестают срабатывать.
+    английские шаблоны гейта перестают срабатывать. Само правило живёт рядом с
+    гейтом (``apps.orchestrator.safety.normalize``, DRF-2922): набранный текст
+    гейт проверяет ещё и по копии без знаков внутри предложения, и две копии
+    должны описываться в одном месте.
     """
-    return _WS.sub(" ", _PUNCT.sub(" ", text)).strip()
+    from apps.orchestrator.safety.normalize import without_marks
+
+    return without_marks(text)
 
 
 def with_voice_echo(reply_text: str, transcript_text: str) -> str:
-    """Добавить «Я услышала: …» перед ответом, если ``VOICE_ECHO_MODE=always``."""
-    if echo_mode() != "always" or not transcript_text:
+    """Добавить «Я услышала: …» перед ответом, если ``VOICE_ECHO_MODE=always``.
+
+    Эхо — всегда один абзац (DRF-2817): пробельные символы расшифровки
+    схлопываются в один пробел только для этой строки. Перевод строки внутри
+    длинной диктовки рвал эхо надвое, и «Последняя тема» в Mini App
+    (``views_last_topic``) брала за тему ответа обрывок слов самого человека.
+    Сама расшифровка в переписке и для модели не меняется.
+    """
+    heard = " ".join(transcript_text.split())
+    if echo_mode() != "always" or not heard:
         return reply_text
-    return f"{ECHO_LINE.format(text=transcript_text)}\n\n{reply_text}"
+    return f"{ECHO_LINE.format(text=heard)}\n\n{reply_text}"
 
 
 def _refused(code: str, reason: str) -> VoiceRefused:

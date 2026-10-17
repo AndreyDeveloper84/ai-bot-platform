@@ -81,6 +81,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass
+from collections.abc import Callable
 from typing import Any
 
 from apps.identity.services.global_tenant import get_global_bot_tenant
@@ -634,7 +635,9 @@ def food_tap_labels(scan_id: str) -> dict[str, str]:
         food_recognition_keyboard,
         food_text_deleted_keyboard,
         food_text_estimate_keyboard,
+        food_text_items_keyboard,
         food_text_logged_keyboard,
+        food_text_unpriced_keyboard,
     )
 
     return {
@@ -644,6 +647,8 @@ def food_tap_labels(scan_id: str) -> dict[str, str]:
             *food_recognition_keyboard(scan_id),
             *correction_choice_keyboard(scan_id),
             *food_text_estimate_keyboard(),
+            *food_text_items_keyboard(),
+            *food_text_unpriced_keyboard(),
             *food_text_logged_keyboard(scan_id),
             *food_text_deleted_keyboard(scan_id),
         )
@@ -889,8 +894,13 @@ def try_handle_structured_nutrition_turn(
     bot_user: Any,
     conversation: Any,
     trace_id: str,
+    plan_turn_safety: Callable[[], Any] | None = None,
 ) -> SkillResult | None:
     """Dispatch a structured turn to the owning nutrition skill, unchanged.
+
+    ``plan_turn_safety`` (DRF-2885) — ленивый источник тройки безопасности
+    этого хода для действий с планом нового механизма; ``None`` — у
+    вызывающего её нет, и такие действия не выполняются.
 
     Returns the skill's :class:`SkillResult`, or ``None`` when no skill
     claims the turn (caller continues its normal ladder). Never raises:
@@ -922,6 +932,40 @@ def try_handle_structured_nutrition_turn(
         )
         if diary is not None:
             return diary
+        # DRF-2885 — временный вход сборки плана нового механизма (сквозная
+        # проверка на подготовленных данных). Отвечает только аккаунтам из
+        # серверного списка; остальным текст идёт дальше как обычный.
+        if not has_attachments:
+            from apps.orchestrator.plan_engine_card import try_handle_plan_trigger
+
+            try:
+                engine_plan = try_handle_plan_trigger(
+                    text=text,
+                    bot_user=bot_user,
+                    conversation=conversation,
+                    trace_id=trace_id,
+                    turn_safety=plan_turn_safety,
+                )
+            except Exception:  # noqa: BLE001 — план не должен ломать глобальный ход
+                logger.exception(
+                    "orchestrator.nutrition_global.plan_engine_trigger_failed trace=%s", trace_id
+                )
+                engine_plan = None
+            if engine_plan is not None:
+                return engine_plan
+            # «мой план» — сохранённый план нового механизма раньше прежней
+            # карточки; нет такого плана — фраза идёт дальше.
+            from apps.orchestrator.plan_engine_card import try_handle_saved_plan
+
+            try:
+                saved_plan = try_handle_saved_plan(text=text, bot_user=bot_user, trace_id=trace_id)
+            except Exception:  # noqa: BLE001 — план не должен ломать глобальный ход
+                logger.exception(
+                    "orchestrator.nutrition_global.plan_engine_read_failed trace=%s", trace_id
+                )
+                saved_plan = None
+            if saved_plan is not None:
+                return saved_plan
         # DRF-2101 — «мой план»: карточка Plan Lite из wellness-context, тем же
         # приёмом, что чтение дневника; под флагом, иначе текст — модели.
         if not has_attachments:
@@ -938,6 +982,17 @@ def try_handle_structured_nutrition_turn(
                 plan = None
             if plan is not None:
                 return plan
+        # DRF-2328 — ответ на «просто напиши, что было» сканера: справочник
+        # раньше модели, но отвечаем только найденной оценкой.
+        after_scan = _try_handle_food_after_scan(
+            text=text,
+            has_attachments=has_attachments,
+            bot_user=bot_user,
+            conversation=conversation,
+            trace_id=trace_id,
+        )
+        if after_scan is not None:
+            return after_scan
         # DRF-2078 — «борщ 250»: блюдо с порцией не нуждается в модели.
         return _try_handle_food_with_grams(
             text=text,
@@ -952,7 +1007,112 @@ def try_handle_structured_nutrition_turn(
         # разбор рядом с самой карточкой. Выключенный флаг — честный ответ
         # там же («кнопка не действует»); неверная форма — ``None``, и ход
         # идёт дальше, как у остальных семейств (fallback канала).
+        from apps.orchestrator.plan_engine_card import (
+            CB_COMPOSE,
+            is_discuss_callback,
+            is_edit_callback,
+            is_replace_callback,
+            is_save_callback,
+            try_handle_plan_discuss,
+            try_handle_plan_edit,
+            try_handle_plan_replace,
+            try_handle_plan_save,
+            try_handle_plan_trigger,
+        )
         from apps.orchestrator.plan_lite_card import try_handle_plan_callback
+        from apps.orchestrator.plan_step_card import is_step_callback, try_handle_plan_step
+
+        if text.strip() == CB_COMPOSE:
+            # DRF-2885 — кнопка «Составить план»: настоящий вход.
+            try:
+                return try_handle_plan_trigger(
+                    text=text,
+                    bot_user=bot_user,
+                    conversation=conversation,
+                    trace_id=trace_id,
+                    turn_safety=plan_turn_safety,
+                )
+            except Exception:  # noqa: BLE001 — план не должен ломать глобальный ход
+                logger.exception(
+                    "orchestrator.nutrition_global.plan_engine_compose_failed trace=%s", trace_id
+                )
+                return None
+
+        if is_save_callback(text):
+            # DRF-2885 — «Сохранить» под предложением нового механизма.
+            try:
+                return try_handle_plan_save(
+                    text=text,
+                    bot_user=bot_user,
+                    conversation=conversation,
+                    trace_id=trace_id,
+                    turn_safety=plan_turn_safety,
+                )
+            except Exception:  # noqa: BLE001 — план не должен ломать глобальный ход
+                logger.exception(
+                    "orchestrator.nutrition_global.plan_engine_save_failed trace=%s", trace_id
+                )
+                return None
+
+        if is_step_callback(text):
+            # DRF-2885 — шаг → услуга → время → запись.
+            try:
+                return try_handle_plan_step(
+                    text=text,
+                    bot_user=bot_user,
+                    conversation=conversation,
+                    trace_id=trace_id,
+                    turn_safety=plan_turn_safety,
+                )
+            except Exception:  # noqa: BLE001 — план не должен ломать глобальный ход
+                logger.exception(
+                    "orchestrator.nutrition_global.plan_engine_step_failed trace=%s", trace_id
+                )
+                return None
+
+        if is_replace_callback(text):
+            # DRF-2885 — «Заменить план» / «Оставить текущий» под предложением.
+            try:
+                return try_handle_plan_replace(
+                    text=text,
+                    bot_user=bot_user,
+                    conversation=conversation,
+                    trace_id=trace_id,
+                    turn_safety=plan_turn_safety,
+                )
+            except Exception:  # noqa: BLE001 — план не должен ломать глобальный ход
+                logger.exception(
+                    "orchestrator.nutrition_global.plan_engine_replace_failed trace=%s", trace_id
+                )
+                return None
+
+        if is_discuss_callback(text):
+            # DRF-2885 — «Обсудить»: первая реплика владельца, дальше — модель.
+            try:
+                return try_handle_plan_discuss(
+                    text=text, bot_user=bot_user, conversation=conversation, trace_id=trace_id
+                )
+            except Exception:  # noqa: BLE001 — план не должен ломать глобальный ход
+                logger.exception(
+                    "orchestrator.nutrition_global.plan_engine_discuss_failed trace=%s", trace_id
+                )
+                return None
+
+        if is_edit_callback(text):
+            # DRF-2885 — «Изменить» и тап по шагу: убрать шаг и пересобрать.
+            try:
+                return try_handle_plan_edit(
+                    text=text,
+                    bot_user=bot_user,
+                    conversation=conversation,
+                    trace_id=trace_id,
+                    turn_safety=plan_turn_safety,
+                )
+            except Exception:  # noqa: BLE001 — план не должен ломать глобальный ход
+                logger.exception(
+                    "orchestrator.nutrition_global.plan_engine_edit_failed trace=%s", trace_id
+                )
+                return None
 
         try:
             return try_handle_plan_callback(
@@ -1059,6 +1219,103 @@ def _try_handle_diary_request(
 #: величина, что у детектора ``looks_like_food_drink`` (``hints._MAX_LEN``),
 #: не импорт: два детектора с одним числом — совпадение, а не связь.
 _FOOD_WITH_GRAMS_MAX_LEN = 30
+
+
+#: Предел длины для ответа на вопрос сканера — шире, чем у «борщ 250»: на
+#: «что было?» отвечают описанием («лепешка роти с творогом и сыром, кофе»,
+#: 37 знаков). Длиннее — рассказ, и он идёт модели.
+_FOOD_AFTER_SCAN_MAX_LEN = 80
+
+
+def _try_handle_food_after_scan(
+    *,
+    text: str,
+    has_attachments: bool,
+    bot_user: Any,
+    conversation: Any,
+    trace_id: str,
+) -> SkillResult | None:
+    """Набранный ответ на «не разобралась… просто напиши, что было» (DRF-2328).
+
+    Владелец, живой проход 22.09: фото не распознано, бот сам предложил
+    написать словами, человек написал — и получил «временные трудности с
+    подключением». Набранное шло модели (свободный текст структурным не
+    бывает), а модель лежала. Дорога, которую бот назвал выходом, вела в
+    ту же стену.
+
+    Теперь сканер ставит мягкую отметку, и следующая реплика идёт в оценку
+    (``show_positions``), без модели бота. DRF-2328 отвечал только карточкой с
+    числом справочника и отпускал всё прочее к модели — и фраза владельца
+    «лепешка роти с творогом и сыром, кофе» (двух позиций, справочник целиком
+    её не знает) по-прежнему упиралась в C01. DRF-2768 (решение владельца
+    06.10, handoff §5) отвечает ЛЮБОЙ карточкой подтверждения: число
+    справочника, оценка ИИ, несколько позиций — или «Сейчас не удалось
+    рассчитать калорийность. Записать без расчёта?». Запись — только по тапу.
+
+    Судей «это еда» по-прежнему нет (``parse_food_text`` примет «спасибо»,
+    детектор еды говорит False на фразе владельца, каталог с DRF-2371 не
+    отказывает ни на какое имя), поэтому предохранитель — короткий закрытый
+    список не-еды и вопрос (``text_entry.looks_like_not_food``): они идут к
+    модели. Остальное получает карточку, где «Отменить» — выход.
+
+    Отметка расходуется первым же ходом, что бы ни случилось. Одиночный
+    напиток — водяным путём, по той же причине, что в
+    :func:`_try_handle_food_with_grams`. Никогда не бросает.
+    """
+
+    if has_attachments:
+        return None
+    stripped = text.strip()
+    if not stripped:
+        return None
+    try:
+        from apps.skills.food_clarify import text_entry
+
+        if not text_entry.take_after_scan(conversation):
+            return None
+        # Выключенный контур питания здесь не проверяется отдельно: ворота
+        # ``show_estimate`` (``diary_entry_refusal``) отказывают раньше
+        # оценки, а отказ — не карточка, и ход уходит к модели.
+        if len(stripped) > _FOOD_AFTER_SCAN_MAX_LEN:
+            return None
+        # DRF-2768 — вопрос и короткий закрытый список не-еды («спасибо», «не
+        # помню», «запиши к мастеру») идут модели, как раньше.
+        if text_entry.looks_like_not_food(stripped):
+            return None
+        from apps.skills.water.parser import BeverageMatch, parse_beverage
+
+        positions = text_entry.parse_food_positions(stripped)
+        if positions is None:
+            return None
+        # Одиночный напиток — водяным путём (DRF-819). Напиток внутри
+        # составной фразы пишется блюдом дневника (DRF-2768 Q1-а, DRF-2821).
+        if len(positions) == 1 and isinstance(parse_beverage(stripped), BeverageMatch):
+            return None
+        context = _build_context(
+            message_text=stripped,
+            bot_user=bot_user,
+            conversation=conversation,
+            trace_id=trace_id,
+        )
+        with tenant_scope(get_global_bot_tenant()):
+            result = text_entry.show_positions(context, positions)
+    except Exception:  # noqa: BLE001 — nutrition must never break the global turn
+        logger.exception("orchestrator.nutrition_global.food_after_scan_failed trace=%s", trace_id)
+        return None
+    meta = result.meta or {}
+    kind = meta.get("reply_kind")
+    # DRF-2768 — отвечаем ЛЮБОЙ карточкой подтверждения: с числом справочника,
+    # с оценкой ИИ, несколькими позициями или «Записать без расчёта?». Запись
+    # всё равно только по тапу, а модель бота этот ход больше не получает —
+    # при лёгшем прокси она давала C01 на дороге, которую бот сам назвал.
+    answered = kind in text_entry.CARD_KINDS
+    logger.info(
+        "orchestrator.nutrition_global.food_after_scan kind=%s answered=%s trace=%s",
+        kind,
+        answered,
+        trace_id,
+    )
+    return result if answered else None
 
 
 def _try_handle_food_with_grams(

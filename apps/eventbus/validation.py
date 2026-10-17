@@ -161,7 +161,7 @@ def _walk_pii(node: Any, *, path: str, violations: list[str], depth: int) -> Non
 
 
 def _is_semver(v: str) -> bool:
-    # MAJOR.MINOR or MAJOR.MINOR.PATCH — taxonomy.md §7
+    # MAJOR.MINOR or MAJOR.MINOR.PATCH — event-taxonomy.md §7
     parts = v.split(".")
     if len(parts) not in (2, 3):
         return False

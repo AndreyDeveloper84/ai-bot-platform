@@ -1,8 +1,8 @@
 """Приветствия персонала по роли с живой сводкой (DRF-2114, §50 п.4).
 
 После пре-чека (DRF-2113) человек со STAFF-вердиктом слышит не «Салон «X».»,
-а приветствие владельца — дословно из ``docs/modules/меню салонный
-бот.md`` — с числами из живых источников:
+а приветствие владельца — дословно из
+``docs/modules/меню салонный бот.md`` — с числами из живых источников:
 
 * записи дня — :func:`apps.admin_api.services.salon_day.build_salon_day`
   (зеркало ``RemoteBookingProxy``, тот же источник, что у экрана «День»);
@@ -360,6 +360,17 @@ def admin_role_word(role_ctx: Any) -> str:
 
 def render_master(name: str, salon: str, data: GreetingData) -> str:
     lines = [MASTER_HELLO.format(name=name), MASTER_ROLE_LINE.format(salon=salon)]
+    return NL.join(lines + render_master_summary_lines(data))
+
+
+def render_master_summary_lines(data: GreetingData) -> list[str]:
+    """Строки дня мастера — одни на приветствие и на утренний итог мастеру (DRF-2769).
+
+    Пусто, когда день мастера не прочитан (§103): вызывающий решает, что с
+    этим делать (приветствие — только шапка, итог — не слать).
+    """
+
+    lines: list[str] = []
     if data.my_records == 0 and data.my_empty_day:
         # DRF-2759 — «Сегодня у вас 0 записей» не отличало выходной от
         # ненастроенного графика; строка владельца называет причину.
@@ -373,7 +384,7 @@ def render_master(name: str, salon: str, data: GreetingData) -> str:
                 client=n.client, service=n.service, minutes=n.minutes, time=n.time
             )
         )
-    return NL.join(lines)
+    return lines
 
 
 def _attention_total(data: GreetingData) -> int | None:
@@ -470,6 +481,73 @@ def admin_buttons(entry: Any) -> list[dict[str, str]]:
     return [b for b in buttons if b]
 
 
+def digest_admin_buttons(entry: Any) -> list[dict[str, str]]:
+    """Кнопки утреннего итога владельцу / администратору (DRF-2769).
+
+    Сначала — действия в чате, они работают и без Mini App: день салона,
+    заявки мастеров (одобрение — в самом списке заявок), готовность. Затем —
+    экраны Mini App из :func:`admin_buttons`, те же, что под приветствием, кроме
+    «Сегодня»: день салона уже есть первой кнопкой, второй «Сегодня» рядом
+    был бы загадкой. Без ``web_app`` и ``miniapp_url`` у бота кнопок Mini App
+    нет вовсе — как везде (мёртвая кнопка хуже отсутствующей).
+
+    Своих слов здесь нет: подписи — из меню персонала и приветствия.
+    """
+    from apps.channels.max.staff_menu import (
+        CB_DAY,
+        CB_READINESS,
+        CB_REQUESTS,
+        LABEL_DAY_ADMIN,
+        LABEL_REQUESTS,
+    )
+
+    chat = [
+        {"label": LABEL_DAY_ADMIN, "callback": CB_DAY},
+        {"label": LABEL_REQUESTS, "callback": CB_REQUESTS},
+        {"label": BUTTON_CHECK_READINESS, "callback": CB_READINESS},
+    ]
+    app = [b for b in admin_buttons(entry) if b.get("label") != BUTTON_TODAY]
+    return chat + app
+
+
+def digest_master_buttons(entry: Any) -> list[dict[str, str]]:
+    """Кнопки утреннего итога мастеру (DRF-2769): «📅 Мой день» в чате — работает
+    без Mini App, — затем экраны :func:`master_buttons`, кроме «Сегодня» (день уже
+    первой кнопкой). Подписи — из меню персонала и приветствия."""
+    from apps.channels.max.staff_menu import CB_DAY, LABEL_DAY_MASTER
+
+    chat = [{"label": LABEL_DAY_MASTER, "callback": CB_DAY}]
+    app = [b for b in master_buttons(entry) if b.get("label") != BUTTON_TODAY]
+    return chat + app
+
+
+def greeting_admin_buttons(entry: Any) -> list[dict[str, str]]:
+    """Кнопки приветствия /start владельцу / администратору (DRF-2787).
+
+    Владелец работает в боте с первого экрана: сначала действия в чате —
+    набор утреннего итога (:func:`digest_admin_buttons`) и «✍️ Записать
+    клиента» (DRF-2786) после заявок, — затем экраны Mini App как опция рядом.
+    До этого приветствие несло только ``open_app``: все действия, которые бот
+    умеет сам, были спрятаны в меню (жалоба владельца 05.10, buttons3.png).
+    """
+    from apps.channels.max.staff_menu import CB_BK_NEW, LABEL_BOOK, LABEL_REQUESTS
+
+    buttons = digest_admin_buttons(entry)
+    at = next(
+        (i + 1 for i, b in enumerate(buttons) if b.get("label") == LABEL_REQUESTS),
+        len(buttons),
+    )
+    return [*buttons[:at], {"label": LABEL_BOOK, "callback": CB_BK_NEW}, *buttons[at:]]
+
+
+def greeting_master_buttons(entry: Any) -> list[dict[str, str]]:
+    """Кнопки приветствия /start мастеру (DRF-2787): «📅 Мой день» в чате — там
+    же его визиты «состоялся / не пришёл» (DRF-2785), — затем экраны Mini App.
+    Тот же набор, что у утреннего итога мастеру."""
+
+    return digest_master_buttons(entry)
+
+
 def first_buttons(entry: Any) -> list[dict[str, str]]:
     """«Проверить готовность» — callback в чат (DRF-2117), «Открыть салон» — Mini App."""
     from apps.channels.max.staff_menu import CB_READINESS, _miniapp_button
@@ -516,10 +594,10 @@ def build_greeting(
         if is_first_entry(bot_user):
             return render_first(name, salon, role_word), first_buttons(entry)
         data = gather(tenant, role_ctx, now=now)
-        return render_admin(name, salon, role_word, data), admin_buttons(entry)
+        return render_admin(name, salon, role_word, data), greeting_admin_buttons(entry)
     if getattr(role_ctx, "is_master", False):
         data = gather(tenant, role_ctx, now=now)
-        return render_master(name, salon, data), master_buttons(entry)
+        return render_master(name, salon, data), greeting_master_buttons(entry)
     return None
 
 
@@ -530,6 +608,8 @@ __all__ = [
     "NextVisit",
     "attention_phrase",
     "build_greeting",
+    "greeting_admin_buttons",
+    "greeting_master_buttons",
     "gather",
     "is_first_entry",
     "mark_greeted",

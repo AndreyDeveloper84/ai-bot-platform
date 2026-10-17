@@ -72,7 +72,9 @@ class _MissWithEstimate(_Catalogue):
         self.ai = ai
         self.verified_kcal = verified_kcal
 
-    async def estimate_dish(self, *, external_user_id, dish_name, portion_g=None):
+    async def estimate_dish(
+        self, *, external_user_id, dish_name, portion_g=None, ai_estimate_allowed=None
+    ):
         self.estimates.append({"dish_name": dish_name, "portion_g": portion_g})
         grams = 100.0 if portion_g is None else float(portion_g)
         ai = AI_KCAL_PER_100G * grams / 100.0 if self.ai else None
@@ -123,8 +125,10 @@ class TestTheCard:
     ) -> None:
         card = _card(conversation, "зыбзик 300г", _MissWithEstimate(ai=False))
 
+        # DRF-2768: ни справочника, ни оценки — карточка «без расчёта» (решение
+        # владельца 06.10). Суть узла та же: числа не выдумываются.
         assert card == (
-            "Я распознала так: зыбзик.\nПорция — 300 г, по твоим словам.\nЗаписать в дневник?"
+            "Калорийность не рассчитана. Записать без расчёта?\nЗапишу как есть: «зыбзик» (300 г)."
         )
 
     def test_a1_a_miss_with_an_estimate_carries_the_number_and_the_mark(

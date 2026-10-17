@@ -289,7 +289,8 @@ STRICT_TENANT_SCOPE = os.environ.get("STRICT_TENANT_SCOPE", "audit")
 #           handler exception (no XACK; entry stays in the PEL for
 #           manual escalation). **No automatic DLQ retry is wired**
 #           — XAUTOCLAIM reaper is a follow-up; PEL retention is the
-#           current contract.
+#           current contract. Exception (DRF-1943): an entry carrying a
+#           voice attachment goes to <stream>:dlq at once, without the link.
 #
 # Flip to True only after the dev-side soak shows zero
 # ``worker.tenant_required_missing`` events in audit for a clean
@@ -604,6 +605,20 @@ DOMAIN_EVENT_SUBSCRIBERS: list[str] = [
 # append; runtime-changeable via settings override in tests.
 SHORT_TERM_MEMORY_DEPTH = int(os.environ.get("SHORT_TERM_MEMORY_DEPTH", "20"))
 SHORT_TERM_MEMORY_TTL_SECONDS = int(os.environ.get("SHORT_TERM_MEMORY_TTL_SECONDS", str(24 * 3600)))
+
+# DRF-2775 — физическая очистка надгробий MemoryEntry после удержания
+# (ADR-0011 §5). False по умолчанию: физическое удаление на реальных данных
+# включается только по допуску владельца (§15 DRF-2748), через env стенда.
+MEMORY_TOMBSTONE_PURGE_ENABLED = os.environ.get(
+    "MEMORY_TOMBSTONE_PURGE_ENABLED", "false"
+).lower() in ("true", "1")
+
+# DRF-2782 — свип сроков производной памяти Ф4 (30 дн неподтверждённые → надгробие,
+# 180 дн подтверждённые → status=expired, «нужно переподтвердить»). False по
+# умолчанию: включается вместе с выводами Ф4b.
+MEMORY_INFERENCE_TTL_SWEEP_ENABLED = os.environ.get(
+    "MEMORY_INFERENCE_TTL_SWEEP_ENABLED", "false"
+).lower() in ("true", "1")
 
 # Sprint 2 / D2 + D4 — MAX channel configuration.
 MAX_API_BASE = os.environ.get("MAX_API_BASE", "https://botapi.max.ru")
@@ -1076,6 +1091,15 @@ FOOD_DIARY_CANONICAL_CONSENT = os.environ.get("FOOD_DIARY_CANONICAL_CONSENT", "f
     "1",
 )
 
+# 4. ``AI_FOOD_ESTIMATION_CONSENT_REQUIRED`` — отдельное добровольное согласие
+#    на ИИ-оценку еды (DRF-2845, решение владельца 07.10). Пока ВЫКЛЮЧЕН:
+#    текст согласия не утверждён и выдать его нечем. False → бот разрешает
+#    каталогу ИИ-оценку всем, как до листа. True → только при действующем
+#    согласии ``ai_food_estimation``. Включение — решение владельца.
+AI_FOOD_ESTIMATION_CONSENT_REQUIRED = os.environ.get(
+    "AI_FOOD_ESTIMATION_CONSENT_REQUIRED", "false"
+).lower() in ("true", "1")
+
 FOOD_PHOTO_SCAN_ENABLED = os.environ.get("FOOD_PHOTO_SCAN_ENABLED", "false").lower() in (
     "true",
     "1",
@@ -1529,6 +1553,23 @@ CELERY_BEAT_SCHEDULE = {
         "task": "apps.identity.tasks.forget_all_sweep",
         "schedule": crontab(minute="50"),
     },
+    # DRF-2748 — ночной свип срока хранения жёлтой/красной памяти (спека §5).
+    "identity_memory_ttl_sweep": {
+        "task": "apps.identity.tasks.memory_ttl_sweep",
+        "schedule": crontab(hour="2", minute="35"),
+    },
+    # DRF-2775 — физическая очистка надгробий памяти. Инертна, пока
+    # MEMORY_TOMBSTONE_PURGE_ENABLED закрыт.
+    "identity_memory_tombstone_purge": {
+        "task": "apps.identity.tasks.memory_tombstone_purge",
+        "schedule": crontab(hour="3", minute="5"),
+    },
+    # DRF-2782 — сроки производной памяти Ф4. Инертна, пока
+    # MEMORY_INFERENCE_TTL_SWEEP_ENABLED закрыт.
+    "identity_memory_inference_ttl_sweep": {
+        "task": "apps.identity.tasks.memory_inference_ttl_sweep",
+        "schedule": crontab(hour="2", minute="50"),
+    },
     # Sprint 8 / S4 (DRF-719) — daily shadow-delta sweep.
     # 08:00 МСК = 05:00 UTC — runs AFTER the mysite CSV publisher's
     # 04:00 МСК export window so the ground-truth file is on disk.
@@ -1869,6 +1910,15 @@ SALON_MORNING_DIGEST_ENABLED = os.environ.get("SALON_MORNING_DIGEST_ENABLED", "f
     "1",
 )
 
+# DRF-2769 (фаза 2): итог — и мастерам, каждому его день. Отдельный выключатель,
+# False по умолчанию: где итог управляющим уже включён, выкладка не должна сама
+# начать писать всем мастерам — включение их половины на стенде через env.
+# Работает только вместе с SALON_MORNING_DIGEST_ENABLED (тот же beat).
+SALON_MASTER_DIGEST_ENABLED = os.environ.get("SALON_MASTER_DIGEST_ENABLED", "false").lower() in (
+    "true",
+    "1",
+)
+
 # DRF-1464 - the two switches in front of the AI dietologist
 # (apps/nutrition_coach).
 #
@@ -1929,6 +1979,35 @@ WELLNESS_PROACTIVE_ENABLED = os.environ.get("WELLNESS_PROACTIVE_ENABLED", "false
 # прокси customer/plan-lite отвечает 404 plan_lite_disabled ДО вызова
 # каталога, «мой план» в чате — не наш текст (уходит модели, как раньше).
 PLAN_LITE_ENABLED = os.environ.get("PLAN_LITE_ENABLED", "false").lower() in (
+    "true",
+    "1",
+)
+
+# DRF-2879 — Plan Engine (сборка плана в каталоге): тот же ключ, что в
+# каталоге. Default CLOSED. Выключен → прокси customer/plan/decision отвечает
+# 404 plan_engine_disabled ДО чтения реестра правил и ДО вызова каталога.
+# DRF-2885 — кому отвечает временный вход сборки плана в разговоре (сквозная
+# проверка на подготовленных данных). ``канал:идентификатор`` через запятую,
+# например ``max:12345``. Пусто (умолчание) — входа нет ни у кого. Это только
+# ВИДИМОСТЬ команды: допуск синтетических данных решает каталог.
+SYNTHETIC_TEST_TRIGGER_ACCOUNTS = tuple(
+    item.strip()
+    for item in os.environ.get("SYNTHETIC_TEST_TRIGGER_ACCOUNTS", "").split(",")
+    if item.strip()
+)
+
+# DRF-2885 — замок приёмки Плана (решение владельца 10.10): включённый
+# ``PLAN_ENGINE_ENABLED`` сам никому План не открывает. Механизм отвечает только
+# аккаунтам из этого списка: ``канал:идентификатор`` через запятую, например
+# ``max:12345``. Пусто (умолчание) — НИКОМУ. Назвать аккаунты — отдельное явное
+# действие; читается в ``apps.orchestrator.plan_access``.
+PLAN_ACCEPTANCE_ACCOUNTS = tuple(
+    item.strip()
+    for item in os.environ.get("PLAN_ACCEPTANCE_ACCOUNTS", "").split(",")
+    if item.strip()
+)
+
+PLAN_ENGINE_ENABLED = os.environ.get("PLAN_ENGINE_ENABLED", "false").lower() in (
     "true",
     "1",
 )
@@ -2456,8 +2535,10 @@ VOICE_STT_MONTHLY_MINUTES_CAP = int(os.environ.get("VOICE_STT_MONTHLY_MINUTES_CA
 #   уверенность не отдаёт). По умолчанию always — решение владельца 28.09
 #   (DRF-2425): ошибка распознавания видна до того, как уедет в дневник.
 # VOICE_GATE_STRIP_PUNCT — K19-Б (решение владельца 22.09): гейту safety
-#   отдаётся копия расшифровки без знаков препинания. Выключить, когда окно
-#   safety поправит исключение гиперболы в pre_check.py (вариант А).
+#   отдаётся копия расшифровки без знаков препинания. Держать включённым и
+#   после DRF-2684 (вариант А, правило гиперболы знаков больше не замечает):
+#   остальные шаблоны pre_check.py ждут между словами пробел, и распознанное
+#   «Не хочу, жить.» без копии проходит мимо гейта.
 # VOICE_TURN_BUDGET_S — общий лимит на скачивание + распознавание в одном
 #   ходе; потребитель очереди один на всех, зависший ход задерживает всех.
 _VOICE_TRUE = ("true", "1", "yes")
@@ -2739,6 +2820,11 @@ LOGGING = {
         "context": {
             "()": "apps.observability.logging.ContextFilter",
         },
+        # DRF-1943 — адрес запроса в логе без строки запроса (подпись ссылки
+        # на голосовое / фото из вебхука MAX): см. ``url_log_filter``.
+        "request_url": {
+            "()": "apps.observability.url_log_filter.RequestUrlFilter",
+        },
     },
     "formatters": {
         "json": {
@@ -2778,6 +2864,12 @@ LOGGING = {
     # остаётся. Realtime-клиент openai (в боте не используется) на DEBUG пишет
     # сообщения сокета с транскриптами — его логгеры прибиты тем же правилом.
     # httpx/httpcore тела не пишут и не пинятся.
+    #
+    # DRF-1943 — но ``httpx`` на INFO пишет АДРЕС каждого запроса, а ссылка на
+    # голосовое из вебхука MAX — это и есть запись: 24 часа без авторизации.
+    # На логгере ``httpx`` висит фильтр, обрезающий строку запроса (подпись).
+    # Фильтр на логгере, а не на ``console``: адрес обрезан для любого
+    # получателя. Уровень не трогаем — строка «HTTP Request: POST …» остаётся.
     "loggers": {
         **{
             name: {"handlers": ["console"], "level": "INFO", "propagate": False}
@@ -2792,6 +2884,7 @@ LOGGING = {
                 "openai.resources.beta.realtime.realtime",
             )
         },
+        "httpx": {"filters": ["request_url"]},
     },
 }
 

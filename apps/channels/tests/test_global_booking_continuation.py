@@ -725,3 +725,110 @@ class TestExplicitDates:
     )
     def test_it_refuses_everything_else(self, text: str) -> None:
         assert parse_explicit_date(text, today=self.TODAY) is None
+
+
+# ---------------------------------------------------------------------------
+# DRF-2981 — «отмени запись на завтра» посреди записи не продолжает её
+# ---------------------------------------------------------------------------
+
+
+class TestAStopCommandMidBooking:
+    """«Отмени / удали запись на завтра» продолжала СОЗДАНИЕ записи на завтра.
+
+    Ожидание дня читало «завтра» как ответ. Теперь стоп-глагол рядом с записью
+    отдаёт ход консьержу и снимает контекст — иначе следующая реплика («ту, что
+    на завтра» — ответ на «какую запись отменить?») продолжила бы запись на ход
+    позже. Исправление дня без записи («нет, отмени, лучше на послезавтра»)
+    запись продолжает, как и раньше.
+    """
+
+    @pytest.mark.parametrize("text", ["отмени запись на завтра", "удали запись на завтра"])
+    def test_a_stop_goes_to_the_concierge_and_drops_the_context(self, wired, salon, text) -> None:
+        tenant, master, catalog = salon
+        _tap_with_service(tenant, master, catalog["lymph"].id)
+        assert load_booking_context(_global_conversation()) is not None
+
+        GlobalMaxHandler()(_raw(_typed(text, "mm-stop")))
+
+        assert wired.concierge == [text]
+        assert wired.booking == [f"cb:book:pick_master:{master.id}:{_LYMPH}"]
+        assert load_booking_context(_global_conversation()) is None
+
+    def test_the_next_turn_is_not_swallowed_by_the_dropped_booking(self, wired, salon) -> None:
+        tenant, master, catalog = salon
+        _tap_with_service(tenant, master, catalog["lymph"].id)
+
+        GlobalMaxHandler()(_raw(_typed("отмени запись на завтра", "mm-stop")))
+        GlobalMaxHandler()(_raw(_typed("ту, что на завтра", "mm-which")))
+
+        assert wired.concierge == ["отмени запись на завтра", "ту, что на завтра"]
+        assert wired.booking == [f"cb:book:pick_master:{master.id}:{_LYMPH}"]
+
+    def test_twin_a_day_correction_still_continues_the_booking(self, wired, salon) -> None:
+        tenant, master, catalog = salon
+        _tap_with_service(tenant, master, catalog["lymph"].id)
+
+        GlobalMaxHandler()(_raw(_typed("нет, отмени, лучше на послезавтра", "mm-fix")))
+
+        stored = load_time_preference(_global_conversation())
+        assert stored is not None
+        assert stored.day_offset == 2
+        assert load_booking_context(_global_conversation()) is not None
+        assert wired.concierge == []  # empty-assert-ok: запись продолжилась — контекст жив выше
+
+
+class TestAPendingMemoryQuestionDoesNotEatTheBookingDay:
+    """Вопрос памяти вплетается в ответ консьержа рядом с карточками мастеров;
+    тап по карточке его не снимает, и следующая набранная дата раньше уходила
+    в ответ на вопрос: «на завтра» — районом, «в субботу» — занятым днём (смысл
+    наоборот), а человек получал «Записала, спасибо» вместо выбора дня."""
+
+    @pytest.mark.parametrize(
+        ("field", "text", "offset"),
+        [("home_district", "на завтра", 1), ("busy_days", "в субботу", None)],
+    )
+    def test_the_day_goes_to_the_booking(self, wired, salon, monkeypatch, field, text, offset):
+        from unittest.mock import Mock
+
+        from apps.orchestrator import memory_ask
+        from apps.orchestrator.memory.tests.test_short_term import _FakeRedis as _ListRedis
+
+        class _KeyedRedis(_ListRedis):
+            """Список переписки и ключ вопроса памяти — в одном Redis, как в бою."""
+
+            def __init__(self) -> None:
+                super().__init__()
+                self.kv: dict[str, str] = {}
+
+            def get(self, key: str):
+                return self.kv.get(key)
+
+            def setex(self, key: str, ttl: int, value: str) -> None:
+                self.kv[key] = value
+
+            def delete(self, key: str) -> None:
+                super().delete(key)
+                self.kv.pop(key, None)
+
+        keyed = _KeyedRedis()
+        monkeypatch.setattr(short_term, "_redis_client", lambda: keyed)
+        monkeypatch.setattr(memory_ask, "concierge_memory_enabled", lambda: True)
+        patch = Mock()
+        monkeypatch.setattr(memory_ask, "patch_declared_prefs", patch)
+        tenant, master, catalog = salon
+        _tap_with_service(tenant, master, catalog["lymph"].id)
+        conversation = _global_conversation()
+        memory_ask._write_pending(conversation.id, {"field": field, "hint": "?"})
+        assert memory_ask.read_pending(conversation.id) is not None
+
+        GlobalMaxHandler()(_raw(_typed(text, "mm-day")))
+
+        assert load_booking_context(_global_conversation()) is not None
+        assert wired.concierge == []  # empty-assert-ok: ход взяла запись — контекст жив выше
+        if offset is not None:
+            stored = load_time_preference(_global_conversation())
+            assert stored is not None and stored.day_offset == offset
+        patch.assert_not_called()
+        assert (
+            memory_ask.read_pending(conversation.id) is None
+        )  # empty-assert-ok: вопрос был — assert выше

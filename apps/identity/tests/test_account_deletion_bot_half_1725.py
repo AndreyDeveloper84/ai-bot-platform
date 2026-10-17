@@ -97,7 +97,7 @@ class TestService:
             )
         assert out.all_ok and out.shells == 1 and out.flag_cleared
         assert out.failed_steps == []
-        assert [s["step"] for s in out.steps] == ["ayla_delete", "memory_delete"]
+        # DRF-2894 — первым идёт снятие доступа: роли и связь с карточкой мастера.\n        assert [s["step"] for s in out.steps] == [\n            "staff_access_revoke",\n            "ayla_delete",\n            "memory_delete",\n        ]
         assert not deletion_gate(AYLA_ID).blocked
         _ = p
 

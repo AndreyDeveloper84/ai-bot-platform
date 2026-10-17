@@ -195,15 +195,27 @@ def build_nutrition_context_block(bot_user: Any) -> str:
     if not _consent_open(bot_user):
         return ""
 
-    # Чувствительный периметр §7.1 закрывает ВСЮ поверхность, как у двух
-    # поверхностей коуча: беременность, ГВ, РПП, цель, снятая Ayla с дефицита.
-    # Профиля нет или он не прочитан — «не знаем», а «не знаем» это тишина.
-    # Стоит до чтения цели и недели: закрытому периметру картина не нужна.
+    # Чувствительный периметр §7.1 — беременность, ГВ, РПП, цель, снятая Ayla
+    # с дефицита. Профиля нет или он не прочитан — «не знаем», а «не знаем»
+    # это тишина.
+    #
+    # DRF-2766 фаза 1в (решение главного окна 04.10, вариант «б»): периметр
+    # закрывает СОВЕТЫ (#3), а не факты (#1). Беременность, ГВ и снятый
+    # дефицит получают только факты дня — блюда и записи — с прямым запретом
+    # советов. РПП — по-прежнему ничего: разговор модели о еде человека с
+    # раскрытым РПП — признанный риск (решение владельца: «РПП — отдельный путь
+    # с участием специалиста, без советов компенсировать»). Свои числа такой
+    # человек видит на всех экранах — это показ, не разговор.
     from apps.nutrition_proactive.render import remarks_suppressed
 
-    if remarks_suppressed(_fetch_profile(bot_user)):
-        logger.info("orchestrator.nutrition_context.skip reason=sensitive_perimeter")
-        return ""
+    profile = _fetch_profile(bot_user)
+    facts_only = False
+    if remarks_suppressed(profile):
+        if profile is None or _eating_disorder(profile):
+            logger.info("orchestrator.nutrition_context.skip reason=sensitive_perimeter")
+            return ""
+        facts_only = True
+        logger.info("orchestrator.nutrition_context.facts_only reason=sensitive_perimeter")
 
     # Вторая ступень гейта §48 — по ДАННЫМ, а не по ходу. Первая (текст
     # хода: про еду и не про медицину) стоит у вызывающего, в handler:
@@ -221,9 +233,15 @@ def build_nutrition_context_block(bot_user: Any) -> str:
     # no signal and a day with no rows are both ordinary, and so is one of
     # the two calls failing. The block is whatever came back — and "" when
     # nothing did.
-    lines = _render_goal_lines(goal)
-    lines.extend(_render_lines(_fetch_deficits(bot_user)))
-    lines.extend(_render_today_lines(bot_user))
+    # DRF-2766 — «Без чисел»: человек выбрал не видеть калории, БЖУ и цели.
+    # Модель не получает этих чисел вовсе (их нечем пересказать) и получает
+    # прямое указание их не называть — оборона в два слоя.
+    hide_numbers = _numbers_hidden(bot_user)
+    # Фаза 1в — периметр: ни цели (цель с дефицитом — §3), ни сравнений и
+    # подсказки сервиса; только дни с записями и блюда.
+    lines = [] if facts_only else _render_goal_lines(goal)
+    lines.extend(_render_lines(_fetch_deficits(bot_user), hide_numbers=hide_numbers or facts_only))
+    lines.extend(_render_today_lines(bot_user, hide_numbers=hide_numbers))
     if not lines:
         return ""
 
@@ -240,10 +258,58 @@ def build_nutrition_context_block(bot_user: Any) -> str:
     )
     if not safe.extra_hint:
         return ""
-    return f"{_HEADER}\n{safe.extra_hint}"
+    # Наш собственный текст, а не данные сервиса: указания стоят вне блока
+    # данных, рядом с заголовком, который и есть указание модели.
+    instructions = [
+        text
+        for flag, text in (
+            (facts_only, FACTS_ONLY_INSTRUCTION),
+            (hide_numbers, NUMBERS_HIDDEN_INSTRUCTION),
+        )
+        if flag
+    ]
+    return "\n".join([_HEADER, *instructions, safe.extra_hint])
 
 
 # ─── internals ─────────────────────────────────────────────────────────────
+
+
+#: DRF-2766 фаза 1в — указание модели для чувствительного периметра
+#: (беременность, ГВ, снятый дефицит): только факты, без советов. Текст —
+#: решение главного окна 04.10, дословно по смыслу.
+FACTS_ONLY_INSTRUCTION = (
+    "Не давай советов о количестве и составе еды, не предлагай компенсировать "
+    "съеденное, не оценивай калорийность как хорошую или плохую — отвечай на "
+    "вопрос фактами из дневника."
+)
+
+
+def _eating_disorder(profile: Any) -> bool:
+    """Раскрытое РПП: флаг анкеты или старое имя оверрайда (см. render)."""
+    from apps.nutrition_proactive.render import _pending_override
+
+    flags = getattr(profile, "health_flags", None) or {}
+    overrides = {str(getattr(profile, "goal_overridden_by", "") or ""), _pending_override(profile)}
+    return bool(flags.get("eating_disorder")) or "eating_disorder" in overrides
+
+
+#: DRF-2766 — указание модели, когда человек выбрал «Без чисел».
+NUMBERS_HIDDEN_INSTRUCTION = (
+    "Человек выбрал режим «Без чисел»: не называй калории, белки, жиры, "
+    "углеводы и числовые цели — ни свои оценки, ни данные дневника."
+)
+
+
+def _numbers_hidden(bot_user: Any) -> bool:
+    """Выбор «Без чисел». Никогда не бросает, как и весь блок.
+
+    Не прочитали настройку — выбора не знаем, блок прежний. Это не пропуск
+    гейта: режим добровольный, а не охранный, и «не знаем» здесь не может
+    означать «скрыть за человека» — именно такое скрытие владелец снял.
+    """
+    from apps.nutrition_proactive.prefs import numbers_hidden_for
+
+    return numbers_hidden_for(bot_user)
 
 
 def _consent_open(bot_user: Any) -> bool:
@@ -324,10 +390,12 @@ def _render_goal_lines(goal: Any) -> list[str]:
     в промпт не идёт — это наш идентификатор, а не слова человека, и
     модель, увидев слоган, начнёт его цитировать.
     """
-    text = (getattr(goal, "text", None) or "").strip() if goal is not None else ""
-    if not text:
-        return []
-    return [f"Цель клиента своими словами: {text}"]
+    # DRF-2808 — та же строка рисуется и отдельным блоком цели консьержа;
+    # один отрисовщик, чтобы вызывающий мог убрать дубль точным совпадением.
+    from apps.orchestrator.goal_context import render_goal_line
+
+    line = render_goal_line(goal)
+    return [line] if line else []
 
 
 def _fetch_deficits(bot_user: Any) -> Any | None:
@@ -361,7 +429,7 @@ def _fetch_deficits(bot_user: Any) -> Any | None:
         return None
 
 
-def _render_lines(deficits: Any) -> list[str]:
+def _render_lines(deficits: Any, *, hide_numbers: bool = False) -> list[str]:
     """Ayla's aggregate → prompt lines. Defensive on every field.
 
     ``DeficitsResponse`` int fields are already coerced by the client;
@@ -378,6 +446,12 @@ def _render_lines(deficits: Any) -> list[str]:
     days = _clamp_days(getattr(deficits, "days_observed", 0))
     if days:
         lines.append(f"Дней с записями за неделю: {days}.")
+
+    if hide_numbers:
+        # DRF-2766 — сравнения белка с ориентиром и свободная подсказка
+        # сервиса (в ней может быть число) не передаются; дни с записями —
+        # это не калории и не цель, они остаются.
+        return lines
 
     pct = _as_float(getattr(deficits, "protein_avg_pct_goal", None))
     if pct is not None:
@@ -400,7 +474,7 @@ def _render_lines(deficits: Any) -> list[str]:
     return lines
 
 
-def _render_today_lines(bot_user: Any) -> list[str]:
+def _render_today_lines(bot_user: Any, *, hide_numbers: bool = False) -> list[str]:
     """Today's dishes → at most one prompt line. ``[]`` on every failure.
 
     One line rather than a bullet per meal: this block is charged against
@@ -428,7 +502,8 @@ def _render_today_lines(bot_user: Any) -> list[str]:
 
     parts: list[str] = []
     for meal in diary.meals:
-        parts.append(f"{meal.dish} ({meal.calories} ккал)" if meal.calories else meal.dish)
+        shown = meal.calories and not hide_numbers
+        parts.append(f"{meal.dish} ({meal.calories} ккал)" if shown else meal.dish)
     return [f"Сегодня в дневнике: {', '.join(parts)}."]
 
 

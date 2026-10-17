@@ -60,7 +60,10 @@ class TestTheLiveWire:
         client = _answering(live["status"], live["body"])
 
         result = await client.estimate_dish(
-            external_user_id="bot:max:2761", dish_name="зыбзик квантовый", portion_g=300
+            external_user_id="bot:max:2761",
+            dish_name="зыбзик квантовый",
+            portion_g=300,
+            ai_estimate_allowed=True,
         )
 
         assert result.matched_dish == "зыбзик квантовый"
@@ -75,7 +78,10 @@ class TestTheLiveWire:
         client = _answering(live["status"], live["body"])
 
         result = await client.estimate_dish(
-            external_user_id="bot:max:2761", dish_name="борщ", portion_g=300
+            external_user_id="bot:max:2761",
+            dish_name="борщ",
+            portion_g=300,
+            ai_estimate_allowed=True,
         )
 
         assert result.kcal == 147.0
@@ -92,6 +98,7 @@ class TestTheLiveWire:
             dish_name="зыбзик квантовый",
             meal_type="other",
             portion_multiplier=3.0,
+            ai_estimate_allowed=True,
         )
 
         assert result.dish_name == "зыбзик квантовый"
@@ -105,7 +112,10 @@ class TestTheLiveWire:
         client = _answering(200, body)
 
         result = await client.estimate_dish(
-            external_user_id="bot:max:2761", dish_name="зыбзик квантовый", portion_g=300
+            external_user_id="bot:max:2761",
+            dish_name="зыбзик квантовый",
+            portion_g=300,
+            ai_estimate_allowed=True,
         )
 
         assert result.matched_dish == "зыбзик квантовый"

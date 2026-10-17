@@ -57,6 +57,12 @@ interface Served {
   /** `null` — плана нет; объект — план; `"disabled"` — 404 plan_lite_disabled. */
   plan?: Json | "disabled";
   lastTopic?: Json;
+  /**
+   * DRF-2876 — сохранённый план нового механизма: объект — есть; по умолчанию
+   * `null` — нет; `"error"` — узнать не удалось; `"disabled"` — механизм
+   * выключен на сервере (404 plan_engine_disabled).
+   */
+  savedPlan?: Json | "error" | "disabled";
   /** DRF-2230 — ответ ручки «позвать в чат за согласием». */
   consentPrompt?: Response;
 }
@@ -131,6 +137,11 @@ function serve(s: Served = {}) {
       const u = String(url);
       if (u.includes("/wellness/today")) return ok(today);
       if (u.includes("/recent-activity")) return ok(activity);
+      if (u.includes("/plan/current")) {
+        if (s.savedPlan === "error") return refused(502, "ayla_unavailable");
+        if (s.savedPlan === "disabled") return refused(404, "plan_engine_disabled");
+        return ok({ plan: s.savedPlan === undefined ? null : s.savedPlan });
+      }
       if (u.includes("/plan-lite")) {
         return plan === "disabled" ? refused(404, "plan_lite_disabled") : ok(plan);
       }
@@ -498,54 +509,48 @@ describe("H01 · быстрые действия", () => {
 // ---------------------------------------------------------------------------
 
 describe("H01 · продолжить разговор с Ayla", () => {
-  it("с последней темой — «Последняя тема» и текст; обе кнопки уходят в чат", async () => {
-    serve({ lastTopic: { last_topic: { text: "Обсудили план питания и подобрали запись", at: "2026-09-20T08:30:00Z" } } });
-    renderHome();
+  // DRF-2799 (решение владельца 06.10, замещает Д2 §172 / DRF-2266 для этого
+  // блока): «диалог продолжается там, где начат». Обе кнопки ведут в разговор
+  // внутри Mini App (`/customer/ayla`) и приложение НЕ закрывают.
+  it.each(["Продолжить разговор", "Задать новый вопрос"])(
+    "с последней темой — «Последняя тема» и текст; «%s» ведёт в разговор в приложении",
+    async (label) => {
+      serve({
+        lastTopic: {
+          last_topic: { text: "Обсудили план питания и подобрали запись", at: "2026-09-20T08:30:00Z" },
+        },
+      });
+      renderHome();
 
-    const heading = await screen.findByRole("heading", { name: /Продолжить разговор с Ayla/ });
-    const block = heading.closest("section") as HTMLElement;
-    expect(within(block).getByText("Последняя тема")).toBeInTheDocument();
-    expect(within(block).getByText("Обсудили план питания и подобрали запись")).toBeInTheDocument();
+      const heading = await screen.findByRole("heading", { name: /Продолжить разговор с Ayla/ });
+      const block = heading.closest("section") as HTMLElement;
+      expect(within(block).getByText("Последняя тема")).toBeInTheDocument();
+      expect(within(block).getByText("Обсудили план питания и подобрали запись")).toBeInTheDocument();
 
-    fireEvent.click(within(block).getByRole("button", { name: "Продолжить разговор" }));
-    fireEvent.click(within(block).getByRole("button", { name: "Задать новый вопрос" }));
-    expect(mockedClose).toHaveBeenCalledTimes(2);
-  });
+      fireEvent.click(within(block).getByRole("button", { name: label }));
 
-  // ── DRF-2266 — кнопка молча ничего не делала (web.max.ru, 21.09) ──────────
+      expect(await screen.findByTestId("location")).toHaveTextContent("/customer/ayla");
+      expect(mockedClose).not.toHaveBeenCalled();
+    },
+  );
 
-  it("ссылка на чат из last-topic уходит в returnToChat", async () => {
+  // ── DRF-2266 — ссылка на диалог бота по-прежнему запоминается: ею пользуются
+  //    прочие двери в чат (согласие, план). Блок Ayla её больше не открывает.
+
+  it("ссылка на чат из last-topic запоминается, но блок Ayla в чат не уводит", async () => {
+    const { rememberChatLink } = await import("../lib/max-sdk");
     serve({ lastTopic: { last_topic: null, chat_link: "https://max.ru/ayla_client_bot" } });
     renderHome();
     const heading = await screen.findByRole("heading", { name: /Продолжить разговор с Ayla/ });
     const block = heading.closest("section") as HTMLElement;
     await waitFor(() =>
-      expect(within(block).getByRole("button", { name: "Продолжить разговор" })).toBeEnabled(),
+      expect(vi.mocked(rememberChatLink)).toHaveBeenCalledWith("https://max.ru/ayla_client_bot"),
     );
+
     fireEvent.click(within(block).getByRole("button", { name: "Продолжить разговор" }));
-    await waitFor(() =>
-      expect(mockedClose).toHaveBeenCalledWith("https://max.ru/ayla_client_bot"),
-    );
-  });
 
-  it("ни закрыть, ни открыть диалог нечем — подсказка, а не тишина", async () => {
-    mockedClose.mockReturnValue("stuck");
-    serve({ lastTopic: { last_topic: null, chat_link: null } });
-    renderHome();
-    const heading = await screen.findByRole("heading", { name: /Продолжить разговор с Ayla/ });
-    const block = heading.closest("section") as HTMLElement;
-    fireEvent.click(within(block).getByRole("button", { name: "Задать новый вопрос" }));
-    expect(await within(block).findByText(/Вернись в чат с Ayla/)).toBeInTheDocument();
-  });
-
-  it("закрылось — подсказки нет (положительная пара)", async () => {
-    serve({ lastTopic: { last_topic: null, chat_link: null } });
-    renderHome();
-    const heading = await screen.findByRole("heading", { name: /Продолжить разговор с Ayla/ });
-    const block = heading.closest("section") as HTMLElement;
-    fireEvent.click(within(block).getByRole("button", { name: "Задать новый вопрос" }));
-    await waitFor(() => expect(mockedClose).toHaveBeenCalledTimes(1));
-    expect(within(block).queryByText(/Вернись в чат с Ayla/)).toBeNull();
+    expect(await screen.findByTestId("location")).toHaveTextContent("/customer/ayla");
+    expect(mockedClose).not.toHaveBeenCalled();
   });
 
   it("без темы — нейтрально: «Продолжить разговор», подписи «Последняя тема» нет (фриз п.4)", async () => {
@@ -655,5 +660,69 @@ describe("строка «кто» ближайшей записи (п.2 реше
     ["  ", null, ""],
   ])("%j + %j → %j", (name, salon, text) => {
     expect(bookingWhoText(name, salon)).toBe(text);
+  });
+});
+
+
+// ---------------------------------------------------------------------------
+// 3а. Сохранён план нового механизма (DRF-2876)
+// ---------------------------------------------------------------------------
+
+const SAVED_PLAN = {
+  plan_id: "plan-2876",
+  steps: [
+    { step_id: "s-0", label: "Режим сна", why: null },
+    { step_id: "s-1", label: "Вечерняя прогулка", why: null },
+  ],
+};
+
+describe("H01 · сохранён новый план (решение владельца 09.10, вариант «а»)", () => {
+  it("блока «План на сегодня» и счёта действий нет, хотя прежний план есть", async () => {
+    serve({ plan: PLAN, savedPlan: SAVED_PLAN });
+    renderHome();
+
+    // Положительный контроль: карточка цели отрисована, счётчик недель на месте.
+    expect(await screen.findByText("Неделя 2")).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "План на сегодня" })).not.toBeInTheDocument();
+    expect(screen.queryByText(/выполнено/i)).not.toBeInTheDocument();
+    expect(screen.queryByText("из твоего плана")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Продолжить сегодняшний план" })).not.toBeInTheDocument();
+  });
+
+  it("вход в план — из карточки цели, существующей подписью, → /customer/plan", async () => {
+    serve({ plan: PLAN, savedPlan: SAVED_PLAN });
+    renderHome();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Мой план" }));
+
+    expect(screen.getByTestId("location")).toHaveTextContent("/customer/plan");
+  });
+
+  it("шаги нового плана на Главной не дублируются и «Составить план» не предлагается", async () => {
+    serve({ plan: null, savedPlan: SAVED_PLAN });
+    renderHome();
+
+    expect(await screen.findByRole("button", { name: "Мой план" })).toBeInTheDocument();
+    expect(screen.queryByText("Режим сна")).not.toBeInTheDocument();
+    expect(screen.queryByText("План ещё не составлен")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Составить план" })).not.toBeInTheDocument();
+  });
+
+  it("не удалось узнать о новом плане — о плане молчим, счётчики прежнего не показываем", async () => {
+    serve({ plan: PLAN, savedPlan: "error" });
+    renderHome();
+
+    expect(await screen.findByText("Неделя 2")).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "План на сегодня" })).not.toBeInTheDocument();
+    expect(screen.queryByText(/выполнено/i)).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Мой план" })).not.toBeInTheDocument();
+  });
+
+  it("механизм выключен на сервере — Главная как раньше, с прежним планом", async () => {
+    serve({ plan: PLAN, savedPlan: "disabled" });
+    renderHome();
+
+    expect(await screen.findByRole("heading", { name: "План на сегодня" })).toBeInTheDocument();
+    expect(screen.getByText("Неделя 2 · выполнено 7 из 10 действий")).toBeInTheDocument();
   });
 });

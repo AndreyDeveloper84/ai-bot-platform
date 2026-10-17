@@ -126,6 +126,49 @@ _SHOW_TRIGGERS = (
     "покажи мою память",
 )
 
+#: DRF-2891 — предмет из чужого домена: запись к мастеру и бронь. Память бота
+#: их не хранит, а «удали запись к мастеру», «…на вечер», «…в другом районе»,
+#: «…за 2000 рублей» несут стебли доменов памяти (``_KEY_KEYWORDS``). Замер на
+#: dev ``d52b1c37``: каждая из этих реплик СТИРАЛА домен — мастеров, «когда
+#: приходишь», районы, бюджет — и отвечала «Готово — забыла…».
+#:
+#: «Номер» и «телефон» сюда не входят намеренно: телефон — персональные данные,
+#: и «сотри мой номер», отпущенная дальше, ушла бы модели, у которой стирания
+#: нет, — а она может ответить «удалила». Честное уточнение лучше. «Визит» —
+#: тоже нет: «забудь про мои визиты по выходным» — это домен «когда приходишь».
+_FOREIGN_NOUN = (
+    r"запис(?:ь|и|ей|ью|ям|ями|ях)"
+    r"|брон(?:ь|и|ей|ью|ям|ями|ях)"
+    r"|бронирован(?:ие|ия|ий|ию|иям|иями|иях)"
+)
+#: «записи обо мне», «запись что я веган», «записи о питании» — это просьба о
+#: ПАМЯТИ: «записи» здесь — то, что бот записал о человеке. Такие реплики
+#: остаются командой, как и были.
+_NOT_ABOUT = r"(?!\s+(?:обо|об|о|про|что)\b)"
+#: Определения перед существительным — закрытые формы, без открытого ``\w+``.
+#: «свой/свои» нет: в повелительном «удали все свои записи» — записи бота, то
+#: есть память.
+_FOREIGN_LEAD = (
+    r"мой|моя|мое|мою|мои|моих|моей|моего|эту|этот|эти|ту|те|все|всю|всех|мне|у\s+меня"
+    r"|(?:завтрашн|сегодняшн|послезавтрашн|вчерашн|последн|утренн|вечерн|ближайш|следующ)"
+    r"(?:юю|ую|ие|ей|их|яя|ая|ий|ее|им|ими)"
+)
+#: Предмет команды НАЧИНАЕТСЯ с чужого существительного → ход идёт дальше.
+_FOREIGN_OBJECT_RE = re.compile(
+    r"^(?:(?:" + _FOREIGN_LEAD + r")\s+){0,2}(?:" + _FOREIGN_NOUN + r")\b" + _NOT_ABOUT
+)
+#: Чужое существительное где угодно в предмете → домен по стеблю не стирается
+#: («удали на вечер запись», «удали субботнюю запись к мастеру»): лишнее
+#: уточнение дешевле стёртой памяти.
+_FOREIGN_NOUN_ANYWHERE_RE = re.compile(r"\b(?:" + _FOREIGN_NOUN + r")\b" + _NOT_ABOUT)
+
+#: «всё» как предмет «забудь всё» — кроме «всё про …» (домен) и, DRF-2891,
+#: «все (мои) записи» — записи к мастеру, а не память.
+_ALL = (
+    r"вс[её]\b(?!\s+(?:про|о|об)\b"
+    r"|\s+(?:мои\s+)?(?:" + _FOREIGN_NOUN + r")\b" + _NOT_ABOUT + r")"
+)
+
 # «forget everything» — checked BEFORE «forget {field}» so «всё» is not treated
 # as a field name. The negative lookahead keeps «забудь всё ПРО моё питание»
 # OUT of forget-all: that is a DOMAIN forget (DRF-1261 proof step 4 — removes
@@ -134,9 +177,7 @@ _SHOW_TRIGGERS = (
 # reset — «forget me» is only honoured via the memory verb «забудь меня».
 _FORGET_ALL_RE = re.compile(
     r"\b(?:забудь\s+меня"
-    r"|забудь\s+вс[её]\b(?!\s+(?:про|о|об)\b)"
-    r"|удали\s+вс[её]\b(?!\s+(?:про|о|об)\b)"
-    r"|сотри\s+(?:вс[её]\b(?!\s+(?:про|о|об)\b)|память))\b"
+    r"|забудь\s+" + _ALL + r"|удали\s+" + _ALL + r"|сотри\s+(?:" + _ALL + r"|память))\b"
 )
 
 # «forget {field}» — a forget verb followed by a target that is not «всё/меня».
@@ -241,6 +282,10 @@ class MemoryCommandResult:
     text: str
     action_type: str = ""
     action_data: dict | None = None
+    #: DRF-2700 — ход стёр факт по просьбе человека. Канал после записи своего
+    #: ответа закрывает переписку для модели: ответ «забыла, что ты …» сам
+    #: повторяет стёртое.
+    erased: bool = False
     #: DRF-2341 — см. ``apps.orchestrator.done_claims``.
     #: DRF-2341 — те же имена и та же форма, что у ``SkillResult``: булев
     #: признак плюс подтверждение «источник:что он ответил». ``meta`` у
@@ -254,6 +299,32 @@ def _normalise(text: str) -> str:
     """Lowercase, strip, collapse spaces, fold ё→е for robust matching."""
 
     return re.sub(r"\s+", " ", (text or "").strip().lower().replace("ё", "е"))
+
+
+#: DRF-2887 — знаки, которыми человек отделяет глагол команды от остального:
+#: «забудь, что я веган», «забудь: я веган», «удали; про бюджет». Тире и дефис
+#: не трогаются: тире между словами шаблоны и так переносят, а дефис стоит
+#: внутри слов («кето-диета»).
+_COMMAND_PUNCTUATION_RE = re.compile(r"[,;:]")
+_POLITENESS_RE = re.compile(r"\bпожалуйста\b")
+
+#: DRF-2887 — «не забудь, что я веган» — просьба ПОМНИТЬ. Замер на ``eac09fc6``:
+#: без запятой эта реплика стирала факт и получала ответ «забыла». Отрицание
+#: перед глаголом забывания — не команда, ни с запятой, ни без.
+_NEGATED_FORGET_RE = re.compile(r"\bне\s+(?:забудь|забывай|удали|удаляй|сотри|стирай)\b")
+
+
+def _spoken(norm: str) -> str:
+    """Нормализованная реплика без знаков и вежливости между глаголом и предметом.
+
+    Замер DRF-2887: «забудь, что я веган» — с запятой, как требует пунктуация —
+    командой не считалась: шаблоны ждут пробел сразу после глагола. Факт
+    оставался, реплика уходила модели, человек об этом не узнавал. То же с
+    «удали,», «сотри,», «забудь, пожалуйста, …», «покажи, что знаешь обо мне».
+    """
+
+    without_marks = _COMMAND_PUNCTUATION_RE.sub(" ", norm)
+    return re.sub(r"\s+", " ", _POLITENESS_RE.sub(" ", without_marks)).strip()
 
 
 def _fact_keywords(content: dict) -> tuple[str, ...]:
@@ -574,6 +645,14 @@ def handle_memory_command(
             )
         return None  # bare «удалить» with no pending prompt → not a command
 
+    # DRF-2887 — дальше команды ищутся в реплике без знаков между глаголом и
+    # предметом. Слово-подтверждение выше сверяется с исходной строкой: оно
+    # одно, и знаки в нём не разделители.
+    norm = _spoken(norm)
+    if _NEGATED_FORGET_RE.search(norm):
+        # «не забудь, что я веган» — просьба помнить, а не забыть.
+        return None
+
     # 2. «забудь всё» request → the confirmation prompt (does NOT delete yet).
     if _FORGET_ALL_RE.search(norm):
         return MemoryCommandResult(text=FORGET_ALL_PROMPT, action_type="memory_forget_all_prompt")
@@ -586,6 +665,11 @@ def handle_memory_command(
         # («удали меня из рассылки») are not memory-field commands → let discovery
         # handle them instead of hijacking the turn with a clarify prompt.
         if not target or target in _NON_FIELD_TARGETS or target.startswith("меня"):
+            return None
+        # DRF-2891 — «удали запись на завтра», «забудь про запись», «сотри бронь»:
+        # предмет из другого домена. Ход уходит дальше — и при пустой памяти
+        # тоже, поэтому проверка стоит ДО чтения записей.
+        if _FOREIGN_OBJECT_RE.match(target):
             return None
         # Matching runs over ALL live rows, NOT the current view: 152-ФЗ
         # erasure targets what is STORED, not what is surfaced, so «забудь,
@@ -608,16 +692,20 @@ def handle_memory_command(
             _bridge_clear(bot_user, keys)
             label = describe_green_content(fact_matched[0].content) or "это"
             # Фраза факта — во 2-м лице (DRF-1292), поэтому «забыла, что ты …».
-            return MemoryCommandResult(text=f"Готово — забыла, что ты {label}.")
+            return MemoryCommandResult(text=f"Готово — забыла, что ты {label}.", erased=True)
 
         matched_domains: set[str] = set()
-        for e in entries:
-            entry_key = _entry_key(e)
-            if entry_key is None:
-                continue
-            domain = _domain_of(entry_key)
-            if any(kw in target for kw in _KEY_KEYWORDS.get(domain, ())):
-                matched_domains.add(domain)
+        # DRF-2891 — запись к мастеру где-то в предмете: стебли доменов здесь
+        # ловят слова про визит («к мастеру», «на вечер»), а не про память.
+        # Домен не стирается — уточнение со списком, как при нуле совпадений.
+        if not _FOREIGN_NOUN_ANYWHERE_RE.search(target):
+            for e in entries:
+                entry_key = _entry_key(e)
+                if entry_key is None:
+                    continue
+                domain = _domain_of(entry_key)
+                if any(kw in target for kw in _KEY_KEYWORDS.get(domain, ())):
+                    matched_domains.add(domain)
         domain_keys = sorted(matched_domains)
         if len(domain_keys) == 1:
             doomed = [
@@ -628,7 +716,9 @@ def handle_memory_command(
             soft_delete_green_entries(user_id, [e.id for e in doomed])
             _bridge_clear(bot_user, domain_keys)
             label = _DOMAIN_LABELS.get(domain_keys[0], domain_keys[0])
-            return MemoryCommandResult(text=f"Готово — забыла всё, что знала: {label}.")
+            return MemoryCommandResult(
+                text=f"Готово — забыла всё, что знала: {label}.", erased=True
+            )
 
         # 0 or several domains → clarify by showing what's remembered (DRF-1262:
         # the current view, so the clarification itself is not a contradiction).

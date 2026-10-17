@@ -30,6 +30,7 @@ Schema (every key optional; a missing key means the conservative default)::
           "ignored_streak": 0                 # consecutive unheeded reminders
       },
       "opted_out_at": "<iso8601>",            # set by the opt-out skill
+      "numbers_hidden": false,                # «Без чисел», DRF-2766; default False
       "outbox": [                             # shared send journal (DRF-1468)
           {"surface": "report", "sent_at": "<iso8601 utc>"},
           # + "solicited": true on sends the person asked for (DRF-1464 T6)
@@ -214,6 +215,32 @@ def write_prefs(bot_user: Any, updates: dict[str, Any]) -> dict[str, Any]:
     BotUser.all_tenants.filter(pk=bot_user.pk).update(context=context_json)
     bot_user.context = context_json
     return context_json
+
+
+def numbers_hidden(prefs: dict[str, Any]) -> bool:
+    """«Без чисел» (DRF-2766): человек сам выбрал не видеть калории, БЖУ и цели.
+
+    Решение владельца 04.10: добровольный режим отображения на всех экранах;
+    записи дневника он не трогает. Заменяет прежнее автоматическое скрытие по
+    флагу расстройства пищевого поведения — по признаку профиля числа больше
+    не прячутся, только по выбору самого человека. Не задано — числа видны:
+    скрывать за человека без его выбора и есть то, что владелец снял.
+    """
+    return prefs.get("numbers_hidden") is True
+
+
+def numbers_hidden_for(bot_user: Any) -> bool:
+    """«Без чисел» для человека — единственный читатель для всех поверхностей.
+
+    Никогда не бросает: реплика в чате и экран не должны падать из-за
+    настройки отображения. Не прочитали — выбора не знаем, числа видны: режим
+    добровольный, и «не знаем» не может значить «скрыть за человека».
+    """
+    try:
+        return numbers_hidden(get_prefs(bot_user))
+    except Exception:  # noqa: BLE001 — a display preference must not break a reply
+        logger.exception("nutrition_proactive.prefs.numbers_choice_failed")
+        return False
 
 
 def report_time(prefs: dict[str, Any]) -> str:
