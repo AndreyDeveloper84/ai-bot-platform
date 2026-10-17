@@ -126,7 +126,7 @@ no regression risk.
 from __future__ import annotations
 
 import logging
-from typing import ClassVar
+from typing import Any, ClassVar
 
 from apps.channels.miniapp_config import miniapp_target
 from django.utils import timezone
@@ -402,6 +402,17 @@ FOOD_PROMPT = (
 WATER_PROMPT = "💧 Сколько выпито? Напиши коротко — например, «стакан», «250 мл», «чашка кофе»."
 
 
+def _prompt_action_data() -> dict[str, Any]:
+    """§72: приглашение написать текстом — тоже не тупик, у него есть «Меню».
+
+    Ответ ждёт свободный текст, и кнопка ему не мешает: она выход для того,
+    кто передумал, а не замена вводу.
+    """
+    from apps.orchestrator.next_steps import menu_button, next_step_action_data
+
+    return next_step_action_data(menu_button())
+
+
 @register
 class WelcomeSkill:
     """Greet on /start and route welcome-keyboard taps.
@@ -460,16 +471,19 @@ class WelcomeSkill:
             # User tapped «❓ Задать вопрос» — prompt; FAQ skill picks up next turn.
             return SkillResult(
                 reply_text=ASK_PROMPT,
+                action_data=_prompt_action_data(),
                 meta={"reply_kind": "welcome_ask_prompt"},
             )
         if text == "cb:welcome:food":
             return SkillResult(
                 reply_text=FOOD_PROMPT,
+                action_data=_prompt_action_data(),
                 meta={"reply_kind": "welcome_food_prompt"},
             )
         if text == "cb:welcome:water":
             return SkillResult(
                 reply_text=WATER_PROMPT,
+                action_data=_prompt_action_data(),
                 meta={"reply_kind": "welcome_water_prompt"},
             )
         if text == "cb:welcome:start_s2":

@@ -72,7 +72,6 @@ DEBT: dict[str, int] = {
     "apps/skills/privacy_consent/skill.py::handle": 3,
     "apps/skills/registry.py::dispatch": 1,
     "apps/skills/water/skill.py::handle": 1,
-    "apps/skills/welcome/skill.py::handle": 3,
 }
 
 #: Без кнопок по правилу (§72) — с причиной. Любое число ответов в этих функциях.
