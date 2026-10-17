@@ -44,7 +44,9 @@ class MaxHandler(TenantAwareTask):
     entries (raise ``TenantRequiredButMissing``). The consumer does
     NOT XACK on raise — **the entry stays in the PEL** until operator
     XCLAIM / XAUTOCLAIM intervention. No automatic DLQ retry is wired
-    yet — see ``docs/runbooks/strict-tenant-refuse-flip.md``. Phase 0
+    yet — see ``docs/runbooks/strict-tenant-refuse-flip.md``. (DRF-1943:
+    an entry carrying a voice attachment is the exception — the consumer
+    moves it to ``<stream>:dlq`` at once, without the link.) Phase 0
     default (False) is log-only: ERROR log on missing tenant, handler
     still runs (parity with pre-B4 for the transition window).
     """
