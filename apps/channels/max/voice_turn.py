@@ -52,7 +52,6 @@ OpenAI ставит знаки всегда, а шаблоны ``pre_check.py`` 
 from __future__ import annotations
 
 import logging
-import re
 import time
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
@@ -110,12 +109,6 @@ REFUSAL_TEXTS: Final[dict[str, str]] = {
 }
 
 ECHO_LINE: Final[str] = "Я услышала: «{text}»"
-
-# Только знаки препинания МЕЖДУ словами. Апостроф и дефис внутри слова
-# остаются: «don't want to live» и «self-harm» — шаблоны гейта, и без
-# апострофа кризис по-английски терялся (проба DRF-2423 это поймала).
-_PUNCT = re.compile(r"[,.!?;:…\"«»“”„()\[\]{}<>—–]|(?<!\w)['\-’]|['\-’](?!\w)")
-_WS = re.compile(r"\s+")
 
 
 @dataclass(frozen=True, slots=True)
@@ -200,9 +193,14 @@ def strip_for_gate(text: str) -> str:
     """Копия текста без знаков препинания между словами для ``evaluate_inbound`` (K19-Б).
 
     Апостроф и дефис внутри слова сохраняются («don't», «self-harm») — иначе
-    английские шаблоны гейта перестают срабатывать.
+    английские шаблоны гейта перестают срабатывать. Само правило живёт рядом с
+    гейтом (``apps.orchestrator.safety.normalize``, DRF-2922): набранный текст
+    гейт проверяет ещё и по копии без знаков внутри предложения, и две копии
+    должны описываться в одном месте.
     """
-    return _WS.sub(" ", _PUNCT.sub(" ", text)).strip()
+    from apps.orchestrator.safety.normalize import without_marks
+
+    return without_marks(text)
 
 
 def with_voice_echo(reply_text: str, transcript_text: str) -> str:

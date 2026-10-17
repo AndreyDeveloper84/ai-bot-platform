@@ -203,24 +203,25 @@ class TestG4ForgettingOneFactNotTheWholeTopic:
         её, проходил через мёртвый стебель «ем всё» (ё сводится к е, и такой
         стебель не совпадёт никогда) — и удаление ЖИВОГО стебля оставалось
         зелёным."""
-        from apps.persona.memory_commands import _FACT_KEYWORDS, _normalise
+        from apps.persona.memory_commands import _FACT_KEYWORDS, _has_stem, _normalise
 
         stems = _FACT_KEYWORDS[("diet", value)]
         target = _normalise(said)
 
-        assert any(stem in target for stem in stems), (target, stems)
+        # DRF-2980 — боевое сравнение (с начала слова), а не подстрока.
+        assert any(_has_stem(target, stem) for stem in stems), (target, stems)
 
     @pytest.mark.parametrize("said", ["я ем всегда поздно", "ем всего понемногу"])
     def test_a_phrase_that_is_not_about_diet_does_not_match(self, said: str) -> None:
         """Перебор в удалении дороже недобора: стебель «ем все» ловил «ем всегда»
         и удалял бы строку по фразе не о питании."""
-        from apps.persona.memory_commands import _FACT_KEYWORDS, _normalise
+        from apps.persona.memory_commands import _FACT_KEYWORDS, _has_stem, _normalise
 
         stems = _FACT_KEYWORDS[("diet", DIET_OMNIVORE)]
         target = _normalise(said)
 
         assert stems  # наличие: стебли у значения есть
-        assert not any(stem in target for stem in stems), (target, stems)
+        assert not any(_has_stem(target, stem) for stem in stems), (target, stems)
 
     def test_no_stem_is_dead(self) -> None:
         """Мёртвый стебель хуже отсутствующего: он выглядит работающим.
