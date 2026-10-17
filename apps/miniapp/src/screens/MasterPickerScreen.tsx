@@ -1,14 +1,14 @@
 /** F2 — Masters filtered by selected service. */
 
-import { useCallback, useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useCallback, useEffect, useLayoutEffect, useState } from "react";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { fetchMasters, type Master } from "../lib/api";
 import { ScreenLayout } from "../components/ScreenLayout";
 import { MasterCard } from "../components/MasterCard";
 import { DelayedSkeleton, MasterCardSkeleton } from "../components/Skeleton";
 import { StateError } from "../components/StateError";
 import { useHaptics } from "../hooks/useHaptics";
-import { setEntryPoint, setMaster, useBookingDraft } from "../state/booking";
+import { alignMaster, alignService, setEntryPoint, useBookingDraft } from "../state/booking";
 import { backTo } from "../lib/screen-back";
 
 /**
@@ -33,11 +33,23 @@ export function MasterPickerScreen() {
   const [state, setState] = useState<State>({ kind: "loading" });
 
 
+  // DRF-2752 — услуга из адреса главнее черновика (то же правило, что на
+  // экране времени). Сюда приходят и запасным путём из «специалиста» с
+  // `?service=`: раньше адрес не читался, и пустой черновик уводил в
+  // каталог, а чужой — показывал мастеров чужой услуги.
+  const [params] = useSearchParams();
+  const routeService = params.get("service");
+  const serviceId = routeService ?? draft.serviceId;
+
+  useLayoutEffect(() => {
+    if (routeService) alignService(routeService);
+  }, [routeService]);
+
   const load = useCallback(() => {
-    if (!draft.serviceId) return;
+    if (!serviceId) return;
     setState({ kind: "loading" });
     let cancelled = false;
-    fetchMasters({ serviceId: draft.serviceId })
+    fetchMasters({ serviceId })
       .then(({ masters }) => {
         if (!cancelled) setState({ kind: "ok", masters });
       })
@@ -47,15 +59,15 @@ export function MasterPickerScreen() {
     return () => {
       cancelled = true;
     };
-  }, [draft.serviceId]);
+  }, [serviceId]);
 
   useEffect(() => {
-    if (!draft.serviceId) {
+    if (!serviceId) {
       navigate("/customer/catalog", { replace: true });
       return;
     }
     return load();
-  }, [draft.serviceId, navigate, load]);
+  }, [serviceId, navigate, load]);
 
   function onPick(m: Master) {
     haptics.selection();
@@ -65,7 +77,8 @@ export function MasterPickerScreen() {
     // catalog. Stamped here because ServiceDetailScreen is owned by
     // another change window; both spots stamp the same value.
     setEntryPoint("catalog");
-    setMaster(m.id, m.name);
+    // DRF-2752 — смена мастера снимает время, выбранное у прежнего.
+    alignMaster(m.id, m.name);
     navigate("/customer/book/when");
   }
 

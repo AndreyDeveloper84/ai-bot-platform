@@ -29,7 +29,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from apps.persona.voice import NO_INTERNAL_TERMS_RULE
+from apps.persona.voice import CLIENT_ADDRESS_RULE, NO_INTERNAL_TERMS_RULE
 
 
 @dataclass
@@ -64,6 +64,9 @@ def build_booking_prompt(
     price: dict[str, Any] | None = None,
     certificate: dict[str, Any] | None = None,
     flow_context: dict[str, Any] | None = None,
+    refusal: dict[str, Any] | None = None,
+    no_slots: dict[str, Any] | None = None,
+    bookings_check_failed: bool = False,
 ) -> list[dict[str, str]]:
     """Build a ChatML messages list for one booking-skill LLM call.
 
@@ -96,6 +99,16 @@ def build_booking_prompt(
                preview question; the channel adapter renders the
                2-button card alongside the text.
       user_bookings: when set, the list from :func:`show_my_bookings`.
+      refusal: DRF-2672 — when set, the tool the model called refused:
+               ``{"tool": <name>, "error": <slug>}``. Spliced in as a
+               «НЕУДАЧА / Причина» block, the shape the certificate
+               block already had, so the second call knows the tool
+               failed and why instead of answering blind.
+      no_slots: DRF-2672 — when set, :func:`show_slots` ran and found no
+                free time: ``{"rendered_text": <the tool's own text>}``.
+      bookings_check_failed: DRF-2701 — ``show_my_bookings`` could not read
+                             the schedule; ``user_bookings`` is the local
+                             list alone and the model is told so.
 
     Returns:
       ChatML messages list — pass straight to
@@ -113,6 +126,9 @@ def build_booking_prompt(
         price=price,
         certificate=certificate,
         flow_context=flow_context,
+        refusal=refusal,
+        no_slots=no_slots,
+        bookings_check_failed=bookings_check_failed,
     )
     return [
         {"role": "system", "content": system_text},
@@ -133,6 +149,9 @@ def _render_system_prompt(
     price: dict[str, Any] | None = None,
     certificate: dict[str, Any] | None = None,
     flow_context: dict[str, Any] | None = None,
+    refusal: dict[str, Any] | None = None,
+    no_slots: dict[str, Any] | None = None,
+    bookings_check_failed: bool = False,
 ) -> str:
     sections: list[str] = [f"Ты — {brand_voice.persona}."]
 
@@ -237,6 +256,8 @@ def _render_system_prompt(
             user_bookings,
             price,
             certificate,
+            refusal,
+            no_slots,
         )
     )
     if has_live_data:
@@ -256,16 +277,22 @@ def _render_system_prompt(
     if pending:
         sections.append(_format_pending_block(pending))
     if user_bookings is not None:
-        sections.append(_format_bookings_block(user_bookings))
+        sections.append(_format_bookings_block(user_bookings, check_failed=bookings_check_failed))
     if price is not None:
         sections.append(_format_price_block(price))
     if certificate is not None:
         sections.append(_format_certificate_block(certificate))
+    if refusal is not None:
+        sections.append(_format_refusal_block(refusal))
+    if no_slots is not None:
+        sections.append(_format_no_slots_block(no_slots))
     if flow_context:
         sections.append(_format_flow_block(flow_context))
 
     # DRF-2593 — решение владельца 28.09, п.10.
     sections.append(NO_INTERNAL_TERMS_RULE)
+    # DRF-2712 — канон обращения: к клиенту на «ты».
+    sections.append(CLIENT_ADDRESS_RULE)
     sections.append(f"Ответ не длиннее {_MAX_ANSWER_CHARS} символов.")
     return "\n\n".join(sections)
 
@@ -351,6 +378,44 @@ def _format_certificate_block(certificate: dict[str, Any]) -> str:
     )
 
 
+def _format_refusal_block(refusal: dict[str, Any]) -> str:
+    """DRF-2672 — tell the second call that the tool refused, and why.
+
+    Same shape as the failure half of :func:`_format_certificate_block`,
+    which was the only refusal the model ever heard about. Every other
+    refusal that reached the second call left nothing in the prompt, so
+    the model answered as if the tool had never been called.
+
+    The reason is the tool's own slug, as in the certificate block. There
+    is deliberately NO «Готовый текст» line and no instruction on what to
+    offer: no code path holds words for the person here, and inventing
+    them in a prompt would be writing the person's text by another hand.
+    What to say next is the model's call; ``NO_INTERNAL_TERMS_RULE`` keeps
+    the slug itself out of the reply.
+    """
+    return (
+        f"ИНСТРУМЕНТ {refusal.get('tool', '')} — НЕУДАЧА:\n"
+        f"• Причина: {refusal.get('error', '')}\n"
+        "Сообщи клиенту коротко и понятно, без технических деталей."
+    )
+
+
+def _format_no_slots_block(no_slots: dict[str, Any]) -> str:
+    """DRF-2672 — ``show_slots`` ran and there is no free time to offer.
+
+    Not a refusal: the tool worked and the answer is «нет». The answer
+    used to stay in the tool result's text, which the prompt never read —
+    the time block is rendered only when there is time. The text is the
+    tool's own and says which «нет» it is (no dates at all, or none on
+    the day asked for).
+    """
+    return (
+        "СВОБОДНОЕ ВРЕМЯ (show_slots): нет.\n"
+        f"• Готовый текст: {no_slots.get('rendered_text', '')}\n"
+        "Сообщи клиенту коротко и понятно, без технических деталей."
+    )
+
+
 def _format_pending_block(pending: dict[str, Any]) -> str:
     """Splice the preview-card context into the system prompt.
 
@@ -364,7 +429,7 @@ def _format_pending_block(pending: dict[str, Any]) -> str:
         "ПРЕДПРОСМОТР (2 кнопки появятся под ответом):\n"
         f"• Тип: {kind}\n"
         f"• Текст: {pending.get('preview_text', '')}\n"
-        "Перефразируй коротко, заверши вопросом 'Подтверждаете?'."
+        "Перефразируй коротко, заверши вопросом 'Подтверждаешь?'."
     )
 
 
@@ -522,13 +587,40 @@ def _format_price_block(price: dict[str, Any]) -> str:
     )
 
 
-def _format_bookings_block(bookings: list[dict[str, Any]]) -> str:
+#: DRF-2701 — the schedule could not be read. Worded after the instruction
+#: the master assistant already gives for stale data
+#: (``apps/master_api/services/assistant.py``): the check failed, these are
+#: the last known data.
+BOOKINGS_CHECK_FAILED_NOTE = (
+    "Сверить записи с расписанием не удалось: это последние известные данные, "
+    "время и актуальность не подтверждены. Не выдавай их за точные."
+)
+
+#: DRF-2701 — the schedule was read and has no such record.
+BOOKING_UNCONFIRMED_MARK = " — в расписании не найдена, время и актуальность не подтверждены"
+
+
+def _format_bookings_block(bookings: list[dict[str, Any]], *, check_failed: bool = False) -> str:
+    """Splice the ``show_my_bookings`` list into the system prompt.
+
+    DRF-2701. On the legacy schedule path a booking row could reach the
+    model with an empty time for two different reasons — the schedule read
+    failed, or it worked and held no such record — and the block was
+    byte-identical to the one for a fully checked list. Both are now said:
+    the first once for the whole list, the second on the row it concerns.
+    Neither hides a row or adds words for the person.
+    """
     if not bookings:
+        if check_failed:
+            return "ПРЕДСТОЯЩИЕ ЗАПИСИ: нет.\n" + BOOKINGS_CHECK_FAILED_NOTE
         return "ПРЕДСТОЯЩИЕ ЗАПИСИ: нет."
     lines = ["ПРЕДСТОЯЩИЕ ЗАПИСИ:"]
     for b in bookings:
+        mark = BOOKING_UNCONFIRMED_MARK if b.get("unconfirmed") else ""
         lines.append(
             f"• {b.get('service_name', '—')} с {b.get('master_name', '—')} "
-            f"в {b.get('visit_at', '—')}"
+            f"в {b.get('visit_at', '—')}{mark}"
         )
+    if check_failed:
+        lines.append(BOOKINGS_CHECK_FAILED_NOTE)
     return "\n".join(lines)

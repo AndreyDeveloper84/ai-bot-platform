@@ -9,7 +9,7 @@ The live evidence this file stands on (pilot, 2026-08-23):
 
 Two defects in one dialogue. The request named a day and a part of the day,
 and neither was used nor asked back about; and what the bot offered instead
-was a bare calendar — «Выберите дату», then «Выберите время».
+was a bare calendar — «Выбери дату», then «Выбери время».
 
 The tests below pin the two halves separately, because they can regress
 separately: the chips can go on working while the parse rots, and the parse
@@ -177,7 +177,7 @@ def _iso(offset: int) -> str:
 
 
 class TestDayChips:
-    """«Выберите дату» → «Сегодня / Завтра / Послезавтра / Выбрать дату»."""
+    """«Выбери дату» → «Сегодня / Завтра / Послезавтра / Выбрать дату»."""
 
     def test_master_pick_renders_relative_day_chips(
         self, context: SkillContext, tenant: Tenant
@@ -243,7 +243,7 @@ class TestDayChips:
                 result = BookingSkill().handle(
                     _tap(context, f"{CALLBACK_BOOK_MORE_DATES_PREFIX}11:22")
                 )
-        # DRF-1474 — was «Выберите дату:», the collapsed picker's own header.
+        # DRF-1474 — was «Выбери дату:», the collapsed picker's own header.
         # See test_expansion_does_not_repeat_the_collapsed_header below for
         # the live transcript that reads as the bot saying it twice.
         assert result.reply_text == "Все свободные даты:"
@@ -256,12 +256,12 @@ class TestDayChips:
     def test_expansion_does_not_repeat_the_collapsed_header(
         self, context: SkillContext, tenant: Tenant
     ) -> None:
-        """DRF-1474 — the «Выберите дату:» that arrived twice.
+        """DRF-1474 — the «Выбери дату:» that arrived twice.
 
         Live pilot 04.09::
 
-            12:15:13  бот  Выберите дату:   [Сегодня · Завтра · 7 сен · Выбрать дату]
-            12:15:17  бот  Выберите дату:   [Сегодня … 17 сен — 12 кнопок]
+            12:15:13  бот  Выбери дату:   [Сегодня · Завтра · 7 сен · Выбрать дату]
+            12:15:17  бот  Выбери дату:   [Сегодня … 17 сен — 12 кнопок]
 
         Nothing was sent twice and nothing was retried: the second message is
         the answer to a «Выбрать дату» tap. But the transcript shows text, not
@@ -289,7 +289,7 @@ class TestDayChips:
 
 
 class TestPartChips:
-    """«Выберите время» → «Утро / День / Вечер / Точное время»."""
+    """«Выбери время» → «Утро / День / Вечер / Точное время»."""
 
     def test_date_tap_asks_for_a_part_of_day(self, context: SkillContext, tenant: Tenant) -> None:
         day = _iso(1)
@@ -346,7 +346,7 @@ class TestPartChips:
         with _patch_yclients(client), _patch_provider_complete([]):
             with tenant_scope(tenant):
                 result = BookingSkill().handle(_tap(context, f"cb:book:pick_date:11:{day}:22"))
-        assert result.reply_text == "Завтра, вечером — выберите время:"
+        assert result.reply_text == "Завтра, вечером — выбери время:"
         assert _callbacks(result) == [
             f"cb:book:pick_slot:11:22:{day}T18:00:00",
             f"cb:book:pick_slot:11:22:{day}T19:00:00",
@@ -380,7 +380,7 @@ class TestPartChips:
                 result = BookingSkill().handle(
                     _tap(context, f"{CALLBACK_BOOK_PICK_PART_PREFIX}11:{day}:any:22")
                 )
-        assert result.reply_text == "Выберите время:"
+        assert result.reply_text == "Выбери время:"
         assert len(_callbacks(result)) == 3
 
 
@@ -413,7 +413,7 @@ class TestStatedPreferenceIsHonoured:
                 result = BookingSkill().handle(_tap(context, "cb:book:pick_master:11:22"))
         # Read back in the user's own words — the request is visibly heard,
         # which is the half of the defect that «молча» names.
-        assert result.reply_text == "Вы просили завтра вечером — вот что есть:"
+        assert result.reply_text == "Была просьба: завтра вечером — вот что есть:"
         # And 11:30 — the time the pilot booking actually landed on — is NOT
         # among the offers, because 11:30 is not an evening.
         assert _callbacks(result) == [
@@ -479,7 +479,7 @@ class TestStatedPreferenceIsHonoured:
         with _patch_yclients(client), _patch_provider_complete([]):
             with tenant_scope(tenant):
                 result = BookingSkill().handle(_tap(context, "cb:book:pick_master:11:22"))
-        assert result.reply_text == "Выберите дату:"
+        assert result.reply_text == "Выбери дату:"
         assert _labels(result)[:3] == ["Сегодня", "Завтра", "Послезавтра"]
 
 
@@ -590,7 +590,7 @@ class TestDeadEndDaysStillOfferDays:
                 result = BookingSkill().handle(_tap(context, f"cb:book:pick_date:11:{day}:22"))
         assert result.reply_text == (
             "На завтра у мастера свободного времени нет, "
-            "других свободных дней у него сейчас не вижу. Выберите другого мастера."
+            "других свободных дней у него сейчас не вижу. Выбери другого мастера."
         )
         assert "Вот ближайшие дни:" not in result.reply_text
         assert result.action_data is None
@@ -683,7 +683,7 @@ class TestSlotKeyboardHasACeiling:
                 result = BookingSkill().handle(
                     _tap(context, f"{CALLBACK_BOOK_PICK_PART_PREFIX}11:{day}:any:22")
                 )
-        assert result.reply_text == "Выберите время:"
+        assert result.reply_text == "Выбери время:"
         assert len(_callbacks(result)) == 20
 
     def test_an_overlong_day_is_capped_and_the_reply_admits_it(
@@ -709,9 +709,9 @@ class TestSlotKeyboardHasACeiling:
         # The half a silent cap does not buy: the person is told the list is
         # partial, and told how to reach the rest.
         assert "Показываю первые 24 из 40" in result.reply_text
-        assert "напишите, во сколько вам удобно" in result.reply_text
+        assert "напиши, во сколько тебе удобно" in result.reply_text
         # The header the truncated list sits under is still the header.
-        assert result.reply_text.startswith("Выберите время:")
+        assert result.reply_text.startswith("Выбери время:")
 
     def test_the_cap_keeps_the_keyboard_inside_what_max_accepts(
         self, context: SkillContext, tenant: Tenant

@@ -23,6 +23,7 @@ import {
 } from "../lib/booking-flow";
 import { getCatalogBrowse } from "../lib/customer-booking";
 import { backTo } from "../lib/screen-back";
+import { alignService } from "../state/booking";
 
 export function ExecutionOptionScreen() {
   const navigate = useNavigate();
@@ -82,7 +83,12 @@ export function ExecutionOptionScreen() {
       <button
         type="button"
         className="btn-primary"
-        onClick={() => navigate(`${PROVIDER_ROUTE}?service=${option.service.id}`)}
+        onClick={() => {
+          // DRF-2752 — услуга фиксируется на шаге услуги, с именем: только
+          // здесь оно известно, а подтверждение показывает его человеку.
+          alignService(option.service.id, option.service.name);
+          navigate(`${PROVIDER_ROUTE}?service=${option.service.id}`);
+        }}
       >
         {OPTION_CTA}
       </button>

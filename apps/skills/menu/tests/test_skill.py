@@ -124,7 +124,7 @@ class TestBookingRouting:
 
     @pytest.mark.parametrize("text", ["Хочу массаж", "Мне бы маникюр", "есть окошко на завтра?"])
     def test_service_phrasing_reaches_booking(self, text):
-        booking_result = SkillResult(reply_text="Выберите мастера:")
+        booking_result = SkillResult(reply_text="Выбери мастера:")
         booking = _booking_stub(booking_result)
         with patch("apps.skills.registry.registered", return_value=[booking]):
             result = MenuSkill().handle(_ctx(text))

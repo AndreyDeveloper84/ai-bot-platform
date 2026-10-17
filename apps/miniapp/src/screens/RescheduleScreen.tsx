@@ -202,7 +202,7 @@ export function RescheduleScreen() {
         <div className="callout">
           <p style={{ margin: 0 }}>
             Эту услугу нельзя перенести — она больше не предлагается в текущем
-            каталоге. Запишитесь заново.
+            каталоге. Запишись заново.
           </p>
           <button
             type="button"
@@ -225,7 +225,7 @@ export function RescheduleScreen() {
       title="Перенести"
       cta={
         <StickyCta onClick={onConfirm} disabled={!pickedSlot || confirming}>
-          {confirming ? "Переношу…" : pickedSlot ? "Подтвердить перенос" : "Выберите время"}
+          {confirming ? "Переношу…" : pickedSlot ? "Подтвердить перенос" : "Выбери время"}
         </StickyCta>
       }
     >
@@ -296,7 +296,7 @@ export function RescheduleScreen() {
               <div className="slot-grid__empty">
                 {selectedDate
                   ? `На ${formatDateLabel(selectedDate)} свободного времени нет.`
-                  : "Выберите дату."}
+                  : "Выбери дату."}
               </div>
             ) : (
               slotsForDay.map((s) => {

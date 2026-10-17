@@ -131,8 +131,17 @@ def render_daily_report(
     *,
     include_opt_out: bool = True,
     include_entries: bool = False,
+    hide_numbers: bool = False,
 ) -> str:
     """Compose the daily report.
+
+    ``hide_numbers`` (DRF-2766): the person chose «Без чисел» -- no calories,
+    no macros, no numeric targets on any screen (owner decision 04.10). The
+    report then says how many entries the day has, keeps the water FACT but
+    not its norm, names dishes without their calories, and drops the remark
+    (every remark is a comparison with a numeric target) and Ayla's own
+    comment (free model text that may carry a number; cutting numbers out of
+    someone else's sentence is not reliable).
 
     ``include_opt_out`` (DRF-1302): the off-switch footer belongs to the
     PUSH. When the person asks for the diary themselves
@@ -173,12 +182,14 @@ def render_daily_report(
         return "\n".join(lines)
 
     lines.append("")
-    lines.append(
-        _macro_line("Калории", summary.calories_total, _summary_goal(summary, profile), "ккал")
-    )
-    lines.append(_macro_line("Белки", summary.protein_g, _target(profile, "protein_g"), "г"))
-    lines.append(_macro_line("Жиры", summary.fat_g, _target(profile, "fat_g"), "г"))
-    lines.append(_macro_line("Углеводы", summary.carbs_g, _target(profile, "carbs_g"), "г"))
+    if hide_numbers:
+        if summary.entries:
+            lines.append(f"Записей в дневнике сегодня: {len(summary.entries)}.")
+    else:
+        lines.append(_calories_line(summary, _summary_goal(summary, profile)))
+        lines.append(_macro_line("Белки", summary.protein_g, _target(profile, "protein_g"), "г"))
+        lines.append(_macro_line("Жиры", summary.fat_g, _target(profile, "fat_g"), "г"))
+        lines.append(_macro_line("Углеводы", summary.carbs_g, _target(profile, "carbs_g"), "г"))
     if water is not None:
         # Норма воды приезжает в ответе по воде и происхождения не несёт —
         # как и ``calories_goal`` сводки. Показывается только при
@@ -188,22 +199,22 @@ def render_daily_report(
         # строка, вместе с фактом. Этот случай нашёл сторож, а не чтение:
         # три поверхности были закрыты, четвёртая — вода — пропускала
         # 2100 мл наружу.
-        norm = _water_norm(water, profile)
+        norm = None if hide_numbers else _water_norm(water, profile)
         if water.total_ml or norm is not None:
             lines.append(_macro_line("Вода", water.total_ml, norm, "мл"))
 
     if include_entries:
-        entries_lines = _entry_lines(summary)
+        entries_lines = _entry_lines(summary, hide_numbers=hide_numbers)
         if entries_lines:
             lines.append("")
             lines.extend(entries_lines)
 
-    remark = goal_remark(summary, water, profile)
+    remark = "" if hide_numbers else goal_remark(summary, water, profile)
     if remark:
         lines.append("")
         lines.append(remark)
 
-    if summary.ai_comment:
+    if summary.ai_comment and not hide_numbers:
         # Ayla's own text, generated under Ayla's safety rules. Passed
         # through verbatim rather than paraphrased -- rewording someone
         # else's reviewed copy is how a reviewed sentence stops being one.
@@ -271,13 +282,20 @@ def goal_remark(
 
     # Страж ниже не меняет исхода (без еды калорий ноль и перебора нет) —
     # оставлен для симметрии: все три реплики про нутриенты — при еде.
+    # DRF-2766 (фаза 2) — остаток и перебор называются только о дне, целиком
+    # посчитанном проверенными числами. Итог с оценками ИИ приблизителен, а
+    # неполный итог — не итог: совет по такому числу — территория §3
+    # (решение главного окна 04.10: «число-сравнение — показ, нудж на нём —
+    # совет»). ``total`` тогда ``None``, и обе реплики молчат.
+    total = summary.calories_total if _calories_fully_verified(summary) else None
     if (
         food_logged
         and profile.goal in {"lose", "tone"}
         and calories_goal
-        and summary.calories_total > calories_goal * OVERSHOOT_RATIO
+        and total is not None
+        and total > calories_goal * OVERSHOOT_RATIO
     ):
-        over = round(summary.calories_total - calories_goal)
+        over = round(total - calories_goal)
         tail = f" — цель в профиле «{goal_label}»" if goal_label else ""
         return f"Калорий вышло на {over} ккал больше ориентира из профиля{tail}."
 
@@ -288,8 +306,8 @@ def goal_remark(
     # DRF-1844 (F1, D15): «осталось N ккал» — только при действующем
     # ориентире. Арифметика, не оценка: §85 §8 запрещает осуждающие
     # формулировки, а «осталось» — просто разность.
-    if food_logged and calories_goal and summary.calories_total < calories_goal:
-        return f"До ориентира по калориям осталось {round(calories_goal - summary.calories_total)} ккал."
+    if food_logged and calories_goal and total is not None and total < calories_goal:
+        return f"До ориентира по калориям осталось {round(calories_goal - total)} ккал."
 
     return ""
 
@@ -326,7 +344,7 @@ def render_water_reminder(
 # -- helpers ----------------------------------------------------------------
 
 
-def _entry_lines(summary: SummaryResponse) -> list[str]:
+def _entry_lines(summary: SummaryResponse, *, hide_numbers: bool = False) -> list[str]:
     """The dishes behind the totals, one per line. ``[]`` when there are none.
 
     Every value printed comes from ``summary.entries`` as Ayla sent it, read
@@ -337,13 +355,25 @@ def _entry_lines(summary: SummaryResponse) -> list[str]:
     reads as a verdict on the dish.
     """
     from apps.orchestrator.food_history import meals_from_summary
+    from apps.skills.food_clarify.text_entry import ai_kcal_phrase
 
     meals = meals_from_summary(summary)
     if not meals:
         return []
     lines = ["Что было записано:"]
     for meal in meals:
-        tail = f" — {meal.calories} ккал" if meal.calories else ""
+        if hide_numbers:
+            # DRF-2766 — «Без чисел»: блюдо называется, его калории — нет.
+            tail = ""
+        elif meal.calories:
+            tail = f" — {meal.calories} ккал"
+        elif meal.ai_calories:
+            # DRF-2761 — оценка ИИ видна в записи (решение владельца 02.10),
+            # всегда с пометкой. В итог дня выше она не входит: каталог её
+            # не суммирует.
+            tail = f" — {ai_kcal_phrase(meal.ai_calories)}"
+        else:
+            tail = ""
         lines.append(f"• {meal.dish}{tail}")
     return lines
 
@@ -357,7 +387,7 @@ def _food_logged(summary: SummaryResponse) -> bool:
     одних таких напитков считается днём с едой. Чистая вода (0 ккал) сюда не
     попадает. Различить — контракт каталога (признак источника записи).
     """
-    return summary.calories_total > 0 or bool(summary.entries)
+    return (summary.calories_total or 0) > 0 or bool(summary.entries)
 
 
 def _anything_logged(summary: SummaryResponse, water: WaterTodayResponse | None) -> bool:
@@ -411,6 +441,42 @@ def _summary_goal(summary: SummaryResponse, profile: ProfileResponse | None) -> 
         return None
     goal = summary.calories_goal
     return None if goal is None else float(goal)
+
+
+#: DRF-2766 (фаза 2) — подписи итога калорий; [confirmable]: построены по
+#: смыслу решения владельца 04.10 п.3 и ждут вычитки.
+CALORIES_UNKNOWN_LINE = "Калории: пока не посчитаны."
+AI_INCLUDED_TAIL = ", включая оценки ИИ"
+INCOMPLETE_LINE = "Итог неполный: не у всех записей есть калории."
+
+
+def _calories_fully_verified(summary: SummaryResponse) -> bool:
+    """Итог калорий целиком из проверенных чисел — и он вообще есть."""
+    return (
+        summary.calories_total is not None
+        and summary.calories_ai_included == 0
+        and summary.calories_unscored == 0
+    )
+
+
+def _calories_line(summary: SummaryResponse, target: float | None) -> str:
+    """Строка калорий дня (DRF-2766, фаза 2, решение владельца 04.10 п.3).
+
+    Оценки ИИ входят в итог, и строка это говорит: «≈ 450 из 1900 ккал,
+    включая оценки ИИ». Итога нет вовсе (записи без калорий) — не ноль, а
+    «пока не посчитаны». Неполный итог помечается отдельной строкой.
+    """
+    total = summary.calories_total
+    if total is None:
+        line = CALORIES_UNKNOWN_LINE
+    elif summary.calories_ai_included:
+        of = f" из {round(target)}" if target is not None else ""
+        line = f"Калории: ≈ {round(total)}{of} ккал{AI_INCLUDED_TAIL}."
+    else:
+        line = _macro_line("Калории", total, target, "ккал")
+    if summary.calories_unscored and total is not None:
+        line = f"{line}\n{INCOMPLETE_LINE}"
+    return line
 
 
 def _macro_line(

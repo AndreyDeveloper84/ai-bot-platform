@@ -553,11 +553,51 @@ class TestRetryOpenAI:
 
     @pytest.mark.asyncio
     @pytest.mark.django_db(transaction=True)
+    @pytest.mark.parametrize("foreign_rows", [0, 2], ids=["alone", "after-a-leaking-neighbour"])
     async def test_audit_row_per_failed_attempt(
-        self, fast_retry_provider: tuple[OpenAIProvider, MagicMock]
+        self, fast_retry_provider: tuple[OpenAIProvider, MagicMock], foreign_rows: int
     ) -> None:
+        """One failed attempt → one audit row WRITTEN BY THIS CALL.
+
+        DRF-2691. The node used to count every ``llm.retry_attempt_failed``
+        row in the table and went red with ``assert 3 == 1`` (CI 36827421855)
+        on rows it had not written. The retry audit is written from a worker
+        thread (``sync_to_async(..., thread_sensitive=False)`` in
+        ``apps/llm/retry.py``) on that thread's own connection, so it commits
+        outside the transaction of whatever test triggered it and outlives
+        that test's rollback. ``transaction=True`` here flushes at the END of
+        this test, not before it, so a row left by an earlier test of the same
+        xdist worker is still in the table when this one reads.
+
+        Hence the count is of rows that were not there before the call — by
+        primary key, not by ``target``: the rows that
+        leak carry this node's own ``target``, ``openai.complete``.
+
+        ``foreign_rows`` plants committed rows of the same action first. The
+        two cases must give the same answer; counting the whole table fails
+        the second one with the CI's own text.
+        """
         from apps.audit.models import AuditLog
+        from apps.audit.services import write_audit
         from apps.llm.retry import AUDIT_RETRY_ATTEMPT_FAILED
+
+        def _plant_and_snapshot() -> set[Any]:
+            for _ in range(foreign_rows):
+                write_audit(
+                    AUDIT_RETRY_ATTEMPT_FAILED,
+                    target="openai.complete",
+                    payload={"provider": "openai", "op": "complete", "attempt": 1},
+                )
+            return set(
+                AuditLog.all_tenants.filter(action=AUDIT_RETRY_ATTEMPT_FAILED).values_list(
+                    "pk", flat=True
+                )
+            )
+
+        already_there = await sync_to_async(_plant_and_snapshot)()
+        # The planted rows are committed and visible — otherwise the second
+        # case would be the first one under another name.
+        assert len(already_there) >= foreign_rows
 
         provider, client = fast_retry_provider
         client.chat.completions.create.side_effect = [
@@ -567,7 +607,11 @@ class TestRetryOpenAI:
         await provider.complete([{"role": "user", "content": "hi"}])
 
         rows = await sync_to_async(
-            lambda: list(AuditLog.all_tenants.filter(action=AUDIT_RETRY_ATTEMPT_FAILED))
+            lambda: list(
+                AuditLog.all_tenants.filter(action=AUDIT_RETRY_ATTEMPT_FAILED).exclude(
+                    pk__in=already_there
+                )
+            )
         )()
         # Exactly one failed attempt → one audit row.
         assert len(rows) == 1

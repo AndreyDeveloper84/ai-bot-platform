@@ -64,6 +64,7 @@ from django.utils import timezone
 
 from apps.booking.client_notify import (
     schedule_client_booking_confirmation,
+    schedule_client_master_cancelled,
     was_confirmed_in_chat,
 )
 from apps.booking.completion import actor_from_event
@@ -905,6 +906,49 @@ def _emit_domain_booking_created_pair(
 # ─── handlers ──────────────────────────────────────────────────────────────
 
 
+def _notes_appointment_version(handler: Any) -> Any:
+    """After ``handler`` succeeds, raise the mirror's ``appointment_version``.
+
+    DRF-2785. The catalog puts ``data.version`` on ``booking.created`` and on
+    both reschedule events; the master's actions send it back as
+    ``expected_version``. Written here, not inside each handler, because those
+    handlers have many exits (replay skip, advanced state, …) and the version
+    is a fact about the event, not about which branch ran.
+
+    Only ever raised (``UPDATE … WHERE version IS NULL OR version < v``): a
+    late or replayed event can never lower it. Scoped to the envelope's
+    tenant, after the handler's own tenant guard has passed — a raising
+    handler never gets here. An event without ``version`` (an older catalog)
+    leaves the field as it was.
+    """
+
+    import functools
+
+    @functools.wraps(handler)
+    def wrapped(envelope: IngestEnvelope) -> None:
+        handler(envelope)
+        data = envelope.data if isinstance(envelope.data, dict) else {}
+        raw = data.get("version")
+        if isinstance(raw, bool) or not isinstance(raw, int) or raw < 1:
+            return
+        if envelope.tenant_id is None:
+            return
+        try:
+            appointment_id = UUID(str(data.get("appointment_id")))
+        except ValueError:
+            return
+        from django.db.models import Q
+
+        RemoteBookingProxy.all_tenants.filter(
+            appointment_id=appointment_id, tenant_id=envelope.tenant_id
+        ).filter(Q(appointment_version__isnull=True) | Q(appointment_version__lt=raw)).update(
+            appointment_version=raw
+        )
+
+    return wrapped
+
+
+@_notes_appointment_version
 def handle_booking_created(envelope: IngestEnvelope) -> None:
     """``booking.created`` — event-contract.md §3.1.
 
@@ -1220,6 +1264,15 @@ def handle_booking_cancelled(envelope: IngestEnvelope) -> None:
             proxy_pk=proxy.pk,
             reason="cancelled_by_client" if cancelled_by in ("client", "customer") else "cancelled",
         )
+    if cancelled_by == "master":
+        # DRF-2785 — «❌ Не смогу»: the client is told, with a way to re-book.
+        # Before this nobody wrote to the client about a master's cancellation.
+        schedule_client_master_cancelled(
+            tenant=tenant,
+            bot_user=proxy.bot_user,
+            appointment_id=appointment_id,
+            start_at=proxy.start_at,
+        )
 
     emit_internal_event(
         "booking_cancelled",
@@ -1231,6 +1284,7 @@ def handle_booking_cancelled(envelope: IngestEnvelope) -> None:
     )
 
 
+@_notes_appointment_version
 def handle_booking_rescheduled(envelope: IngestEnvelope) -> None:
     """``booking.rescheduled`` — event-contract.md §3.3.
 
@@ -1391,6 +1445,29 @@ _CANONICAL_REQUIRED_FIELDS: Final[tuple[str, ...]] = (
 )
 
 
+# DRF-2673 — payload ``actor`` of ``appointment.rescheduled`` is a closed
+# list. The registry, verbatim, registered v0.4 — AYLA-DEC-0022 п. 9
+# (``ayla-knowledge/05 Architecture/Ayla Domain Event Registry.md`` §6.3):
+#
+#     `actor` — инициатор переноса (user | specialist | admin | owner |
+#     system | external_system)
+#
+# The same six are ``AppointmentRevision.actor`` in CDM §7.12. On the wire
+# it is a bare string: the producer writes ``registry_actor_for(...)``
+# (``beautygo_backend/appointments/domain/value_objects.py``), and today
+# emits four of the six — ``owner`` and ``external_system`` are registered
+# and not yet produced. ``external_system`` is the initiator of a time-only
+# change imported from an external calendar (CDM §7.12 инв. 15), so a
+# narrower list here would refuse a lawful event the day the import ships.
+#
+# The limits on ``system`` (AYLA-DEC-0022: автоматический перенос без
+# согласия клиента запрещён) bind the producer. ``system`` is a registered
+# value and is accepted here like the other five.
+_CANONICAL_RESCHEDULE_ACTORS: Final[frozenset[str]] = frozenset(
+    {"user", "specialist", "admin", "owner", "system", "external_system"}
+)
+
+
 @dataclass(frozen=True)
 class _CanonicalRescheduleData:
     """Parsed + validated ``appointment.rescheduled`` DER payload."""
@@ -1400,7 +1477,7 @@ class _CanonicalRescheduleData:
     previous_version: int
     revision_id: str
     changed_fields: tuple[str, ...]
-    actor: Any
+    actor: str
     starts_at: dt.datetime | None
     previous_starts_at: dt.datetime | None
 
@@ -1424,11 +1501,16 @@ def _parse_canonical_reschedule_data(data: dict[str, Any]) -> _CanonicalReschedu
     Distinct from the legacy ``booking.rescheduled`` shape — does NOT
     require (or read) ``new_start_at``/``old_start_at``/``rescheduled_by``.
 
-    ``actor``'s wire shape is owned by the Ayla-side Domain Event
-    Registry (not repo-local); only presence is validated here pending
-    Phase 2 backend contract confirmation (see the Phase 2 dependency
-    checklist in AGENT_BOT_PHASE1_FINAL_REVIEW_RESULT.md §5) — it is
-    carried through for logging/analytics, not type-narrowed.
+    ``actor`` is checked against the registry's closed list
+    (:data:`_CANONICAL_RESCHEDULE_ACTORS`, registry §6.3 + AYLA-DEC-0022),
+    not for presence alone (DRF-2673). The event is
+    ``pseudonymous_identifiers_only`` in the registry, and a value outside
+    the list is by definition not one of the six role words — so a refused
+    ``actor`` is never echoed: the log line and the exception carry a cause
+    slug only. ``IngestDLQ.raw_body`` does not keep it either
+    (:mod:`apps.eventbus.ingest_redaction` collapses an unlisted string),
+    so the cause slug is all an operator has to tell «not a string» from
+    «a string outside the list».
     """
     missing = [f for f in _CANONICAL_REQUIRED_FIELDS if data.get(f) in (None, "")]
     if missing:
@@ -1465,13 +1547,28 @@ def _parse_canonical_reschedule_data(data: dict[str, Any]) -> _CanonicalReschedu
             f"changed_fields must be a list of strings, got {changed_fields!r}"
         )
 
+    actor = data["actor"]
+    if not isinstance(actor, str):
+        actor_cause = "actor_not_a_string"
+    elif actor not in _CANONICAL_RESCHEDULE_ACTORS:
+        actor_cause = "actor_not_in_registry_list"
+    else:
+        actor_cause = None
+    if actor_cause is not None:
+        logger.warning(
+            "eventbus.consumer.appointment_rescheduled.actor_rejected cause=%s", actor_cause
+        )
+        raise CanonicalReschedulePayloadError(
+            f"appointment.rescheduled actor rejected: {actor_cause}"
+        )
+
     return _CanonicalRescheduleData(
         appointment_id=appointment_id,
         version=version,
         previous_version=previous_version,
         revision_id=revision_id,
         changed_fields=tuple(changed_fields),
-        actor=data["actor"],
+        actor=actor,
         starts_at=_parse_optional_iso(data.get("starts_at"), field_name="starts_at"),
         previous_starts_at=_parse_optional_iso(
             data.get("previous_starts_at"), field_name="previous_starts_at"
@@ -1479,6 +1576,7 @@ def _parse_canonical_reschedule_data(data: dict[str, Any]) -> _CanonicalReschedu
     )
 
 
+@_notes_appointment_version
 def handle_appointment_rescheduled_canonical(envelope: IngestEnvelope) -> None:
     """``appointment.rescheduled`` — canonical cross-repo DER contract
     (AYLA-DEC-0022, AYLA-DEC-0036).
@@ -1985,6 +2083,47 @@ def handle_booking_no_show(envelope: IngestEnvelope) -> None:
 # ─── registration ──────────────────────────────────────────────────────────
 
 
+def handle_booking_acknowledged(envelope: IngestEnvelope) -> None:
+    """``booking.acknowledged`` v1 — the master confirmed the visit (DRF-2785).
+
+    The catalog emits it when a master taps «✅ Подтверждаю»; the booking's
+    status does not change. The envelope's ``user_id`` is the CLIENT (the
+    addressee of «мастер подтвердил»); who tapped is
+    ``data.acknowledged_by="specialist"``.
+
+    Accepted, checked against the tenant and the mirror, and logged. The
+    client is NOT written to yet: the words are the owner's to give, and a
+    text invented here would be a promise nobody approved. Until then the
+    point of accepting the name is that the topic can be switched on without
+    every acknowledgement dead-lettering as ``unknown_event_name``.
+    """
+
+    assert_envelope_tenant_authorized(envelope)
+
+    data = envelope.data
+    appointment_id = UUID(data["appointment_id"])
+
+    tenant = _resolve_tenant(envelope.tenant_id)
+    if tenant is None:
+        logger.warning(
+            "eventbus.consumer.booking.acknowledged.unknown_tenant tenant_id=%s",
+            envelope.tenant_id,
+        )
+        return
+
+    proxy = RemoteBookingProxy.all_tenants.filter(appointment_id=appointment_id).first()
+    _assert_proxy_tenant(proxy=proxy, expected_tenant=tenant, envelope=envelope)
+
+    logger.info(
+        "eventbus.consumer.booking.acknowledged appointment_id=%s version=%s "
+        "mirrored=%s event_id=%s",
+        appointment_id,
+        data.get("version"),
+        proxy is not None,
+        envelope.event_id,
+    )
+
+
 def register_booking_handlers() -> None:
     """Register the booking.* handlers with the ingest dispatcher.
 
@@ -2006,6 +2145,7 @@ def register_booking_handlers() -> None:
         ("appointment.rescheduled", 1, handle_appointment_rescheduled_canonical),
         ("booking.completed", 1, handle_booking_completed),
         ("booking.no_show", 1, handle_booking_no_show),
+        ("booking.acknowledged", 1, handle_booking_acknowledged),
     )
     for event_name, version, handler in pairs:
         try:

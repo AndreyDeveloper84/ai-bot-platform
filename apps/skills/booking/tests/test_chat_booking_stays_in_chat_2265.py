@@ -20,7 +20,7 @@
    настройке человек не остаётся без записи в чате» (прежний сторож
    «две стороны одного факта» #1938, перевёрнутый под §69);
 3. тап по слоту → подтверждение в чате; занятый слот → «Это время уже
-   занято. Выберите другое:» и другие слоты в чате;
+   занято. Выбери другое:» и другие слоты в чате;
 4. перепись производителей чипов дат и кнопки «Выбрать дату» (#1938)
    остаётся: новый производитель обязан быть продолжением чатового пути.
 """
@@ -112,7 +112,7 @@ class TestTheDateIsAskedInChat:
     ):
         result = _handle(context, tenant, "cb:book:pick_master:11:22", _client("14:00"))
 
-        assert result.reply_text == "Выберите дату:"
+        assert result.reply_text == "Выбери дату:"
         callbacks = [b["callback"] for b in _buttons(result)]
         assert f"cb:book:pick_date:11:{BOOKING_DATE}:22" in callbacks
         # Ни одна кнопка не уводит в приложение.
@@ -121,7 +121,7 @@ class TestTheDateIsAskedInChat:
     def test_without_the_app_the_same_chat_path(self, without_miniapp, context, tenant):
         result = _handle(context, tenant, "cb:book:pick_master:11:22", _client("14:00"))
 
-        assert result.reply_text == "Выберите дату:"
+        assert result.reply_text == "Выбери дату:"
         callbacks = [b["callback"] for b in _buttons(result)]
         assert f"cb:book:pick_date:11:{BOOKING_DATE}:22" in callbacks
 
@@ -137,7 +137,7 @@ class TestTheBookingIsConfirmedInChat:
             _client("14:00"),
         )
 
-        assert "Подтверждаете?" in result.reply_text
+        assert "Подтверждаешь?" in result.reply_text
         assert result.action_data["pending_action"]["kind"] == "confirm"
 
     def test_a_taken_slot_is_answered_in_chat_with_the_others(self, with_miniapp, context, tenant):
@@ -148,7 +148,7 @@ class TestTheBookingIsConfirmedInChat:
             _client("15:00", "16:00"),
         )
 
-        assert result.reply_text == "Это время уже занято. Выберите другое:"
+        assert result.reply_text == "Это время уже занято. Выбери другое:"
         callbacks = [b["callback"] for b in _buttons(result)]
         assert f"cb:book:pick_slot:11:22:{BOOKING_DATE}T15:00:00" in callbacks
         assert f"cb:book:pick_slot:11:22:{BOOKING_DATE}T16:00:00" in callbacks

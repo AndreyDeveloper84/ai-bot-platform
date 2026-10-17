@@ -404,3 +404,80 @@ class TestPlanningClaims:
 
         assert evaluate_outbound(invitation).allowed
         assert evaluate_outbound(claim).blocked
+
+
+class TestBothFormsOfAddress:
+    """DRF-2711 / DRF-2712 — сторож ловит предписание в обеих формах обращения.
+
+    ЧТО БЫЛО. Глаголы назначения и уверенный диагноз стояли в шаблонах только
+    в форме «вы»: «примите», «выпейте», «у вас явно». Ayla говорит с клиентом
+    на «ты» (решение владельца, DRF-2328 / DRF-2712), и «прими две таблетки»
+    уходило человеку мимо сторожа — если в реплике не было названия препарата
+    из соседнего шаблона. Узлы ниже берут именно такие реплики: без препарата,
+    чтобы ловил ГЛАГОЛ, а не сосед.
+    """
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "Прими две таблетки утром и вечером.",
+            "Выпей обезболивающее перед сеансом.",
+            "Принимай витамины курсом.",
+            "Пропей курс магния.",
+            "У тебя явно аллергия на этот состав.",
+            "У тебя явно инфекция, нужен врач.",
+        ],
+    )
+    def test_a_prescription_addressed_informally_is_stopped(self, text):
+        verdict = evaluate_outbound(text)
+
+        assert verdict.blocked, text
+        assert verdict.text == REPLACEMENT_TEXT
+        assert "medical" in verdict.categories
+
+    def test_the_drug_name_is_not_what_catches_it(self):
+        """«Прими парацетамол» ловится и глаголом, и препаратом — разведено.
+
+        Реплика с препаратом блокировалась и до правки, соседним шаблоном:
+        одна она ничего бы не доказала. Пара показывает оба носителя порознь.
+        """
+        assert evaluate_outbound("Прими парацетамол.").blocked
+        assert evaluate_outbound("Прими две таблетки.").blocked
+        assert evaluate_outbound("Парацетамол есть в любой аптеке.").blocked
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "За сутки до процедуры не пей алкоголь.",
+            "За день до процедуры воздержись от бани.",
+            "За 3 дня до процедуры откажись от солярия.",
+            "За неделю до процедуры не брей ноги.",
+        ],
+    )
+    def test_preparation_advice_addressed_informally_is_stopped(self, text):
+        verdict = evaluate_outbound(text)
+
+        assert verdict.blocked, text
+        assert "planning" in verdict.categories
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            # те же корни в словах, которые предписанием не являются
+            "Принято, передам администратору.",
+            "Сколько выпито сегодня? Напиши коротко.",
+            "Запомнила: ты не ешь молочное.",
+            "Примерно час, мастер уточнит на месте.",
+            # обычная речь на «ты»
+            "Записала тебя на завтра в 15:00.",
+            "Выбери удобное время — покажу свободное.",
+            "За день до визита напомню о записи.",
+            "Если хочешь отказаться от записи, напиши «отмена».",
+        ],
+    )
+    def test_ordinary_informal_replies_pass(self, text):
+        """Половина, ради которой фильтр не выключат."""
+        verdict = evaluate_outbound(text)
+
+        assert verdict.allowed, f"съедено: {text} → {verdict.categories}"
+        assert verdict.text == text

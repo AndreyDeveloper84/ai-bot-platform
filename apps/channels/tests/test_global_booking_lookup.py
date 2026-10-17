@@ -224,7 +224,7 @@ class TestGlobalBookingLookup:
         _run_global("покажи мои визиты", mid="b4")
 
         text = mock_send[-1]["text"]
-        assert "Ваши последние визиты" in text
+        assert "Твои последние визиты" in text
         assert "Массаж спины" in text
         spy_concierge.assert_not_called()
 
@@ -450,7 +450,7 @@ class TestDuplicateSectionRegression:
         text = mock_send[-1]["text"]
         assert text.count("УЗ-кавитация — 1 зона") == 1
         assert text.count("Массаж") == 1
-        assert text.count("Ваши предстоящие записи") == 1
+        assert text.count("Твои предстоящие записи") == 1
 
 
 class TestDetectorBoundaries:

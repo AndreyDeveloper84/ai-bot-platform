@@ -1015,6 +1015,12 @@ NOT_SWEPT_ROUTES: dict[str, str] = {
         "{date, timezone, service_id, duration_min, slots[]} — no customer record; swept "
         "with a stubbed client in test_master_bookings_2154"
     ),
+    "booking_action": (
+        "POST DRF-2943 mutation on the signed master's own appointment; response carries "
+        "only action outcome / appointment id / status / version / start_at and never "
+        "customer fields. Own/foreign boundary and no-echo behavior are pinned in "
+        "test_master_booking_actions_2943."
+    ),
     "accepting_bookings": (
         "GET/PATCH proxy to the catalog's availability route (DRF-1845): the "
         "response is exactly {accepting_bookings: bool, status} of the master's "

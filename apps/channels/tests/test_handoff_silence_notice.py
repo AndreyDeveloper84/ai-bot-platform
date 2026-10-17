@@ -216,7 +216,7 @@ class TestSilenceIsExplainedOnce:
         """Здесь человеку уже сказали «передаю менеджеру» — текст другой."""
 
         _run_global("позовите оператора", mid="own-1")
-        assert sent[-1]["text"] == "Передаю менеджеру — ответят в течение 30 минут."
+        assert sent[-1]["text"] == "Передаю твой вопрос менеджеру."
 
         _run_global("вы тут?", mid="own-2")
         assert sent[-1]["text"] == SILENCE_ANNOUNCED_HERE_TEXT
@@ -548,7 +548,7 @@ class TestSalonDialogEndToEnd:
         self._run(tenant, "позовите оператора", mid="e2e-1")
         task = AdminTask.all_tenants.get()
         assert task.task_type == AdminTask.TaskType.HANDOFF
-        assert sent[-1]["text"] == "Передаю менеджеру — ответят в течение 30 минут."
+        assert sent[-1]["text"] == "Передаю твой вопрос менеджеру."
 
         # 2. Следующее сообщение — молчание, объяснённое «спросил здесь».
         self._run(tenant, "вы тут?", mid="e2e-2")

@@ -28,11 +28,11 @@ export const ACTION_CLARIFY_REQUEST = "Уточнить запрос";
 /** Имена каталожных поверхностей (OD-PILOT-9, Distance contract). */
 export const SURFACE_AVAILABLE_SERVICES = "Доступные услуги";
 /**
- * «Рядом с вами» — только для списка, у которого есть `distance_meters`.
+ * «Рядом с тобой» — только для списка, у которого есть `distance_meters`.
  * Пока расстояния на экране нет, список мастеров этим именем НЕ
  * называется: имя обещало бы сортировку по близости, которой нет.
  */
-export const SURFACE_NEARBY = "Рядом с вами";
+export const SURFACE_NEARBY = "Рядом с тобой";
 
 /** Термин зарезервирован за canonical Recommendation (полка за флагом). */
 export const CANONICAL_SHELF_TITLE = "Ayla рекомендует";

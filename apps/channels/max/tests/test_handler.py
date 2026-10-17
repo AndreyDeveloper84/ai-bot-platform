@@ -143,9 +143,9 @@ class TestWelcomeBranch:
         sent = mock_send[0]["text"]
         assert "Формула тела" in sent
         # DRF-1203 — копия состояние-первая: приглашение сказать своими
-        # словами вместо перечня услуг и «Выберите раздел:».
+        # словами вместо перечня услуг и «Выбери раздел:».
         assert "своими словами" in sent
-        assert "Выберите раздел" not in sent
+        assert "Выбери раздел" not in sent
         # Assistant message body matches what we sent.
         assistant_msg = Message.all_tenants.get(role="assistant")
         assert assistant_msg.content == sent
@@ -493,7 +493,7 @@ class TestKeyboardPassThrough:
 
         sent = mock_send[0]
         # The ASK_PROMPT text is on the reply.
-        assert "Спросите" in sent["text"]
+        assert "Спроси о чём угодно" in sent["text"]
         # No keyboard on this turn.
         assert sent["attachments"] is None
 

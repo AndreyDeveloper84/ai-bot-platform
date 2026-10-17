@@ -6,7 +6,7 @@ shell only, no business screens. Talks to `/api/v1/customer/*`
 
 ## Stack
 
-- Vite 5 + React 18 + TypeScript strict
+- Vite 6 + React 18 + TypeScript strict
 - React Router 6 (BrowserRouter)
 - CSS variables design tokens (no Tailwind, no CSS-in-JS)
 - MAX UI React library — **not yet** added (Phase 1); adapter layer
@@ -58,6 +58,7 @@ is empty. To still exercise the auth flow:
 
    ```python
    import hashlib, hmac, json, time, urllib.parse
+
    token = "test-bot-token-xyz"  # = settings.MAX_BOT_TOKEN
    params = {
        "user": json.dumps({"id": 12345, "first_name": "Мария"}),

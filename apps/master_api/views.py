@@ -947,6 +947,7 @@ def _catalog_profile_required(
     return wrapper
 
 
+@csrf_exempt
 @require_http_methods(["PATCH"])
 @require_master_init_data
 @_catalog_profile_required
@@ -1482,6 +1483,12 @@ def canon_gap_requests(request: HttpRequest) -> HttpResponse:
         return _error("invalid_json", "Body must be JSON.", 400)
     if not isinstance(body, dict):
         return _error("validation_error", "Body must be an object.", 400)
+    # DRF-2666: название и описание уходят в каталог как чужие данные —
+    # нестроковое значение не превращается в текст ``"{'a': 1}"``, а
+    # получает отказ этой же двери, до вызова каталога.
+    for field in ("name", "description"):
+        if body.get(field) is not None and not isinstance(body.get(field), str):
+            return _error("validation_error", f"{field} must be a string.", 400)
     name = str(body.get("name") or "").strip()
     duration = body.get("duration_minutes")
     price = body.get("price")
@@ -2270,12 +2277,24 @@ def schedule(request: HttpRequest) -> HttpResponse:
             400,
         )
 
-    payload = build_schedule(
-        master,
-        from_date=from_date,
-        to_date=to_date,
-        now=dj_timezone.now(),
-    )
+    # DRF-2902 — рамку расписания держит каталог, и он вправе отказать: нет
+    # прав у того, от чьего имени читаем, салон не настроен, каталог недоступен.
+    # Дашборд и заявка на доступность этот отказ разбирают; здесь его не ловил
+    # никто, и мастер получал 500. Причина — в журнал, наружу одно имя.
+    try:
+        payload = build_schedule(
+            master,
+            from_date=from_date,
+            to_date=to_date,
+            now=dj_timezone.now(),
+        )
+    except SalonAPIError as exc:
+        logger.warning(
+            "master.schedule.frame_unreadable master=%s reason=%s",
+            master.id,
+            type(exc).__name__,
+        )
+        return _error("schedule_unavailable", "Расписание сейчас недоступно.", 503)
     return JsonResponse(payload.to_dict())
 
 
@@ -2669,6 +2688,7 @@ def payout_preview(request: HttpRequest) -> HttpResponse:
     return _billing_proxy_response(payout_preview_for_master(master))
 
 
+@csrf_exempt
 @require_http_methods(["POST"])
 @require_master_init_data
 def billing_pay_debt(request: HttpRequest) -> HttpResponse:
@@ -2701,11 +2721,16 @@ def billing_pay_debt(request: HttpRequest) -> HttpResponse:
         )
         return _error("forbidden", "specialist_id does not match the session identity", 403)
 
+    # DRF-2681: значение уходит в платёжный контур каталога — нестроковое
+    # получает отказ этой двери, а не становится текстом "{'a': 1}".
+    if body.get("return_url") is not None and not isinstance(body.get("return_url"), str):
+        return _error("malformed", "return_url must be a string", 400)
     return_url = str(body.get("return_url") or "").strip()
 
     return _billing_proxy_response(pay_debt_for_master(master, return_url=return_url))
 
 
+@csrf_exempt
 @require_http_methods(["POST"])
 @require_master_init_data
 def billing_card_setup(request: HttpRequest) -> HttpResponse:
@@ -2738,6 +2763,10 @@ def billing_card_setup(request: HttpRequest) -> HttpResponse:
         )
         return _error("forbidden", "specialist_id does not match the session identity", 403)
 
+    # DRF-2681: значение уходит в платёжный контур каталога — нестроковое
+    # получает отказ этой двери, а не становится текстом "{'a': 1}".
+    if body.get("return_url") is not None and not isinstance(body.get("return_url"), str):
+        return _error("validation_error", "return_url must be a string", 400)
     tariff = str(body.get("tariff") or "")
     return_url = str(body.get("return_url") or "").strip()
     if tariff not in ("solo", "salon") or not return_url:

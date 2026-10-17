@@ -32,6 +32,7 @@ import {
   portionProvenanceOf,
 } from "../lib/portion-provenance";
 import { ApiError } from "../lib/api";
+import { aiCaloriesOf, aiKcalPhrase } from "../lib/format";
 import {
   estimateFoodText,
   fetchConsentAt,
@@ -57,6 +58,9 @@ export const MANUAL_COPY = {
   portionNamed: (g: number) => `Порция — ${g} г, по твоим словам.`,
   macros: (kcal: number, rest: string) => `Примерно ${kcal} ккал${rest} — оценка по справочнику блюд.`,
   confirmQuestion: "Записать в дневник?",
+  // DRF-2822 — те же слова, что в чате (решение владельца 06.10).
+  unpricedUnavailable: "Сейчас не удалось рассчитать калорийность. Записать без расчёта?",
+  unpricedDisabled: "ИИ-оценка калорийности выключена. Записать без расчёта?",
   toDiary: "В дневник",
   fixGrams: "Поправить граммы",
   gramsField: "Сколько граммов?",
@@ -109,8 +113,29 @@ export function renderEstimateLines(estimate: FoodTextEstimate): string[] {
   // Строка о числах появляется, только когда число есть И вес назван.
   if (estimate.kcal != null && portionNumbersAreNamed(portionProvenanceOf(estimate.portion_source))) {
     lines.push(MANUAL_COPY.macros(Math.round(estimate.kcal), rest));
+  } else if (estimate.kcal == null) {
+    // DRF-2761 — справочник блюда не знает, калории оценил ИИ (решение
+    // владельца 02.10). Показывается и без названных граммов: вес при
+    // промахе и так «примерно». Только калории, всегда с пометкой
+    // «Оценка ИИ»; проверенное число сюда не доходит (`kcal == null`).
+    const ai = aiCaloriesOf({ calories: null, ai_calories: estimate.kcal_ai_estimate });
+    if (ai != null) lines.push(`${aiKcalPhrase(ai)}.`);
   }
   return lines;
+}
+
+/**
+ * DRF-2822 — вопрос под карточкой. Причина названа, только когда числа нет
+ * ни от справочника, ни от ИИ, а каталог сказал «сбой» или «выключена»;
+ * любой другой статус и ответ без поля — прежний вопрос.
+ */
+export function confirmQuestionFor(estimate: FoodTextEstimate): string {
+  const priced =
+    estimate.kcal != null ||
+    aiCaloriesOf({ calories: null, ai_calories: estimate.kcal_ai_estimate }) != null;
+  if (!priced && estimate.kcal_ai_status === "unavailable") return MANUAL_COPY.unpricedUnavailable;
+  if (!priced && estimate.kcal_ai_status === "disabled") return MANUAL_COPY.unpricedDisabled;
+  return MANUAL_COPY.confirmQuestion;
 }
 
 function refusal(e: unknown): { slug: string; status: number } | null {
@@ -332,7 +357,7 @@ export function FoodScannerManualScreen() {
               </div>
             ) : (
               <>
-                <p className="food-text-card__line">{MANUAL_COPY.confirmQuestion}</p>
+                <p className="food-text-card__line">{confirmQuestionFor(card.estimate)}</p>
                 <div className="food-scanner-screen__cta-stack">
                   <button type="button" className="btn-primary" disabled={busy !== "idle"} onClick={() => void save()}>
                     {busy === "saving" ? MANUAL_COPY.saving : MANUAL_COPY.toDiary}

@@ -169,6 +169,62 @@ describe("флаг выключен — канонический текст НЕ
     expect(screen.queryByTestId("food-diary-disclosure-version")).toBeNull();
     expect(container.textContent).not.toContain("30 дней");
   });
+
+  /**
+   * DRF-2869. Запрет владельца на обещание немедленного удаления стоял
+   * только на каноническом пути (узел выше), а короткий текст — тот, что
+   * показывается без флага, то есть по умолчанию, — обещание нёс: «Удаляю
+   * фото сразу после распознавания». Снимок при этом хранится в каталоге и
+   * удаляется задачей по сроку. Узел держит запрет и на коротком пути.
+   */
+  it("короткий текст не обещает немедленного удаления", async () => {
+    mockedFetch.mockResolvedValue({
+      canonical: false,
+      grantedAt: null,
+      currentDocumentVersion: "",
+    });
+    const { container } = renderScreen();
+
+    // ПРИСУТСТВИЕ на тех же данных: короткий текст отрисован, и в нём
+    // сказано, зачем нужен снимок.
+    await screen.findByText("Можно показать тебе фото-скан?");
+    expect(container.textContent).toContain(
+      "Я возьму фото только чтобы узнать блюдо",
+    );
+
+    // ОТСУТСТВИЕ: ни прежней формулировки, ни её пересказов.
+    expect(container.textContent).not.toMatch(/сразу после распозна/i);
+    expect(container.textContent).not.toMatch(/удаля\w* фото/i);
+    expect(container.textContent).not.toMatch(/сразу удал|удал\w* сразу/i);
+  });
+});
+
+describe("экран съёмки — строка о приватности под камерой", () => {
+  /**
+   * DRF-2869. Вторая копия того же обещания: под камерой, у человека с уже
+   * выданным согласием, стояло «Фото нужно только чтобы узнать блюдо —
+   * удаляю сразу». Её видит каждый, кто дошёл до съёмки, при любом флаге.
+   */
+  it.each([true, false])(
+    "канон=%s: строка есть, обещания немедленного удаления в ней нет",
+    async (canonical) => {
+      mockedFetch.mockResolvedValue({
+        canonical,
+        grantedAt: "2026-09-18T10:00:00Z",
+        currentDocumentVersion: FOOD_DIARY_DISCLOSURE_VERSION,
+      });
+      const { container } = renderScreen();
+
+      // ПРИСУТСТВИЕ: это экран съёмки, и строка о приватности отрисована.
+      expect(
+        await screen.findByText("Фото нужно только чтобы узнать блюдо."),
+      ).toBeInTheDocument();
+
+      // ОТСУТСТВИЕ на тех же данных.
+      expect(container.textContent).not.toMatch(/удаля\w* сразу/i);
+      expect(container.textContent).not.toMatch(/сразу после распозна/i);
+    },
+  );
 });
 
 describe("кнопки названы дословно", () => {

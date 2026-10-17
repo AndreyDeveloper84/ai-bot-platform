@@ -14,7 +14,6 @@ DEBT: dict[str, int] = {
     "apps/channels/max/global_onboarding.py::run_onboarding_turn": 1,
     "apps/channels/max/handler.py::_handle_global_max_event_inner": 10,
     "apps/orchestrator/concierge.py::_concierge_turn._reply": 1,
-    "apps/orchestrator/concierge.py::_execute_start_booking": 1,
     "apps/orchestrator/concierge.py::generate_concierge_reply": 1,
     "apps/orchestrator/discovery.py::_render_ask_clarification": 1,
     "apps/orchestrator/discovery.py::execute_catalog_callback": 1,
@@ -86,6 +85,9 @@ EXCEPTIONS: dict[str, str] = {
     ),
     "apps/orchestrator/handoff.py::route_global_human_handoff": (
         "B24/F5 — передача оператору на глобальном пути; бот молчит, пока задача открыта"
+    ),
+    "apps/orchestrator/handoff.py::route_support_request": (
+        "B24/F5 — обращение в поддержку Ayla из двери «/start support» (DRF-2751): передача человеку; бот молчит, пока задача открыта"
     ),
     "apps/skills/booking/skill.py::_handoff": (
         "B24 — запись сорвалась → передача менеджеру; бот молчит, пока задача открыта"

@@ -104,7 +104,7 @@ def captured_turn(monkeypatch):
 def no_memory(monkeypatch):
     """Silence the neighbouring memory surface — it is not under test here."""
     monkeypatch.setattr(max_handler, "build_concierge_memory_block", lambda bot_user: "")
-    monkeypatch.setattr(max_handler, "render_current_personal_context", lambda uid: "")
+    monkeypatch.setattr(max_handler, "render_current_personal_context", lambda bot_user: "")
 
 
 def _grant(user_id: int, *types: str) -> BotUser:
@@ -122,9 +122,16 @@ def _stub_ayla(monkeypatch, deficits=None, error: Exception | None = None):
             raise error
         return deficits
 
+    async def _profile(**kw):
+        # DRF-2760: профиль читается первым (чувствительный периметр §7.1).
+        # Здесь он обычный и отвечает всегда: ``error`` — про недельную дверь.
+        from apps.nutrition_proactive.tests.test_remarks_suppressed_2222 import profile
+
+        return profile()
+
     monkeypatch.setattr(
         "apps.integrations.ayla.get_nutrition_client",
-        lambda: SimpleNamespace(weekly_deficits=_call),
+        lambda: SimpleNamespace(weekly_deficits=_call, get_profile=_profile),
     )
     monkeypatch.setattr(
         "apps.integrations.ayla.external_user_id_for", lambda bot_user: f"max:{_USER_ID}"

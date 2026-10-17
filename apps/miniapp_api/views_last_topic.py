@@ -85,9 +85,13 @@ def _skipped_action_types() -> frozenset[str]:
 def _service_line_heads() -> tuple[str, ...]:
     from apps.orchestrator.memory_announce import ANNOUNCE_HEAD
 
+    from apps.channels.max.voice_turn import ECHO_LINE
+
     # Вопрос памяти — ``memory_ask._weave``: префикс дословно оттуда; сама
     # функция приватная, а строка — контракт того, что видит человек.
-    return (ANNOUNCE_HEAD, "Кстати, чтобы подбирать точнее")
+    # Эхо голосового «Я услышала: «…»» (DRF-2686) — слова человека, не тема
+    # ответа: абзац с ним пропускается так же, как служебные строки памяти.
+    return (ANNOUNCE_HEAD, "Кстати, чтобы подбирать точнее", ECHO_LINE.split("{", 1)[0])
 
 
 def _is_canned_safety(text: str) -> bool:

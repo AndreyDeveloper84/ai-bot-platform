@@ -80,7 +80,7 @@ def test_confirmation_names_the_salon_address() -> None:
 
 
 def test_confirmation_without_an_address_says_to_ask_the_salon() -> None:
-    assert "Адрес: Уточните адрес в салоне" in _confirm_reply(_tenant(None))
+    assert "Адрес: Уточни адрес в салоне" in _confirm_reply(_tenant(None))
 
 
 def _reminder(tenant: Tenant, kind: str) -> BookingReminder:
@@ -110,7 +110,7 @@ def test_day_before_reminder_names_the_salon_address() -> None:
 
 def test_day_before_reminder_without_an_address_says_to_ask_the_salon() -> None:
     text = _format_day_before_text(_reminder(_tenant(None), BookingReminder.Kind.DAY_BEFORE))
-    assert "Адрес: Уточните адрес в салоне" in text
+    assert "Адрес: Уточни адрес в салоне" in text
 
 
 def test_two_hours_reminder_names_the_salon_address() -> None:
@@ -123,4 +123,4 @@ def test_two_hours_reminder_names_the_salon_address() -> None:
 
 def test_two_hours_reminder_without_an_address_says_to_ask_the_salon() -> None:
     text = _format_two_hours_text(_reminder(_tenant(None), BookingReminder.Kind.TWO_HOURS))
-    assert "Адрес: Уточните адрес в салоне" in text
+    assert "Адрес: Уточни адрес в салоне" in text

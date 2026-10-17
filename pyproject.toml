@@ -195,6 +195,20 @@ build-backend = "setuptools.build_meta"
 #                            и выход из строки в генерации кода (#30–#33, #41)
 #   pydantic-settings >= 2.14.2 — medium: NestedSecretsSettingsSource идёт по
 #                            симлинкам наружу (#18); приходит через chromadb
+#   urllib3 >= 2.8.0       — high ×2: настройки TLS для HTTPS-прокси могут быть
+#                            проигнорированы (#59), строка chunk-size читается
+#                            в память без предела (#60); medium: бесконечный
+#                            цикл на chunked deflate (#61); приходит через
+#                            requests, sentry-sdk, kubernetes
+#   virtualenv >= 21.7.12  — high: скачанные seed-колёса не проверяются на
+#                            целостность (#63); medium: инъекция в pyvenv.cfg
+#                            (#62); приходит через pre-commit (extra dev)
+#   oauthlib >= 4.0.0      — medium ×2: JSONP-инъекция в RevocationEndpoint
+#                            (#57), сравнение PKCE code_verifier не за
+#                            постоянное время (#58). Обе — в СЕРВЕРНОЙ части
+#                            oauthlib; приходит через chromadb → kubernetes →
+#                            requests-oauthlib и нашим путём не импортируется
+#                            (DRF-2698). Мажор 3 → 4.
 #
 # Сборки идут строго по uv.lock (Dockerfile: `uv sync --locked`, CI:
 # `--frozen`), поэтому действует лок; пол держит его от отката.
@@ -202,6 +216,9 @@ constraint-dependencies = [
     "anyio>=4.14.2",
     "sqlparse>=0.6.0",
     "pydantic-settings>=2.14.2",
+    "urllib3>=2.8.0",
+    "virtualenv>=21.7.12",
+    "oauthlib>=4.0.0",
 ]
 
 [tool.setuptools.packages.find]
@@ -245,7 +262,13 @@ asyncio_mode = "strict"
 # class from it at import time, and a lazy first import landing inside
 # `with patch(...)` binds that class to the mock permanently. Same reason
 # as above for being a plugin: a conftest is imported too late.
-addopts = "-p config.pytest_env_guard -p config.pytest_master_service_provenance -p config.pytest_vendor_sdk_preimport -q -m \"not smoke and not cross_boundary\""
+# `-p config.pytest_network_egress` (DRF-2696) — no test reaches a host that is
+# not this machine: the call is answered like an unreachable network, the test
+# is named in the run's summary, and the RUN exits non-zero. Names that cannot
+# resolve (`*.invalid`, `*.test`) are answered at once and are not a violation.
+# `AYLA_TEST_EGRESS=record` only observes. Rationale, the measurements and the
+# limits: that module.
+addopts = "-p config.pytest_env_guard -p config.pytest_master_service_provenance -p config.pytest_vendor_sdk_preimport -p config.pytest_network_egress -q -m \"not smoke and not cross_boundary\""
 markers = [
     "e2e: end-to-end test requiring real Redis + Postgres (CI services or docker compose locally). Skipped automatically when backing services aren't reachable.",
     "slow: opt-in performance / latency-SLO tests. Excluded from the default suite (`-m \"not slow\"`); run via `pytest -m slow` in nightly perf jobs.",

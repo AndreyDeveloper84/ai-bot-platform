@@ -115,7 +115,7 @@ def test_three_golden_fixtures_pass_end_to_end(g2_tenant):
                 "skill_used": "human_handoff",
                 "safety_decision": "allow",
                 "tool_calls": [],
-                "response_text": "Передаю менеджеру — ответят в течение 30 минут.",
+                "response_text": "Передаю твой вопрос менеджеру.",
                 "latency_ms": 55.0,
                 "tokens": 12,
             },

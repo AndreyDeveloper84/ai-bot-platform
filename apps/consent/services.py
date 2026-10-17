@@ -32,9 +32,11 @@ or any user-identifying string beyond `bot_user.id` (UUID). The
 from __future__ import annotations
 
 import logging
+import uuid
 from typing import TYPE_CHECKING
 
 from django.db import transaction
+from django.db.models import Max
 from django.utils import timezone
 
 from apps.audit.services import write_audit
@@ -45,6 +47,8 @@ from apps.eventbus import services as eventbus_services
 from apps.tenancy.context import current_tenant
 
 if TYPE_CHECKING:
+    from datetime import datetime
+
     from apps.identity.models import BotUser
 
 logger = logging.getLogger(__name__)
@@ -161,11 +165,14 @@ def record_global_consent(
     the general chat, extending the food-scanner server journal (#956) to the
     marketplace welcome flow.
 
-    Unlike :func:`grant` this does NOT emit the ``customer.consent.changed`` domain
-    event: that eventbus helper is tenant-scoped and the sentinel tenant is not a
-    real salon. The local ``consent_granted`` analytics event + audit row are
-    enough for the pilot proof-of-consent; the domain-bus mirror is post-pilot
-    (S1.7 memory wiring, #1054).
+    Like :func:`grant` it publishes ``customer.consent.changed`` (granted=True)
+    on the domain bus, under the row's own (sentinel) tenant (DRF-2974). The
+    withdrawal of the same row already went to the bus — :func:`withdraw` runs
+    in ``tenant_scope(shell.tenant)``, the sentinel for a chat shell — so
+    without the grant the catalog knew «withdrawn» and never heard the new
+    grant: a person who withdrew the food diary and agreed again in the chat
+    was still refused by the catalog's diary writes (``CONSENT_REQUIRED
+    withdrawn``) and dropped from the beauty insight.
 
     **Idempotent for sequential re-taps.** Uses ``get_or_create`` keyed on the
     active grant ``(bot_user, consent_type, granted=True, withdrawn_at=None)`` so a
@@ -250,6 +257,24 @@ def record_global_consent(
                     "global": True,
                 },
             )
+            # Domain bus — taxonomy §3.2 customer.consent.changed, as in
+            # :func:`grant`. Swallowed so a bus outage never breaks the grant.
+            try:
+                eventbus_services.emit_customer_consent_changed(
+                    customer_id=str(bot_user.id),
+                    consent_type=consent_type,
+                    granted=True,
+                    granted_at=record.captured_at.isoformat(),
+                    granted_via=source[:80],
+                    actor_id=str(bot_user.id),
+                    tenant=sentinel,
+                )
+            except Exception:  # noqa: BLE001 — domain telemetry never breaks the grant
+                logger.exception(
+                    "consent.grant(global).eventbus_emit_failed bot_user=%s type=%s",
+                    bot_user.id,
+                    consent_type,
+                )
 
         if created:
             transaction.on_commit(_emit_grant)
@@ -262,6 +287,73 @@ def record_global_consent(
             sentinel.id,
         )
     return record
+
+
+def _erase_zone_memory_on_withdrawal(bot_user: "BotUser", consent_type: str) -> int:
+    """Отозвано согласие жёлтой или красной зоны — её строки получают надгробие.
+
+    DRF-2542 §5. Стоит в :func:`withdraw`, самой нижней двери отзыва: так его
+    получает любой путь, а не те, кто вспомнил позвать.
+
+    Согласие зоны держится на человеке, а не на оболочке
+    (:func:`has_memory_consent`: достаточно действующего гранта на любой его
+    оболочке). Поэтому строки уходят, только когда действующего согласия зоны
+    не осталось ни на одной.
+
+    Сбой стирания отзыв НЕ откатывает (своя точка сохранения) — то же правило,
+    что у отзыва предположений: человек, отозвавший согласие, обязан остаться
+    без согласия, а использование строк уже остановлено читателем. Сбой
+    пишется в лог с исключением.
+    """
+    zone = next((z for z, ct in MEMORY_ZONE_CONSENT.items() if ct == consent_type), None)
+    ayla_user_id = getattr(bot_user, "ayla_user_id", None)
+    if zone is None or not ayla_user_id:
+        return 0
+    try:
+        from apps.identity.services.memory_deleter import (
+            WITHDRAWABLE_ZONES,
+            soft_delete_zone_for_withdrawal,
+        )
+
+        if zone not in WITHDRAWABLE_ZONES or has_memory_consent(ayla_user_id, zone):
+            return 0
+        with transaction.atomic():
+            return soft_delete_zone_for_withdrawal(ayla_user_id, zone, request_id=uuid.uuid4())
+    except Exception:  # noqa: BLE001 — стирание не откатывает отзыв; см. докстринг
+        logger.exception(
+            "consent.withdraw.zone_memory_erase_failed bot_user=%s type=%s",
+            bot_user.id,
+            consent_type,
+        )
+        return 0
+
+
+def _drop_plan_proposals_on_withdrawal(bot_user: "BotUser", consent_type: str) -> int:
+    """Отозвано согласие на хранение — несохранённое предложение плана уходит.
+
+    DRF-2967. Стоит в :func:`withdraw`, самой нижней двери отзыва, рядом со
+    стиранием зон: так его получает любой путь отзыва.
+
+    Согласие держится на человеке, а не на оболочке, и отзыв на любой
+    оболочке закрывает человека целиком (:func:`has_person_consent`: последний
+    отзыв позже любой действующей записи). Поэтому предложение уходит из
+    разговоров ВСЕХ его оболочек, а отдельной проверки «осталось ли согласие
+    где-то ещё» здесь нет — сразу после отзыва ответ на неё всегда «нет».
+    Сохранённый план отзыв не уничтожает (решение владельца) — он в каталоге
+    и сюда не относится.
+
+    Отзыв не откатывается и не падает из-за очистки: помощник сам никогда не
+    бросает, а использование предложения уже остановлено гейтом плана.
+    """
+    if consent_type != ConsentRecord.ConsentType.PERSONAL_DATA.value:
+        return 0
+    try:
+        from apps.conversations.model_history import clear_plan_proposals_for_person
+
+        return clear_plan_proposals_for_person(bot_user)
+    except Exception:  # noqa: BLE001 — очистка не откатывает отзыв; см. докстринг
+        logger.exception("consent.withdraw.plan_proposals_drop_failed bot_user=%s", bot_user.id)
+        return 0
 
 
 def withdraw(
@@ -365,6 +457,9 @@ def withdraw(
                 consent_type,
             )
 
+    _erase_zone_memory_on_withdrawal(bot_user, consent_type)
+    _drop_plan_proposals_on_withdrawal(bot_user, consent_type)
+
     transaction.on_commit(_emit_withdraw)
     logger.info(
         "consent.withdrawn bot_user=%s type=%s tenant=%s",
@@ -466,6 +561,82 @@ def has_person_consent(bot_user: "BotUser", consent_type: str) -> bool:
     return max(active) > max(withdrawals)
 
 
+def last_personal_data_withdrawal(bot_user: "BotUser") -> datetime | None:
+    """Момент последнего отзыва ``personal_data`` у ЧЕЛОВЕКА; ``None`` — отзыва не было.
+
+    DRF-2700. Это отсечка для чтения переписки в промпт: реплика, сказанная
+    до отзыва, после него модели не отдаётся — независимо от того, успело ли
+    обезличивание переписки отработать. Отзыв снимает согласие сразу, а
+    обезличивание — отдельный шаг каскада, который может упасть и повториться
+    позже (или не повториться); «хранится» в этом окне не значит «можно
+    использовать» — тот же принцип, что у памяти (DRF-2697, ADR-0011 §11.3).
+
+    По всем оболочкам человека (:func:`person_channel_shells`), как и
+    :func:`has_person_consent`: отзыв в Mini App стоит на одной строке, а
+    разговор чата висит на другой.
+
+    Новая выдача согласия отсечку НЕ снимает: согласие, данное сегодня, не
+    возвращает в оборот слова, отозванные вчера. Это же отличает её от
+    :func:`has_person_consent`, которая отвечает на вопрос «можно ли сейчас».
+
+    Предел: отсечка есть только там, где был грант. :func:`withdraw` ставит
+    ``withdrawn_at`` на действующий грант и ничего не пишет, если его не
+    было, — у человека, который отозвал согласие, ни разу его не дав, этой
+    функции опереться не на что.
+    """
+    latest: datetime | None = ConsentRecord.all_tenants.filter(
+        bot_user__in=person_channel_shells(bot_user),
+        consent_type=ConsentRecord.ConsentType.PERSONAL_DATA.value,
+        withdrawn_at__isnull=False,
+    ).aggregate(latest=Max("withdrawn_at"))["latest"]
+    return latest
+
+
+def model_history_cutoff(bot_user: "BotUser") -> datetime | None:
+    """Момент, не позже которого переписка модели не отдаётся; ``None`` — отсечки нет.
+
+    DRF-2700, решение владельца 07.10.2026 (п.23). Самое позднее из трёх:
+
+    * отзыв ``personal_data`` (:func:`last_personal_data_withdrawal`);
+    * отзыв согласия на предположения — «перестать … использовать такие
+      выводы, в том числе из прошлых ответов»;
+    * последнее поштучное «забудь X»
+      (:mod:`apps.identity.services.model_history_cutoff`).
+
+    Отделить ответы, где Ayla опиралась на стёртое или на предположение, от
+    остальных надёжно нельзя, поэтому закрывается вся переписка до момента —
+    это прямо сказано в решении. Строки переписки не меняются: человек видит
+    их как прежде.
+
+    По всем оболочкам человека, как у остальных проверок согласия. Новая
+    выдача согласия отсечку не снимает.
+    """
+    from apps.identity.services import model_history_cutoff as memory_cutoff
+
+    shells = list(person_channel_shells(bot_user))
+    moments: list[datetime] = []
+
+    withdrawn = last_personal_data_withdrawal(bot_user)
+    if withdrawn is not None:
+        moments.append(withdrawn)
+
+    inference_withdrawn: datetime | None = ConsentRecord.all_tenants.filter(
+        bot_user__in=shells,
+        consent_type=ConsentRecord.ConsentType.PREFERENCE_INFERENCE.value,
+        withdrawn_at__isnull=False,
+    ).aggregate(latest=Max("withdrawn_at"))["latest"]
+    if inference_withdrawn is not None:
+        moments.append(inference_withdrawn)
+
+    user_ids = {getattr(shell, "ayla_user_id", None) for shell in shells}
+    user_ids.add(getattr(bot_user, "ayla_user_id", None))
+    forgotten = memory_cutoff.latest(uid for uid in user_ids if uid)
+    if forgotten is not None:
+        moments.append(forgotten)
+
+    return max(moments) if moments else None
+
+
 def has_global_consent(
     bot_user: "BotUser",
     consent_type: str,
@@ -532,6 +703,13 @@ MEMORY_ZONE_CONSENT = {
 # другой путь отзыва personal_data оставлял его действующим. Теперь это строка
 # реестра, и снимается она там же, где снимаются остальные надстройки.
 # ``personal_calculation`` в каскаде нет — вне M1, вопрос назван в PR.
+#
+# DRF-2779 добавляет ``preference_inference`` (умная память Ф4) по тому же
+# правилу: это добровольная НАДСТРОЙКА над personal_data. Отзыв хранения и
+# удаление данных снимают её вместе с основанием — иначе после «удалить мои
+# данные» в реестре оставалось бы действующее разрешение анализировать
+# обращения человека. Обратного нет: отзыв Ф4 personal_data не трогает, и
+# повторная выдача хранения Ф4 не возвращает.
 _PERSONAL_DATA_CASCADE = (
     ConsentRecord.ConsentType.PERSONAL_DATA,
     ConsentRecord.ConsentType.HEALTH,
@@ -540,6 +718,9 @@ _PERSONAL_DATA_CASCADE = (
     ConsentRecord.ConsentType.MEMORY_YELLOW,
     ConsentRecord.ConsentType.MEMORY_RED,
     ConsentRecord.ConsentType.FOOD_DIARY_PROCESSING,
+    ConsentRecord.ConsentType.PREFERENCE_INFERENCE,
+    # DRF-2845 — согласие на ИИ-оценку еды: та же надстройка над основанием.
+    ConsentRecord.ConsentType.AI_FOOD_ESTIMATION,
 )
 
 

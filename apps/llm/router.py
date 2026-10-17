@@ -923,8 +923,27 @@ def registered_provider_names() -> tuple[str, ...]:
     return _PROVIDER_NAMES
 
 
+def key_setting_name(name: str) -> str:
+    """The NAME of the setting holding ``name``'s API key — never its value.
+
+    DRF-2688: the health alert for a rejected key names the setting an
+    operator has to replace (``ANTHROPIC_API_KEY``), so the investigation
+    does not start from guessing which of the keys died. Empty for a name
+    outside the registry.
+    """
+    spec = _PROVIDER_SPECS.get(name)
+    return spec.key_setting_name if spec is not None else ""
+
+
 def provider_is_configured(name: str) -> bool:
     """True when ``name``'s API-key setting is present and non-empty.
+
+    Present is not valid (DRF-2688): a revoked key is still a non-empty
+    string, so a vendor with a dead key stays a fallback candidate and the
+    hop onto it fails. This function cannot tell — it must stay free of
+    network calls, it runs on every resolution. What notices is
+    :func:`apps.llm.health.check_llm_reserve`, the periodic check of the
+    standby vendor; it pages, it does not change candidacy.
 
     Used to gate FALLBACK targets only — never the primary. A primary
     with no key still gets constructed so the failure surfaces as a

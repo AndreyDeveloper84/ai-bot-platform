@@ -35,6 +35,8 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any, Literal
 
+from apps.orchestrator.knowledge_licence import KnowledgeLicence
+
 logger = logging.getLogger(__name__)
 
 Surface = Literal["per_tenant", "global"]
@@ -119,6 +121,10 @@ class TurnReply:
     # deterministically instead of paying a second model call. Carried,
     # never interpreted: None means a text-only turn or a legacy producer.
     tool_trace: tuple[dict[str, Any], ...] | None = None
+    # DRF-2725 — mirrors DiscoveryReply.knowledge_licence: что читатель знания
+    # отдал в этот ход. Переносится и не толкуется: читает её исходящий хук
+    # канала ПОСЛЕ шва, и без неё он судил бы вслепую. None — знания не читали.
+    knowledge_licence: KnowledgeLicence | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -195,6 +201,7 @@ DISCOVERY_TO_TURN: Mapping[str, str] = MappingProxyType(
         "persisted": "assistant_persisted",
         "outage": "outage",
         "tool_trace": "tool_trace",
+        "knowledge_licence": "knowledge_licence",
     }
 )
 
@@ -465,6 +472,9 @@ def _global_legacy_adapter(context: TurnContext) -> TurnReply:
         # getattr по той же причине, что и outage выше: шов — переносчик,
         # и прежние производители ответа поля tool_trace не знают (DRF-1385).
         tool_trace=getattr(reply, "tool_trace", None),
+        # DRF-2725 — getattr по той же причине: прежние производители ответа
+        # лицензии знания не знают, и для них это «знания не читали».
+        knowledge_licence=getattr(reply, "knowledge_licence", None),
     )
 
 

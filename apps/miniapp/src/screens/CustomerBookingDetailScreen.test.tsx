@@ -185,13 +185,13 @@ describe("CustomerBookingDetailScreen (real data)", () => {
     renderScreen("b-addr");
     expect(await screen.findByText("Адрес не указан")).toBeInTheDocument();
     // Не «уточните в салоне»: спрашивать некого, салон уже ответил.
-    expect(screen.queryByText("Уточните адрес в салоне")).not.toBeInTheDocument();
+    expect(screen.queryByText("Уточни адрес в салоне")).not.toBeInTheDocument();
   });
 
   it("источник промолчал — человеку сказано, у кого спросить", async () => {
     mockedFetch.mockResolvedValue({ booking: booking({ id: "b-addr", address: null }) });
     renderScreen("b-addr");
-    expect(await screen.findByText("Уточните адрес в салоне")).toBeInTheDocument();
+    expect(await screen.findByText("Уточни адрес в салоне")).toBeInTheDocument();
     expect(screen.queryByText("Адрес не указан")).not.toBeInTheDocument();
   });
 

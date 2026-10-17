@@ -205,7 +205,7 @@ from apps.integrations.ayla import (
     external_user_id_for,
     get_nutrition_client,
 )
-from apps.integrations.ayla.goals_client import fetch_decision_context
+from apps.integrations.ayla.goals_client import GOAL_HINT_READ_TIMEOUT_S, fetch_decision_context
 from apps.integrations.ayla.nutrition_client import (
     TARGETS_PROPOSED,
     LegacyDefaultUnconfirmedError,
@@ -2038,7 +2038,11 @@ def _goal_hint(context: SkillContext) -> tuple[str, str, list[str]] | None:
     неё полноценен. В лог — класс отказа, без идентификатора канала (DRF-2009).
     """
     try:
-        document = fetch_decision_context(external_user_id=external_user_id_for(context.bot_user))
+        document = fetch_decision_context(
+            external_user_id=external_user_id_for(context.bot_user),
+            # DRF-2187: подсказка необязательна — свой, короткий бюджет чтения.
+            read_timeout_s=GOAL_HINT_READ_TIMEOUT_S,
+        )
     except Exception as exc:  # noqa: BLE001 — любой отказ чтения = «подсказки нет»
         logger.info("anketa.goal_hint_unavailable class=%s", type(exc).__name__)
         return None

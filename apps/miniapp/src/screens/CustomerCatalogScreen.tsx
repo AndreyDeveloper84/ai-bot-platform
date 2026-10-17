@@ -455,7 +455,7 @@ export function CustomerCatalogScreen() {
       {masters.length > 0 && (
         <section aria-labelledby="catalog-masters">
           <h2 id="catalog-masters" className="customer-catalog__section-title">
-            {/* «Рядом с вами» — только когда в данных есть расстояние
+            {/* «Рядом с тобой» — только когда в данных есть расстояние
                 (#1653): имя обещает сортировку по близости. */}
             {hasKnownDistance(masters) ? SURFACE_NEARBY : "Мастера"}
           </h2>

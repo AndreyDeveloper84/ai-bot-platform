@@ -458,7 +458,7 @@ CERTIFICATE_AMOUNT_MAX = Decimal("100000")
 
 # DRF-997: transient schedule-service outage (e.g. backend 429). The bot
 # keeps ownership of the conversation and asks the user to retry shortly.
-SCHEDULE_UNAVAILABLE_TEXT = "Сервис расписания сейчас недоступен, попробуйте через минуту."
+SCHEDULE_UNAVAILABLE_TEXT = "Сервис расписания сейчас недоступен, попробуй через минуту."
 
 
 # B6 / DRF-842 — promo_status values reported by ``calc_price``.
@@ -528,6 +528,11 @@ class BookingRow:
     #: и его пояс — время человеку показывается в поясе салона, не в UTC.
     salon_name: str = ""
     salon_tz: str = ""
+    #: DRF-2701 — the schedule WAS read and holds no such record, so nothing
+    #: but our own row vouches for this booking (and its time is unknown).
+    #: Legacy YClients path only: under Ayla such a row is not listed at all
+    #: (DRF-1034). Told to the model; changes nothing the person is shown.
+    unconfirmed: bool = False
 
 
 @dataclass(frozen=True)
@@ -643,6 +648,9 @@ class BookingToolResult:
     #: decide this from the text: the two refusals differ by wording, not
     #: by a sign. False unless a branch says otherwise.
     handoff: bool = False
+    #: DRF-2701 — ``show_my_bookings`` could not read the schedule, so
+    #: ``bookings`` is the local list alone: times unknown, nothing checked.
+    bookings_check_failed: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -671,7 +679,7 @@ def show_masters(
     service_name = str(arguments.get("service_name") or "").strip()
 
     try:
-        staff_rows = client.get_staff(staff_id=None)
+        staff_rows = client.get_staff()
     except YClientsScheduleUnavailableError as exc:
         logger.warning("booking.show_masters.schedule_unavailable err=%s", exc)
         _audit_tool(tenant_id=tenant_id, tool="show_masters", outcome="schedule_unavailable")
@@ -767,6 +775,11 @@ def show_slots(
         )
         _audit_tool(tenant_id=tenant_id, tool="show_slots", outcome="invalid_master_id")
         return BookingToolResult(error="invalid_master_id")
+
+    bad = _bad_argument(arguments, text=("date_from",), ids=("service_id",))
+    if bad is not None:
+        _refuse_argument(tenant_id=tenant_id, tool="show_slots", bad=bad)
+        return BookingToolResult(error=INVALID_ARGUMENT)
 
     service_id = _coerce_id(arguments.get("service_id"))
     service_ids = [service_id] if service_id is not None else None
@@ -937,6 +950,13 @@ def confirm_booking(
 
     tenant_id = str(getattr(tenant, "id", ""))
     _ = client  # explicitly unused on the preview path; see docstring
+    bad = _bad_argument(arguments, text=("slot_datetime", "client_phone"))
+    if bad is not None:
+        _refuse_argument(tenant_id=tenant_id, tool="confirm_booking", bad=bad)
+        return BookingToolResult(
+            confirmation=ConfirmationResult(ok=False, error=INVALID_ARGUMENT),
+            error=INVALID_ARGUMENT,
+        )
 
     if master_id is None or master_id not in allowed_master_ids:
         _audit_tool(tenant_id=tenant_id, tool="confirm_booking", outcome="invalid_master_id")
@@ -1113,7 +1133,7 @@ def _format_confirm_preview(
     price = _format_money(quoted_price)
     if price:
         parts.append(f"• Цена: {price}")
-    parts.append("Подтверждаете?")
+    parts.append("Подтверждаешь?")
     return "\n".join(parts)
 
 
@@ -1330,7 +1350,7 @@ def execute_confirm(
             quoted_price=new_payload.get("quoted_price"),
             quoted_duration_minutes=new_payload.get("quoted_duration_minutes"),
         )
-        text = f"Пока вы выбирали, {changed}. Запись не создана.\n\n{preview}"
+        text = f"Пока шёл выбор, {changed}. Запись не создана.\n\n{preview}"
         return BookingToolResult(
             text=text,
             error="quote_changed",
@@ -1738,6 +1758,10 @@ def cancel_booking(
     reason = str(arguments.get("reason") or "").strip()
     tenant_id = str(getattr(tenant, "id", ""))
     _ = client
+    bad = _bad_argument(arguments, text=("reason",))
+    if bad is not None:
+        _refuse_argument(tenant_id=tenant_id, tool="cancel_booking", bad=bad)
+        return BookingToolResult(error=INVALID_ARGUMENT)
 
     if record_id is None:
         _audit_tool(tenant_id=tenant_id, tool="cancel_booking", outcome="missing_record_id")
@@ -1795,7 +1819,7 @@ def _format_cancel_preview(*, booking: BookingRequest, reason: str) -> str:
         parts.append(f"• Мастер: {booking.master_name}")
     if reason:
         parts.append(f"• Причина: {reason}")
-    parts.append("Подтверждаете отмену?")
+    parts.append("Подтверждаешь отмену?")
     return "\n".join(parts)
 
 
@@ -2121,7 +2145,7 @@ def _format_reschedule_preview(
     if booking.master_name:
         parts.append(f"• Мастер: {booking.master_name}")
     parts.append(f"• Новое время: {new_datetime}")
-    parts.append("Подтверждаете перенос?")
+    parts.append("Подтверждаешь перенос?")
     return "\n".join(parts)
 
 
@@ -2849,7 +2873,7 @@ def execute_reschedule(
         master_name=master_name,
         service_name=service_name,
     )
-    text = f"Перенесла запись на {new_datetime}. Если что-то ещё нужно — пишите!"
+    text = f"Перенесла запись на {new_datetime}. Если что-то ещё нужно — пиши!"
     return BookingToolResult(text=text, confirmation=confirmation)
 
 
@@ -3070,6 +3094,7 @@ def show_my_bookings(
     # from YClients when available to know which bookings are still
     # upcoming. Fail-soft on network errors.
     live_records: dict[int | str, Any] = {}
+    check_failed = False
     try:
         for rec in client.get_user_records():
             live_records[rec.id] = rec
@@ -3079,7 +3104,9 @@ def show_my_bookings(
         return BookingToolResult(text=SCHEDULE_UNAVAILABLE_TEXT, error="schedule_unavailable")
     except (YClientsUnavailableError, YClientsAPIError):
         # Empty live_records → fall back to comment-marker only.
-        pass
+        # DRF-2701: and say so. The list below is still returned, but the
+        # model used to get it with nothing marking it as unchecked.
+        check_failed = True
 
     bookings: list[BookingRow] = []
     for row in rows:
@@ -3099,6 +3126,10 @@ def show_my_bookings(
                 status="CONFIRMED",
                 salon_name=getattr(tenant, "name", "") or "",
                 salon_tz=_salon_tz_key(tenant),
+                # Read and not found. When the read itself failed nothing was
+                # looked up, so «не найдена» would be untrue — that case is
+                # ``bookings_check_failed`` on the result instead.
+                unconfirmed=live is None and not check_failed,
             )
         )
 
@@ -3109,11 +3140,11 @@ def show_my_bookings(
         extra={"count": len(bookings)},
     )
     text = _format_bookings_text(bookings)
-    return BookingToolResult(text=text, bookings=bookings)
+    return BookingToolResult(text=text, bookings=bookings, bookings_check_failed=check_failed)
 
 
 def _salon_tz_key(tenant: Any) -> str:
-    """Пояс салона — тем же правилом, что «✅ Вы записаны» (``tenant_timezone``)."""
+    """Пояс салона — тем же правилом, что «✅ Запись подтверждена» (``tenant_timezone``)."""
     from apps.tenancy.timezones import salon_zone
 
     return salon_zone(tenant).key
@@ -3131,8 +3162,8 @@ def _format_booking_line(b: BookingRow) -> str:
 
 def _format_bookings_text(bookings: list[BookingRow]) -> str:
     if not bookings:
-        return "У вас пока нет предстоящих записей."
-    lines = ["Ваши предстоящие записи:"]
+        return "У тебя пока нет предстоящих записей."
+    lines = ["Твои предстоящие записи:"]
     lines += [_format_booking_line(b) for b in bookings[:5]]
     return "\n".join(lines)
 
@@ -3194,6 +3225,10 @@ def calc_price(
     master_id = _coerce_id(arguments.get("master_id"))
 
     tenant_id = str(getattr(tenant, "id", ""))
+    bad = _bad_argument(arguments, text=("promo_code",), ids=("master_id",))
+    if bad is not None:
+        _refuse_argument(tenant_id=tenant_id, tool="calc_price", bad=bad)
+        return BookingToolResult(error=INVALID_ARGUMENT)
 
     if service_id is None or service_id not in allowed_service_ids:
         logger.info(
@@ -3561,6 +3596,13 @@ def buy_certificate(
             ),
         )
 
+    bad = _bad_argument(arguments, text=("recipient_name", "buyer_email"))
+    if bad is not None:
+        _refuse_argument(tenant_id=tenant_id, tool="buy_certificate", bad=bad)
+        return BookingToolResult(
+            certificate=BuyCertificateResult(ok=False, error=INVALID_ARGUMENT),
+            error=INVALID_ARGUMENT,
+        )
     recipient_name = str(arguments.get("recipient_name") or "").strip()
     buyer_email = str(arguments.get("buyer_email") or "").strip()
     description = f"Сертификат на {amount:.0f} ₽" + (
@@ -3640,7 +3682,7 @@ def buy_certificate(
 
     text = (
         f"Сертификат на {amount:.0f} ₽ готов к оплате. "
-        "Нажмите кнопку ниже, чтобы перейти к безопасной оплате."
+        "Нажми кнопку ниже, чтобы перейти к безопасной оплате."
     )
     keyboard = url_button("💳 Оплатить", result.checkout_url)
 
@@ -3751,6 +3793,53 @@ def _coerce_id(value: Any) -> int | str | None:
         text = str(value).strip()
         return text or None
     return _coerce_int(value)
+
+
+#: DRF-2667 — аргумент модели не того типа. Не «не названо» и не
+#: выдуманный id: модель прислала словарь, список или число туда, где ждут
+#: строку, и это событие должно быть отличимо в журнале. Передачи менеджеру
+#: нет — как у ``invalid_datetime``, ответ собирает второй заход модели.
+INVALID_ARGUMENT = "invalid_argument"
+
+
+def _bad_argument(
+    arguments: dict[str, Any],
+    *,
+    text: tuple[str, ...] = (),
+    ids: tuple[str, ...] = (),
+) -> tuple[str, str] | None:
+    """Первый аргумент модели не того типа — ``(поле, тип)``, иначе ``None``.
+
+    ``text`` — поля, где годен текст: строка или число (телефон JSON-числом —
+    годное значение); ``ids`` — строка или целое; ``bool`` — ни то ни другое.
+    Отсутствие (``None``) — не отказ: «не названо» остаётся своей веткой у
+    вызывающего.
+    """
+    for name in text:
+        value = arguments.get(name)
+        if value is None or isinstance(value, str):
+            continue
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return name, type(value).__name__
+    for name in ids:
+        value = arguments.get(name)
+        if value is None:
+            continue
+        if isinstance(value, bool) or not isinstance(value, (str, int)):
+            return name, type(value).__name__
+    return None
+
+
+def _refuse_argument(*, tenant_id: str, tool: str, bad: tuple[str, str]) -> None:
+    """Журнал и аудит отказа по типу — без самого значения."""
+    field, type_name = bad
+    logger.warning("booking.%s.argument_not_text field=%s type=%s", tool, field, type_name)
+    _audit_tool(
+        tenant_id=tenant_id,
+        tool=tool,
+        outcome=INVALID_ARGUMENT,
+        extra={"field": field, "type": type_name},
+    )
 
 
 def _ayla_handle(record: BookingRecord) -> str:

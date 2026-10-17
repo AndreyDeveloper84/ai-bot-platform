@@ -114,7 +114,15 @@ import {
   getLastTopicAndChatLink,
   type LastTopic,
 } from "../lib/customer-last-topic";
-import { formatDuration, priceFromLabel } from "../lib/format";
+import {
+  approxPrefix,
+  formatDuration,
+  KCAL_TOTAL_AI_NOTE,
+  KCAL_TOTAL_INCOMPLETE,
+  KCAL_TOTAL_UNKNOWN,
+  kcalTotalMarks,
+  priceFromLabel,
+} from "../lib/format";
 import { returnToChat } from "../lib/max-sdk";
 import { ReturnToChatHint } from "../components/ReturnToChatHint";
 import {
@@ -162,6 +170,7 @@ import { StatusBadge } from "../components/StatusBadge";
 import { CustomerTabBar } from "../components/CustomerTabBar";
 import { UnbookableBadge } from "../components/UnbookableNote";
 import { useScreenBack } from "../hooks/useScreenBack";
+import { getSavedPlan } from "../lib/plan-engine";
 import { PLAN_LITE_COPY, PLAN_LITE_ROUTE } from "./PlanLiteScreen";
 import { screenRoot } from "../lib/screen-back";
 
@@ -181,7 +190,7 @@ type ActiveGoal = NonNullable<WellnessToday["active_goals"]>[number];
  * оба). До его слова не трогаем ни то, ни другое: любой выбор здесь
  * выдал бы догадку за решение.
  */
-export const HEADER_WELCOME_LINE = "Рада вас видеть!";
+export const HEADER_WELCOME_LINE = "Рада тебя видеть!";
 
 /**
  * Согласие дневника — ОДИН блок на экране (DRF-2144 п.6). Формулировка из
@@ -228,7 +237,17 @@ type RecsSlice = Slice<CatalogBrowseData> | { kind: "not_requested" };
  * «Недоступен» и «плана нет» — разные факты: во втором случае карточка цели
  * зовёт составить план, в первом о плане молчит.
  */
-type PlanSlice = { kind: "loading" } | { kind: "ok"; data: PlanLite | null } | { kind: "unavailable" };
+type PlanSlice =
+  | { kind: "loading" }
+  | { kind: "ok"; data: PlanLite | null }
+  /**
+   * DRF-2876 — у человека сохранён план нового механизма. Решение владельца
+   * 09.10 (вариант «а»): блок «План на сегодня» и счёт действий на Главной
+   * не показываются — они построены вокруг счётчиков прежнего плана, а у
+   * нового плана счёта нет. Вход в план — карточка цели.
+   */
+  | { kind: "saved" }
+  | { kind: "unavailable" };
 
 function isOnline(): boolean {
   if (typeof navigator === "undefined") return true;
@@ -326,12 +345,15 @@ export function CustomerWellnessDashboardScreen() {
     // Ветка `null` держит форму `allSettled` и порядок распаковки: так
     // включение полки возвращает запрос одной строкой в `aylaPicksShelfOn`,
     // а не раскопками.
-    const [todayRes, activityRes, recsRes, planRes, topicRes] = await Promise.allSettled([
+    const [todayRes, activityRes, recsRes, planRes, topicRes, savedPlanRes] = await Promise.allSettled([
       getWellnessToday(),
       getRecentActivity(),
       shelfOn ? getCatalogBrowse() : Promise.resolve(null),
       getPlanLite(),
       getLastTopicAndChatLink(),
+      // DRF-2876 — есть ли сохранённый план нового механизма (`null` — нет
+      // или механизм выключен на сервере).
+      getSavedPlan(),
     ]);
 
     if (todayRes.status === "fulfilled") {
@@ -364,9 +386,20 @@ export function CustomerWellnessDashboardScreen() {
 
     // План: выключен на сервере (`plan_lite_disabled`) или не ответил —
     // «недоступен», без ошибки на экране: Главная от плана не зависит.
-    setPlanSlice(
-      planRes.status === "fulfilled" ? { kind: "ok", data: planRes.value } : { kind: "unavailable" },
-    );
+    //
+    // DRF-2876 — сохранённый новый план важнее прежнего: с ним счётчики
+    // прежнего плана не показываются. Не удалось узнать, есть ли он, — о
+    // плане молчим («недоступен»): показать счётчики прежнего плана рядом с
+    // новым в «Моём плане» было бы противоречием.
+    if (savedPlanRes.status === "rejected") {
+      setPlanSlice({ kind: "unavailable" });
+    } else if (savedPlanRes.value) {
+      setPlanSlice({ kind: "saved" });
+    } else {
+      setPlanSlice(
+        planRes.status === "fulfilled" ? { kind: "ok", data: planRes.value } : { kind: "unavailable" },
+      );
+    }
     setLastTopic(topicRes.status === "fulfilled" ? topicRes.value.topic : null);
     setChatLink(topicRes.status === "fulfilled" ? topicRes.value.chatLink : null);
   }, [shelfOn]);
@@ -548,7 +581,10 @@ export function CustomerWellnessDashboardScreen() {
     },
     [chatLink],
   );
-  const onChatTap = useCallback(() => goToChat("ayla"), [goToChat]);
+  // DRF-2799 (решение владельца 06.10): разговор с Ayla продолжается здесь,
+  // в Mini App, — приложение не закрывается. Прочие двери в чат (согласие,
+  // план) остаются прежними.
+  const onChatTap = useCallback(() => navigate("/customer/ayla"), [navigate]);
   const onPlanChatTap = useCallback(() => goToChat("plan"), [goToChat]);
 
   // DRF-2230 — приглашение к согласию уходит в чат, и лишь потом экран
@@ -644,8 +680,10 @@ export function CustomerWellnessDashboardScreen() {
     waterTargetKnown && waterTarget > 0 && waterEaten !== undefined
       ? waterEaten / waterTarget
       : undefined;
+  // DRF-2766 — записи без калорий — тоже записи: день не пустой.
   const hasAnyLogs =
-    !!todayData && ((caloriesEaten ?? 0) > 0 || (waterEaten ?? 0) > 0);
+    !!todayData &&
+    ((caloriesEaten ?? 0) > 0 || (waterEaten ?? 0) > 0 || kcalTotalMarks(todayData).incomplete);
   const oneLiner = todayData
     ? pickOneLiner({
         hour: now.getHours(),
@@ -723,7 +761,7 @@ export function CustomerWellnessDashboardScreen() {
           блоком «Продолжить разговор с Ayla» ниже: он несёт последнюю тему,
           а шапочная кнопка вела в тот же чат без неё.
 
-          Д1 (DRF-2331): человек слева — аватар, имя, «Рада вас видеть!».
+          Д1 (DRF-2331): человек слева — аватар, имя, «Рада тебя видеть!».
 
           Колокольчика макета НЕТ, и это решение: ленты уведомлений у
           клиента не существует — ни ручки на сервере, ни экрана на
@@ -750,7 +788,7 @@ export function CustomerWellnessDashboardScreen() {
           <CustomerAvatarEntry displayName={displayName} />
           <span className="wellness-dash__person-text">
             {/* Пока день грузится, имени ещё нет — и раньше строка просто
-                отсутствовала, отчего «Рада вас видеть!» прыгала внутри
+                отсутствовала, отчего «Рада тебя видеть!» прыгала внутри
                 56 px при каждом обновлении (в том числе при «Отменить» у
                 стакана воды, DRF-2331, по ревью). Скелет держит высоту и
                 говорит «грузится», а не «имени нет» — тем же приёмом, что
@@ -1061,9 +1099,9 @@ export function CustomerWellnessDashboardScreen() {
 
         {/* Block A — «Продолжить разговор с Ayla» (DRF-2144 п.5; фриз п.4:
             превью — только реальный последний контекст, иначе нейтрально).
-            Обе кнопки закрывают Mini App — человек возвращается в чат MAX,
-            откуда приложение открыто; фразу он пишет сам (deep link с
-            текстом в MAX не существует — см. StateError.tsx). */}
+            DRF-2799 (решение владельца 06.10, замещает Д2 §172 / DRF-2266):
+            обе кнопки ведут в разговор внутри Mini App (`/customer/ayla`),
+            а не закрывают приложение. Нить та же, что в чате бота. */}
         <section className="wellness-dash__ayla" aria-labelledby="ayla-header">
           <h2 id="ayla-header" className="wellness-dash__section-header">
             Продолжить разговор с <span lang="en">Ayla</span>
@@ -1086,7 +1124,6 @@ export function CustomerWellnessDashboardScreen() {
             <button type="button" className="wellness-dash__link-btn" onClick={onChatTap}>
               Задать новый вопрос
             </button>
-            {chatStuckAt === "ayla" && <ChatStuckHint />}
           </div>
         </section>
 
@@ -1272,6 +1309,18 @@ function PulseStrip({ data }: { data: WellnessToday }) {
   // По образцу воды парой строк ниже: съеденное и цель — раздельно.
   const caloriesKnown = caloriesEaten !== undefined;
   const caloriesTargetKnown = caloriesTarget !== undefined;
+  // DRF-2766 фаза 2 — итог включает оценки ИИ («≈ … включая оценки ИИ»),
+  // записи без калорий делают его неполным; день прочитан, а итога нет —
+  // «пока не посчитаны», а не «не удалось загрузить».
+  const marks = kcalTotalMarks(data);
+  const approx = approxPrefix(marks);
+  const totalUnknown = !caloriesKnown && marks.incomplete;
+  // DRF-2873 — «Без чисел» (решение владельца 04.10: на всех экранах).
+  // Человек сам выбрал не видеть калории, БЖУ и числовые цели: строка
+  // «Питание» тогда не рисует ни чисел, ни шкалы и не произносит их.
+  // Только явное `true`: режим добровольный, и «не знаем выбора» не значит
+  // «спрятать за человека» — то же правило, что у `numbers_hidden_for`.
+  const hideNumbers = data.nutrition_numbers_hidden === true;
   const waterEaten = data.water_glasses_eaten;
   const waterTarget = data.water_glasses_target;
   // Знать выпитое и не знать нормы — обычное состояние, а не сбой.
@@ -1311,26 +1360,49 @@ function PulseStrip({ data }: { data: WellnessToday }) {
       <div
         className="wellness-dash__pulse-row"
         aria-label={
-          !caloriesKnown
+          hideNumbers
+            ? dayIsEmpty
+              ? `Питание: ${EMPTY_DAY_TEXT}`
+              : !caloriesKnown && !totalUnknown
+                ? `Питание: ${sliceClosedCopy}`
+                : "Питание"
+            : totalUnknown
+            ? `Питание: ${KCAL_TOTAL_UNKNOWN}`
+            : !caloriesKnown
             ? `Питание: ${sliceClosedCopy}`
             : dayIsEmpty
               ? // DRF-2288: скринридер слышит то же, что видно глазу, — не «0 из 2100».
                 `Питание: ${EMPTY_DAY_TEXT}`
               : caloriesTargetKnown
-                ? `Питание: ${caloriesEaten} из ${caloriesTarget} килокалорий, ${caloriesPct} процентов${pfcSpoken}`
-                : `Питание: ${caloriesEaten} килокалорий сегодня`
+                ? `Питание: ${marks.approx ? "примерно " : ""}${caloriesEaten} из ${caloriesTarget} килокалорий, ${caloriesPct} процентов${marks.approx ? `, ${KCAL_TOTAL_AI_NOTE}` : ""}${pfcSpoken}`
+                : `Питание: ${marks.approx ? "примерно " : ""}${caloriesEaten} килокалорий сегодня${marks.approx ? `, ${KCAL_TOTAL_AI_NOTE}` : ""}`
         }
       >
         <div className="wellness-dash__pulse-head">
           <span aria-hidden="true">🍽 </span>Питание
         </div>
-        {caloriesKnown && caloriesTargetKnown ? (
+        {hideNumbers ? (
+          /* «Без чисел»: ни калорий, ни цели, ни процента, ни БЖУ, ни шкалы.
+             Слова без чисел остаются — пустой день и закрытый дневник. */
+          dayIsEmpty ? (
+            <div className="wellness-dash__pulse-numbers">{EMPTY_DAY_TEXT}</div>
+          ) : !caloriesKnown && !totalUnknown ? (
+            <div className="wellness-dash__pulse-numbers">{sliceClosedCopy}</div>
+          ) : null
+        ) : caloriesKnown && caloriesTargetKnown ? (
           <>
             <div className="wellness-dash__pulse-numbers" aria-hidden="true">
               {dayIsEmpty
                 ? EMPTY_DAY_TEXT
-                : `${caloriesEaten} / ${caloriesTarget} ккал · ${caloriesPct} %`}
+                : `${approx}${caloriesEaten} / ${caloriesTarget} ккал · ${caloriesPct} %`}
             </div>
+            {!dayIsEmpty && (marks.approx || marks.incomplete) && (
+              <div className="wellness-dash__pulse-pfc" aria-hidden="true" data-testid="pulse-kcal-note">
+                {[marks.approx ? KCAL_TOTAL_AI_NOTE : null, marks.incomplete ? KCAL_TOTAL_INCOMPLETE : null]
+                  .filter(Boolean)
+                  .join(" · ")}
+              </div>
+            )}
             {/* §11.1 — БЖУ row hidden when pfc absent. DRF-1844: белок
                 «108 / 130 г», когда ориентир по белку приехал; без него —
                 факт без второго числа (§85 §8: процент и «из» только при
@@ -1368,15 +1440,25 @@ function PulseStrip({ data }: { data: WellnessToday }) {
           /* Цель не известна — показываем ровно то, что знаем: сколько
              съедено. Ни шкалы, ни процентов: и то и другое считается ОТ
              цели, а цели нет. Та же форма, что у воды ниже. */
-          <div className="wellness-dash__pulse-numbers">
-            {dayIsEmpty
-              ? EMPTY_DAY_TEXT
-              : `${caloriesEaten} ккал сегодня`}
-          </div>
+          <>
+            <div className="wellness-dash__pulse-numbers">
+              {dayIsEmpty ? EMPTY_DAY_TEXT : `${approx}${caloriesEaten} ккал сегодня`}
+            </div>
+            {!dayIsEmpty && (marks.approx || marks.incomplete) && (
+              <div className="wellness-dash__pulse-pfc" aria-hidden="true" data-testid="pulse-kcal-note">
+                {[marks.approx ? KCAL_TOTAL_AI_NOTE : null, marks.incomplete ? KCAL_TOTAL_INCOMPLETE : null]
+                  .filter(Boolean)
+                  .join(" · ")}
+              </div>
+            )}
+          </>
         ) : (
           /* Read failed - no numbers, no bar. «0 / 0 ккал · 0 %» would
-             read as a logged-nothing day, which is a different fact. */
-          <div className="wellness-dash__pulse-numbers">{sliceClosedCopy}</div>
+             read as a logged-nothing day, which is a different fact.
+             DRF-2766 — day read but no total: «пока не посчитаны». */
+          <div className="wellness-dash__pulse-numbers">
+            {totalUnknown ? KCAL_TOTAL_UNKNOWN : sliceClosedCopy}
+          </div>
         )}
       </div>
 
@@ -1523,6 +1605,8 @@ function GoalCard({
   } else if (planKnown) {
     statusLine = "План ещё не составлен";
   } else if (goal.week_num) {
+    // Сюда же приходит сохранённый новый план (DRF-2876): счёта действий у
+    // него нет, остаётся счётчик недель.
     // План недоступен (сервер выключил или не ответил) — о плане молчим,
     // счётчик недель остаётся: это не оценка выполнения (решение №13).
     statusLine = `Неделя ${goal.week_num}`;
@@ -1549,6 +1633,14 @@ function GoalCard({
       {!activePlan && planKnown && (
         <button type="button" className="wellness-dash__cta" onClick={onPlan}>
           Составить план
+        </button>
+      )}
+      {/* DRF-2876 — сохранён новый план: вход в него отсюда, вторым блоком
+          на Главной он не дублируется (решение владельца 09.10). Подпись —
+          существующая, та же, что у раздела. */}
+      {plan.kind === "saved" && (
+        <button type="button" className="wellness-dash__cta" onClick={onPlan}>
+          {PLAN_LITE_COPY.entryFromDashboard}
         </button>
       )}
       <button type="button" className="wellness-dash__link-btn" onClick={onGoal}>
@@ -1603,7 +1695,7 @@ function PlanToday({
                   PLAN_LITE_COPY.ofTotal(a.done_count, a.target_count)
                 )}
               </div>
-              <span className="wellness-dash__plan-chip">из вашего плана</span>
+              <span className="wellness-dash__plan-chip">из твоего плана</span>
             </li>
           );
         })}

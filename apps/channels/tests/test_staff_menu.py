@@ -190,8 +190,11 @@ class TestMenuComposition:
     def test_no_buttons_promise_what_the_backend_cannot_do(self):
         labels = " ".join(b["label"] for b in menu_buttons(_Role(owner=True), WITH_APP))
 
-        # Ayla has no salon-employee actor for these; a button would lie.
-        for forbidden in ("Записать", "Завершить", "Не пришёл", "Отменить"):
+        # The menu is the entry, not the decisions: «состоялся» / «не пришёл»
+        # live under the salon's day and «отклонить» under the request list
+        # (DRF-2784). «✍️ Записать клиента» IS a menu row since DRF-2786 — an
+        # entry into a flow, not a decision — so «Записать» left this list.
+        for forbidden in ("Завершить", "Не пришёл", "Отменить"):
             assert forbidden not in labels
 
     def test_callbacks_follow_the_shared_contract(self):
@@ -365,6 +368,42 @@ class TestMasterDay:
         assert "Пётр" not in text
 
 
+class TestDaySourceUnavailable:
+    """A dead mirror is its own state — not «записей нет», not a crash.
+
+    ``salon_day`` / ``master_day`` read the external booking mirror
+    (``visit_source.master_visits``). When it raises, the answer must be a
+    DISTINCT, honest message (an empty day and an unreachable source are
+    different facts — confusing them tells a master he is free when the
+    mirror is merely silent) and it must NOT propagate: an exception out of
+    ``_handle_button`` lands under the already-claimed idempotency key and
+    the whole reply is swallowed — a silent dead-end on the tap.
+    """
+
+    def test_salon_day_names_the_outage_instead_of_saying_empty(self, tenant):
+        _make_master(tenant)
+        with patch(
+            "apps.master_api.services.visit_source.master_visits",
+            side_effect=RuntimeError("mirror down"),
+        ):
+            text = _scoped(tenant, staff_actions.salon_day, tenant)
+
+        assert text == staff_actions.DAY_UNAVAILABLE
+        # The distinct-state guarantee: must not be mistaken for an empty day.
+        assert "записей нет" not in text
+
+    def test_master_day_names_the_outage_instead_of_saying_empty(self, tenant):
+        olga = _make_master(tenant, "Тихонова Ольга")
+        with patch(
+            "apps.master_api.services.visit_source.master_visits",
+            side_effect=RuntimeError("mirror down"),
+        ):
+            text = _scoped(tenant, staff_actions.master_day, olga)
+
+        assert text == staff_actions.DAY_UNAVAILABLE
+        assert "записей нет" not in text
+
+
 class TestPendingRequests:
     def test_empty_queue_says_so(self, tenant):
         assert "Заявок от мастеров нет" in _scoped(tenant, staff_actions.pending_requests, tenant)
@@ -437,6 +476,25 @@ class TestTaps:
         # after one use.
         assert sent.call_args.kwargs.get("attachments")
 
+    def test_day_tap_with_a_dead_mirror_answers_and_keeps_the_exit(self, tenant, sent):
+        # The incident this guards: an exception out of the day action
+        # reaches _handle_button, the idempotency key is already claimed, and
+        # the whole reply is swallowed — the person taps «Сегодня» and gets
+        # nothing, with no way forward. A reply with the menu must come back.
+        self._make_admin(tenant)
+        _make_master(tenant)
+
+        with patch(
+            "apps.master_api.services.visit_source.master_visits",
+            side_effect=RuntimeError("mirror down"),
+        ):
+            self._tap(tenant, CB_DAY)
+
+        assert sent.call_args is not None, "no reply sent — the tap dead-ended"
+        assert sent.call_args.kwargs["text"] == staff_actions.DAY_UNAVAILABLE
+        # The menu rides back with the answer — the cabinet exit stays reachable.
+        assert sent.call_args.kwargs.get("attachments")
+
     def test_requests_tap_answers(self, tenant, sent):
         self._make_admin(tenant)
 
@@ -465,11 +523,9 @@ class TestTaps:
 class TestApproveFromChat:
     """Deciding a schedule request with one tap (DRF-1061 block 3.2).
 
-    Only APPROVAL lives in chat. Rejection requires a written reason the
-    master will read — the service makes `rejection_reason` mandatory and
-    surfaces it in their DM — and asking for free text in chat would mean
-    an FSM, i.e. a "now send me the reason" state to get stuck in.
-    Approval needs no text, so it is the tap-sized half.
+    Approval here; rejection beside it since DRF-2784, with the template
+    reason — see ``test_staff_chat_actions_2784``. A rejection with a
+    written reason stays in the Mini App.
     """
 
     def _pending(self, tenant, master):
@@ -566,5 +622,5 @@ class TestApproveFromChat:
         with tenant_scope(tenant):
             text = staff_actions.pending_requests(tenant)
 
-        # The person must not hunt for a reject button that is not there.
+        # Where a rejection WITH a written reason lives (DRF-2784 keeps it).
         assert "Отклонить" in text and "кабинете" in text

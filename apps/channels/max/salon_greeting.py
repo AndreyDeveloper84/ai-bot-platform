@@ -1,8 +1,8 @@
 """Приветствия персонала по роли с живой сводкой (DRF-2114, §50 п.4).
 
 После пре-чека (DRF-2113) человек со STAFF-вердиктом слышит не «Салон «X».»,
-а приветствие владельца — дословно из ``docs/modules/меню салонный
-бот.md`` — с числами из живых источников:
+а приветствие владельца — дословно из
+``docs/modules/меню салонный бот.md`` — с числами из живых источников:
 
 * записи дня — :func:`apps.admin_api.services.salon_day.build_salon_day`
   (зеркало ``RemoteBookingProxy``, тот же источник, что у экрана «День»);
@@ -143,6 +143,10 @@ class GreetingData:
     readiness_problems: int | None = None
     my_records: int | None = None
     next_visit: NextVisit | None = None
+    #: DRF-2759 — у мастера сегодня ноль записей: готовая строка о том, почему
+    #: (выходной / график не настроен / просто нет записей / график не прочитан).
+    #: Та же функция, что отвечает на кнопку «Мой день».
+    my_empty_day: str | None = None
     missing: tuple[str, ...] = field(default_factory=tuple)
 
 
@@ -157,6 +161,21 @@ def _salon_day(tenant: Any, now: datetime):
 
 
 def _masters_available() -> int:
+    """«Работают N мастеров» — те, кто ПРОДАЁТСЯ клиенту (``AVAILABLE``).
+
+    DRF-2759 (Z-1) — это НЕ та же база, что у списка «Сегодня»
+    (:func:`apps.channels.max.staff_actions.salon_day`). Там мастера берутся
+    по ``is_active=True`` и «не в архиве»: кто числится в салоне. Здесь —
+    по ``AVAILABLE``: допущен, связан с каталогом, а при включённых
+    сторожах ещё и с каталожной личностью и подтверждённым графиком.
+
+    ``AVAILABLE`` уже: активный мастер без связи с каталогом есть в списке
+    дня и не входит в это число. Поэтому «работают 3 мастера» над списком из
+    четырёх имён — не ошибка счёта, а два разных вопроса; и равное число не
+    означает тот же состав. Выборки намеренно не сведены: какая из двух баз
+    «правильная» для сводки — решение владельца, не этого модуля.
+    """
+
     from apps.catalog.master_state import AVAILABLE
     from apps.catalog.models import CatalogMaster
 
@@ -217,6 +236,7 @@ def gather(tenant: Any, role_ctx: Any, *, now: datetime | None = None) -> Greeti
     records = masters_available = attention = my_records = None
     readiness_problems = None
     next_visit = None
+    my_empty_day = None
 
     with tenant_scope(tenant):
         try:
@@ -229,6 +249,8 @@ def gather(tenant: Any, role_ctx: Any, *, now: datetime | None = None) -> Greeti
             records = day.summary.total - day.summary.released
             if getattr(role_ctx, "is_master", False):
                 my_records, next_visit = _master_day(day, role_ctx, now)
+                if my_records == 0:
+                    my_empty_day = _my_empty_day(role_ctx, now)
 
         try:
             masters_available = _masters_available()
@@ -260,8 +282,28 @@ def gather(tenant: Any, role_ctx: Any, *, now: datetime | None = None) -> Greeti
         readiness_problems=readiness_problems,
         my_records=my_records,
         next_visit=next_visit,
+        my_empty_day=my_empty_day,
         missing=tuple(missing),
     )
+
+
+def _my_empty_day(role_ctx: Any, now: datetime) -> str | None:
+    """Строка пустого дня мастера — тем же правилом, что у кнопки «Мой день»."""
+
+    from apps.catalog.models import CatalogMaster
+    from apps.channels.max import staff_actions
+
+    master_id = getattr(role_ctx, "master_id", None)
+    if not master_id:
+        return None
+    try:
+        master = CatalogMaster.objects.filter(pk=master_id).select_related("tenant").first()
+        if master is None:
+            return None
+        return staff_actions.EMPTY_DAY_TEXT[staff_actions.empty_day_state(master, now=now)]
+    except Exception:  # noqa: BLE001 — §103: без источника строка опускается
+        logger.warning("channels.max.salon.greeting.empty_day_unavailable", exc_info=True)
+        return None
 
 
 def _master_day(day: Any, role_ctx: Any, now: datetime) -> tuple[int | None, NextVisit | None]:
@@ -318,7 +360,22 @@ def admin_role_word(role_ctx: Any) -> str:
 
 def render_master(name: str, salon: str, data: GreetingData) -> str:
     lines = [MASTER_HELLO.format(name=name), MASTER_ROLE_LINE.format(salon=salon)]
-    if data.my_records is not None:
+    return NL.join(lines + render_master_summary_lines(data))
+
+
+def render_master_summary_lines(data: GreetingData) -> list[str]:
+    """Строки дня мастера — одни на приветствие и на утренний итог мастеру (DRF-2769).
+
+    Пусто, когда день мастера не прочитан (§103): вызывающий решает, что с
+    этим делать (приветствие — только шапка, итог — не слать).
+    """
+
+    lines: list[str] = []
+    if data.my_records == 0 and data.my_empty_day:
+        # DRF-2759 — «Сегодня у вас 0 записей» не отличало выходной от
+        # ненастроенного графика; строка владельца называет причину.
+        lines.append(data.my_empty_day)
+    elif data.my_records is not None:
         lines.append(MASTER_TODAY_LINE.format(records=records_phrase(data.my_records)))
     if data.next_visit is not None:
         n = data.next_visit
@@ -327,7 +384,7 @@ def render_master(name: str, salon: str, data: GreetingData) -> str:
                 client=n.client, service=n.service, minutes=n.minutes, time=n.time
             )
         )
-    return NL.join(lines)
+    return lines
 
 
 def _attention_total(data: GreetingData) -> int | None:
@@ -424,6 +481,73 @@ def admin_buttons(entry: Any) -> list[dict[str, str]]:
     return [b for b in buttons if b]
 
 
+def digest_admin_buttons(entry: Any) -> list[dict[str, str]]:
+    """Кнопки утреннего итога владельцу / администратору (DRF-2769).
+
+    Сначала — действия в чате, они работают и без Mini App: день салона,
+    заявки мастеров (одобрение — в самом списке заявок), готовность. Затем —
+    экраны Mini App из :func:`admin_buttons`, те же, что под приветствием, кроме
+    «Сегодня»: день салона уже есть первой кнопкой, второй «Сегодня» рядом
+    был бы загадкой. Без ``web_app`` и ``miniapp_url`` у бота кнопок Mini App
+    нет вовсе — как везде (мёртвая кнопка хуже отсутствующей).
+
+    Своих слов здесь нет: подписи — из меню персонала и приветствия.
+    """
+    from apps.channels.max.staff_menu import (
+        CB_DAY,
+        CB_READINESS,
+        CB_REQUESTS,
+        LABEL_DAY_ADMIN,
+        LABEL_REQUESTS,
+    )
+
+    chat = [
+        {"label": LABEL_DAY_ADMIN, "callback": CB_DAY},
+        {"label": LABEL_REQUESTS, "callback": CB_REQUESTS},
+        {"label": BUTTON_CHECK_READINESS, "callback": CB_READINESS},
+    ]
+    app = [b for b in admin_buttons(entry) if b.get("label") != BUTTON_TODAY]
+    return chat + app
+
+
+def digest_master_buttons(entry: Any) -> list[dict[str, str]]:
+    """Кнопки утреннего итога мастеру (DRF-2769): «📅 Мой день» в чате — работает
+    без Mini App, — затем экраны :func:`master_buttons`, кроме «Сегодня» (день уже
+    первой кнопкой). Подписи — из меню персонала и приветствия."""
+    from apps.channels.max.staff_menu import CB_DAY, LABEL_DAY_MASTER
+
+    chat = [{"label": LABEL_DAY_MASTER, "callback": CB_DAY}]
+    app = [b for b in master_buttons(entry) if b.get("label") != BUTTON_TODAY]
+    return chat + app
+
+
+def greeting_admin_buttons(entry: Any) -> list[dict[str, str]]:
+    """Кнопки приветствия /start владельцу / администратору (DRF-2787).
+
+    Владелец работает в боте с первого экрана: сначала действия в чате —
+    набор утреннего итога (:func:`digest_admin_buttons`) и «✍️ Записать
+    клиента» (DRF-2786) после заявок, — затем экраны Mini App как опция рядом.
+    До этого приветствие несло только ``open_app``: все действия, которые бот
+    умеет сам, были спрятаны в меню (жалоба владельца 05.10, buttons3.png).
+    """
+    from apps.channels.max.staff_menu import CB_BK_NEW, LABEL_BOOK, LABEL_REQUESTS
+
+    buttons = digest_admin_buttons(entry)
+    at = next(
+        (i + 1 for i, b in enumerate(buttons) if b.get("label") == LABEL_REQUESTS),
+        len(buttons),
+    )
+    return [*buttons[:at], {"label": LABEL_BOOK, "callback": CB_BK_NEW}, *buttons[at:]]
+
+
+def greeting_master_buttons(entry: Any) -> list[dict[str, str]]:
+    """Кнопки приветствия /start мастеру (DRF-2787): «📅 Мой день» в чате — там
+    же его визиты «состоялся / не пришёл» (DRF-2785), — затем экраны Mini App.
+    Тот же набор, что у утреннего итога мастеру."""
+
+    return digest_master_buttons(entry)
+
+
 def first_buttons(entry: Any) -> list[dict[str, str]]:
     """«Проверить готовность» — callback в чат (DRF-2117), «Открыть салон» — Mini App."""
     from apps.channels.max.staff_menu import CB_READINESS, _miniapp_button
@@ -470,10 +594,10 @@ def build_greeting(
         if is_first_entry(bot_user):
             return render_first(name, salon, role_word), first_buttons(entry)
         data = gather(tenant, role_ctx, now=now)
-        return render_admin(name, salon, role_word, data), admin_buttons(entry)
+        return render_admin(name, salon, role_word, data), greeting_admin_buttons(entry)
     if getattr(role_ctx, "is_master", False):
         data = gather(tenant, role_ctx, now=now)
-        return render_master(name, salon, data), master_buttons(entry)
+        return render_master(name, salon, data), greeting_master_buttons(entry)
     return None
 
 
@@ -484,6 +608,8 @@ __all__ = [
     "NextVisit",
     "attention_phrase",
     "build_greeting",
+    "greeting_admin_buttons",
+    "greeting_master_buttons",
     "gather",
     "is_first_entry",
     "mark_greeted",

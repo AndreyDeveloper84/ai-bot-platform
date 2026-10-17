@@ -43,7 +43,7 @@ pytestmark = [
 ]
 
 # The exact string the user saw. If retrieval regresses, this comes back.
-_ZERO_RESULT_FALLBACK = "По вашему запросу мастеров пока не нашлось"
+_ZERO_RESULT_FALLBACK = "По твоему запросу мастеров пока не нашлось"
 
 _HISTORY = [
     {"role": "user", "content": "ищу массаж, что можешь предложить"},
@@ -158,7 +158,8 @@ def test_live_turn_returns_a_master_not_the_fallback(
     # empty specialization is the common case on this very path. The resolved
     # service rides the line since DRF-962: the button carries it into
     # booking, so the user must see what they are tapping into.
-    assert "• Массажист Пилот · Спортивный массаж · Пенза" in reply.text
+    # DRF-2875 — у мастера без отзывов в строке стоят слова владельца.
+    assert "• Массажист Пилот · Спортивный массаж · Пока нет отзывов · Пенза" in reply.text
     assert " —  " not in reply.text
     assert reply.action_data is not None
     buttons = reply.action_data["attachments"][0]["payload"]["buttons"]
@@ -239,7 +240,7 @@ def test_genuinely_absent_service_still_falls_back(
     assert "Пенза" in reply.text
     # …and without asking for what the client already said.
     assert _ZERO_RESULT_FALLBACK not in reply.text
-    assert "уточните город или услугу" not in reply.text
+    assert "уточни город или услугу" not in reply.text
 
 
 def test_wrong_city_still_falls_back(monkeypatch, penza_massage_salon: CatalogMaster) -> None:

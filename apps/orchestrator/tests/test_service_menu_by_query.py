@@ -9,7 +9,7 @@ through the bot, reconstructed from `conversations_message`:
               • Сазонова Инна · Пенза
               • Татьяна Паламарчук · Пенза
     [тап по Сазоновой]
-    бот:      Выберите услугу мастера Сазонова Инна:
+    бот:      Выбери услугу мастера Сазонова Инна:
               • Биоэнергетический массаж
               • Биоэнергетический массаж детский      ← tapped
               • Глубокая проработка проблемной зоны (60 минут)
@@ -279,7 +279,7 @@ class TestTheMenuIsTheMenuOfTheRequest:
         tenant, master = sazonova
         ref = encode_query_ref("запиши на лимфодренаж?")
         reply = self._tap(tenant, master, monkeypatch, ref=ref)
-        assert "Показаны услуги по вашему запросу" in reply.text
+        assert "Показаны услуги по твоему запросу" in reply.text
         assert "Показаны первые" not in reply.text
 
     def test_a_goal_request_narrows_the_menu_too(self, sazonova: tuple, monkeypatch) -> None:
@@ -308,7 +308,7 @@ class TestTheMenuIsTheMenuOfTheRequest:
         ref = encode_query_ref("маникюр")
         reply = self._tap(tenant, master, monkeypatch, ref=ref)
         assert _lines(reply) == sorted(_ROSTER)[:10]
-        assert "Показаны услуги по вашему запросу" not in reply.text
+        assert "Показаны услуги по твоему запросу" not in reply.text
 
     def test_the_narrowed_buttons_ground_a_real_service(self, sazonova: tuple, monkeypatch) -> None:
         """Each button re-enters the handoff with a resolved service id, so the

@@ -200,10 +200,10 @@ class TestTheCallersUseIt:
 
         assert SALON_BUSINESS_NAME in _WELCOME_TEXT
         assert _WELCOME_TEXT == (
-            "Здравствуйте! 👋\n\n"
+            "Привет! 👋\n\n"
             "Это бот массажного салона «Формула тела» в Пензе.\n"
             "Помогу записаться, расскажу об услугах и отвечу на частые вопросы.\n\n"
-            "Выберите раздел:"
+            "Выбери раздел:"
         )
 
     def test_the_master_facing_prompt_carries_the_salon_name(self):

@@ -45,8 +45,14 @@ services:
       POSTGRES_DB: ai_bot_platform
       POSTGRES_USER: platform
       POSTGRES_PASSWORD: platform
+    # DRF-2647 — только петля. Публикация «5432:5432» слушала ВСЕ интерфейсы:
+    # кто поднимет этот файл на машине с внешним адресом (production берёт
+    # именно его, без staging-оверлея), выставит наружу базу с паролем из
+    # репозитория. Контейнеры ходят друг к другу по имени сервиса в сети
+    # compose — публикация им не нужна; localhost для местной разработки
+    # работает как прежде.
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -58,8 +64,9 @@ services:
 
   redis:
     image: redis:7-alpine
+    # DRF-2647 — только петля: Redis здесь без пароля.
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     volumes:
       - redis_data:/data
     healthcheck:
@@ -71,8 +78,12 @@ services:
 
   chromadb:
     image: chromadb/chroma:0.5.20
+    # DRF-2647 — только петля: без CHROMA_AUTH_TOKEN сервер анонимный, а
+    # 0.5.20 попадает под оповещения Dependabot №34 и №36 (исполнение кода
+    # «для аутентифицированного» — без аутентификации это любой). Dependabot
+    # Docker-образы не смотрит, так что о нём он не скажет никогда.
     ports:
-      - "8001:8000"
+      - "127.0.0.1:8001:8000"
     volumes:
       - chromadb_data:/chroma/chroma
     environment:

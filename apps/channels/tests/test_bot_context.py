@@ -40,6 +40,15 @@ LEGACY_TOKEN = "token-legacy"  # pragma: allowlist secret
 
 
 @pytest.fixture(autouse=True)
+def _no_chat_indicator():
+    """Overrides the directory fixture of the same name: nothing is stubbed.
+
+    This file calls ``outbound.send_chat_action`` itself, with the wire
+    replaced by ``httpx_mock`` — the real function is the subject here.
+    """
+
+
+@pytest.fixture(autouse=True)
 def _legacy_token(settings):
     settings.MAX_BOT_TOKEN = LEGACY_TOKEN
 

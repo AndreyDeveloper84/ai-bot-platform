@@ -339,11 +339,20 @@ DIALOGUE_READERS: dict[str, DialogueReader] = {
         storage="db_message",
         reaches_prompt=True,
         why=(
-            "A protocol method with NO production caller — the audit believed "
-            "this was the MAX prompt's history and it is not. Deliberately not "
-            "deleted (that is a separate decision), so it is classified and "
-            "probed like a live reader: if it is ever wired up, it is already "
-            "reading an emptied column."
+            "LIVE, and it IS prompt history (DRF-2700). This row used to say "
+            "«NO production caller»: true of this repository's call graph and "
+            "false of the running system — the caller is in the library, "
+            "ayla_ai_core/orchestrator.py (sync_to_async(store."
+            "load_recent_history)). Measured on dev c38b54b8: once per concierge "
+            "turn, limit=10, straight from Message rows in the DB (not the Redis "
+            "window); an assistant sentence saved on one turn was in the "
+            "provider's messages on the next. Two things make it safe after "
+            "erasure. Anonymisation empties the column it reads — which the "
+            "probe proves. And, since DRF-2700, the reader itself withholds rows "
+            "created at or before the person's latest personal_data withdrawal, "
+            "so a withdrawal whose anonymisation step failed no longer leaves "
+            "these rows reaching the model. It does not filter by type or "
+            "provenance, and the cutoff exists only where a grant was withdrawn."
         ),
     ),
     # ── Not prompt-bound ────────────────────────────────────────────────
@@ -480,6 +489,18 @@ DIALOGUE_READERS: dict[str, DialogueReader] = {
         storage="db_message",
         reaches_prompt=False,
         why="Unread badge counters — timestamps and roles, not bodies.",
+    ),
+    "apps.miniapp_api.views_customer_assistant:customer_assistant_history": DialogueReader(
+        storage="db_message",
+        reaches_prompt=False,
+        why=(
+            "DRF-2799: история разговора с Ayla в Mini App — реплики человека и Ayla "
+            "из разговоров его же оболочек (person_channel_shells), показанные самому "
+            "человеку. Человеческая поверхность, не промпт: ход из Mini App читает "
+            "историю тем же глобальным ходом бота, что и чат. После «удалить всё» ходы "
+            "не позже anonymized_through отфильтрованы запросом (колонки у них пусты), "
+            "а реплики до последнего отзыва personal_data отсечены (DRF-2700)."
+        ),
     ),
     "apps.miniapp_api.views_last_topic:_recent_assistant_turns": DialogueReader(
         storage="db_message",

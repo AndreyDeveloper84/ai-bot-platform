@@ -49,6 +49,7 @@ from django.core.cache import cache
 
 from apps.integrations.ayla.url_builder import AylaUrlBuilder
 from apps.integrations.ayla.request_id import with_request_id
+from apps.integrations.ayla.salon_service_duration import salon_service_duration_field
 
 
 logger = logging.getLogger(__name__)
@@ -302,7 +303,10 @@ class AylaService:
     # edge). Not ``0.0``: zero is a price, absence is not (DRF-1727, §103).
     price_min: float | None
     price_max: float | None
-    duration_s: int
+    # ``None`` = the catalog resolves no duration for this row. Not ``0``:
+    # a zero-second service is a number, absence is not (DRF-2705). The
+    # duration a booking actually takes lives on the master×service edge.
+    duration_s: int | None
     category_id: str | None
     raw: dict[str, Any] = field(default_factory=dict)
 
@@ -387,6 +391,32 @@ class AylaBookingPage:
 
     records: list[AylaUserRecord]
     next_cursor: str | None = None
+
+
+@dataclass(frozen=True)
+class AylaSpecialistAppointment:
+    """What the master's own appointment actions answer (DRF-2785).
+
+    ``acknowledged`` — whether the CURRENT time is acknowledged: a reschedule
+    makes an earlier acknowledgement stale. ``recorded`` — only on
+    ``acknowledge``: False when the same version was acknowledged already
+    (no second event). People are not in the answer by contract — names
+    come from the bot's own mirror.
+    """
+
+    appointment_id: str
+    specialist_id: str
+    status: str
+    version: int
+    start_at: str
+    acknowledged: bool
+    recorded: bool | None = None
+
+
+#: The master's actions on their own appointment (DRF-2785), by URL segment.
+SPECIALIST_ACTIONS: frozenset[str] = frozenset(
+    {"acknowledge", "cancel", "complete", "no-show", "reschedule"}
+)
 
 
 @dataclass(frozen=True)
@@ -577,14 +607,21 @@ def _service_from_wire(d: dict[str, Any]) -> AylaService:
     # DRF-1727: no price on either field is absence, not a zero-rouble
     # service. A numeric ``"0.00"`` stays ``0.0`` — that one is a real price.
     price = None if raw_price is None or raw_price == "" else float(raw_price)
-    dur_min = int(d.get("duration_minutes") or 0)
+    # DRF-2705: the resolved salon-level duration when the catalog sends it,
+    # the raw one for an older catalog. No usable value is ``None`` — this
+    # used to be ``int(... or 0)``, which reported an unknown duration as a
+    # zero-second service. Not a positive ``int`` (a string, a float, a
+    # bool) is unknown, not coerced — same rule as ``duration_from_edge``.
+    dur_min = salon_service_duration_field(d)
+    if isinstance(dur_min, bool) or not isinstance(dur_min, int) or dur_min <= 0:
+        dur_min = None
     category = d.get("category")
     return AylaService(
         id=str(d.get("id") or ""),
         title=str(d.get("name") or d.get("title") or ""),
         price_min=price,
         price_max=price,
-        duration_s=dur_min * 60,
+        duration_s=dur_min * 60 if dur_min is not None else None,
         category_id=str(category) if category else None,
         raw=d,
     )
@@ -1146,6 +1183,8 @@ class AylaBookingHTTPClient:
         payment_required: bool = True,
         quoted_price: str | None = None,
         quoted_duration_minutes: int | None = None,
+        provenance: dict[str, Any] | None = None,
+        consent: dict[str, str] | None = None,
     ) -> AylaBookingRecord:
         # AMD-002 (D6): payment_required=false → запись без предоплаты,
         # Ayla подтверждает сразу (CONFIRMED + booking.confirmed), Payment
@@ -1165,6 +1204,15 @@ class AylaBookingHTTPClient:
             body["quoted_price"] = quoted_price
         if quoted_duration_minutes is not None:
             body["quoted_duration_minutes"] = quoted_duration_minutes
+        # DRF-2885 — запись от шага плана. ``provenance`` несёт, от какого
+        # шага запись и при каком состоянии безопасности человек действовал;
+        # каталог по нему сам проверяет допуск шага и связывает запись с шагом
+        # в той же операции. ``consent`` — основание обработки (DRF-2967),
+        # рядом с блоком, не внутри него. Без блока — прежний вызов.
+        if provenance is not None:
+            body["provenance"] = provenance
+        if consent is not None:
+            body["consent"] = consent
         resp = self._request(
             "POST",
             "appointments/",
@@ -2195,6 +2243,85 @@ class AylaBookingHTTPClient:
             )
             raise BookingUnavailableError("malformed_response")
         return _user_record_from_wire(payload)
+
+    def act_as_specialist(
+        self,
+        *,
+        external_user_id: str,
+        specialist_id: str,
+        appointment_id: str,
+        action: str,
+        expected_version: int | None = None,
+        reason: str | None = None,
+        new_start_datetime: str | None = None,
+    ) -> AylaSpecialistAppointment:
+        """The master acts on THEIR OWN appointment (DRF-2785).
+
+        ``POST internal/specialists/{specialist_id}/appointments/{id}/{action}/``
+        with the master as ``X-External-User-ID``. The catalog admits only a
+        linked master, on their own record, with a live link to the record's
+        salon; anything else is 403 (subject) or 404 (not theirs —
+        deliberately indistinguishable from missing).
+
+        ``expected_version`` is required by the catalog for every action but
+        ``cancel``; it is never invented here. A missing one is refused
+        before the network, like the salon surface does.
+
+        Errors are the client's usual two: 5xx / network →
+        :class:`BookingUnavailableError`; 4xx → :class:`BookingBadRequestError`
+        carrying ``status_code`` and ``code`` (``STALE_VERSION``,
+        ``INVALID_STATUS``, ``CANCELLATION_NOT_ALLOWED``, …).
+        """
+
+        if action not in SPECIALIST_ACTIONS:
+            raise ValueError(f"unknown specialist action: {action!r}")
+        if expected_version is not None and (
+            isinstance(expected_version, bool)
+            or not isinstance(expected_version, int)
+            or expected_version < 1
+        ):
+            raise ValueError("expected_version must be a positive integer")
+        if action != "cancel" and expected_version is None:
+            raise ValueError(f"{action} requires expected_version")
+
+        body: dict[str, Any] = {}
+        if expected_version is not None:
+            body["expected_version"] = expected_version
+        if reason:
+            body["reason"] = reason
+        if action == "reschedule":
+            if not new_start_datetime:
+                raise ValueError("reschedule requires new_start_datetime")
+            body["new_start_datetime"] = new_start_datetime
+
+        resp = self._request(
+            "POST",
+            f"specialists/{specialist_id}/appointments/{appointment_id}/{action}/",
+            external_user_id=external_user_id,
+            json_body=body,
+            purpose="booking",
+        )
+        payload = self._ok(resp)
+        if not isinstance(payload, dict):
+            raise BookingUnavailableError("malformed_response")
+        try:
+            recorded = payload.get("recorded")
+            return AylaSpecialistAppointment(
+                appointment_id=str(payload["appointment_id"]),
+                specialist_id=str(payload["specialist_id"]),
+                status=str(payload["status"]),
+                version=int(payload["version"]),
+                start_at=str(payload.get("start_at") or ""),
+                acknowledged=bool(payload.get("acknowledged")),
+                recorded=None if recorded is None else bool(recorded),
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            logger.warning(
+                "booking_client.specialist_action_unexpected_shape action=%s keys=%s",
+                action,
+                sorted(payload),
+            )
+            raise BookingUnavailableError("malformed_response") from exc
 
     def get_appointment_version(
         self,

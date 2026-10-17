@@ -32,7 +32,7 @@ export const REVIEWS_COPY = {
 export function reviewsSummary(data: MasterReviewsResponse): string | null {
   const count = reviewCountLabel(data.review_count);
   if (!count) return null;
-  const rating = publicRating(data.rating);
+  const rating = publicRating(data.rating, data.review_count);
   return rating === null ? count : `${rating.toFixed(1)} · ${count}`;
 }
 

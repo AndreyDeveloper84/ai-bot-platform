@@ -41,6 +41,7 @@ import {
   WEEK_DAYS,
 } from "../lib/diary-days";
 import { entriesLabel } from "../lib/food-scanner";
+import { KCAL_TOTAL_AI_NOTE, kcalTotalMarks } from "../lib/format";
 import { backTo } from "../lib/screen-back";
 import { dayRoute } from "./FoodScannerDayScreen";
 import { DIARY_ROUTE } from "./FoodScannerManualScreen";
@@ -54,6 +55,8 @@ export const WEEK_COPY = {
   summary: (n: number) => `${n} из ${WEEK_DAYS} дней с записями`,
   meals: (n: number, kcal: number) => `${entriesLabel(n)} · ~${Math.round(kcal)} ккал`,
   mealsOnly: (n: number) => entriesLabel(n),
+  /** DRF-2766 — короткая форма «итог неполный» для строки недели; [confirmable]. */
+  incomplete: "итог неполный",
   none: "—",
   earlier: "Раньше",
   later: "Позже",
@@ -125,7 +128,13 @@ export function FoodScannerWeekScreen() {
 
   const rowText = (row: DiaryDayRow): string => {
     if (!row.has_entries) return WEEK_COPY.none;
-    if (showNumbers && row.kcal !== null) return WEEK_COPY.meals(row.meals_count, row.kcal);
+    if (showNumbers && row.kcal !== null) {
+      // DRF-2766 фаза 2 — итог дня с оценками ИИ и неполный итог названы.
+      const marks = kcalTotalMarks(row);
+      const notes = [marks.approx ? KCAL_TOTAL_AI_NOTE : null, marks.incomplete ? WEEK_COPY.incomplete : null].filter(Boolean);
+      const base = WEEK_COPY.meals(row.meals_count, row.kcal);
+      return notes.length ? `${base} · ${notes.join(" · ")}` : base;
+    }
     return WEEK_COPY.mealsOnly(row.meals_count);
   };
 

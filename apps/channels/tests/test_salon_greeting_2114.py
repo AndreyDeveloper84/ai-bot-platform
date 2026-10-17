@@ -251,7 +251,7 @@ class TestG1TheOwnersTextsAreConstants:
 
 
 class TestG2TheMasterGreeting:
-    def test_text_and_four_buttons(self, tenant, sources, sent) -> None:
+    def test_text_and_chat_first_buttons(self, tenant, sources, sent) -> None:
         _user, card = _master(tenant)
         sources["day"] = _fake_day(str(card.id), 4)
         _handle("/start")
@@ -262,9 +262,11 @@ class TestG2TheMasterGreeting:
             "Сегодня у вас 4 записи.\n"
             "Ближайшая — Мария, массаж 60 минут, в 10:00."
         )
+        # DRF-2787: «📅 Мой день» в чате первой, экраны Mini App рядом; экранного
+        # «Сегодня» нет — день уже первой кнопкой (жалоба владельца 05.10).
         assert _labels(sent.call_args) == [
+            "📅 Мой день",
             "Открыть кабинет",
-            "Сегодня",
             "Расписание",
             "Спросить Ayla",
         ]
@@ -273,22 +275,32 @@ class TestG2TheMasterGreeting:
         ]
         assert payloads == [
             "staff_open_app",
-            "open_master_today",
             "open_master_schedule",
             "open_master_ayla",
         ]
 
-    def test_no_visits_today_no_next_line(self, tenant, sources, sent) -> None:
+    def test_no_visits_today_no_next_line(self, tenant, sources, sent, monkeypatch) -> None:
+        """DRF-2759: ноль записей — не «0 записей», а причина, тем же правилом, что «Мой день»."""
+        from apps.channels.max import staff_actions
+
         _user, card = _master(tenant)
         sources["day"] = _fake_day(str(card.id), 0)
+        monkeypatch.setattr(
+            staff_actions, "empty_day_state", lambda master, now=None: staff_actions.EMPTY_DAY_OFF
+        )
         _handle("/start")
         text = sent.call_args.kwargs["text"]
-        assert "Сегодня у вас 0 записей." in text
+        assert text == (
+            "Здравствуйте, Анна!\n"
+            "Вы вошли в Ayla для салона «Формула тела» как мастер.\n"
+            "Сегодня у вас выходной по графику."
+        )
+        assert "0 записей" not in text
         assert "Ближайшая" not in text
 
 
 class TestG3TheOwnerGreeting:
-    def test_summary_and_five_buttons(self, tenant, sources, sent) -> None:
+    def test_summary_and_chat_first_buttons(self, tenant, sources, sent) -> None:
         _owner(tenant, greeted=True)
         _handle("/start")
         text = sent.call_args.kwargs["text"]
@@ -300,9 +312,14 @@ class TestG3TheOwnerGreeting:
             "работают 3 мастера;\n"
             "одна ситуация требует внимания."
         )
+        # DRF-2787: сначала действия в чате, затем экраны Mini App рядом; экранного
+        # «Сегодня» нет — день салона уже первой кнопкой (жалоба владельца 05.10).
         assert _labels(sent.call_args) == [
+            "📅 Сегодня",
+            "🗒 Заявки от мастеров",
+            "✍️ Записать клиента",
+            "Проверить готовность",
             "Открыть салон",
-            "Сегодня",
             "Расписание",
             "Спросить Ayla",
             "＋ Новая запись",
@@ -312,7 +329,6 @@ class TestG3TheOwnerGreeting:
         ]
         assert payloads == [
             "staff_open_app",
-            "open_admin_today",
             "open_admin_schedule",
             "open_admin_ayla",
             "open_admin_booking_new",

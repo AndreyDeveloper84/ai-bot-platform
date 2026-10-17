@@ -118,6 +118,31 @@ def _down_and_healthy(primary_raises: Exception) -> dict[str, StubProvider]:
     }
 
 
+def _fallback_rows_now() -> list[Any]:
+    from apps.audit.models import AuditLog
+    from apps.llm.router import EVENT_QUOTA_FALLBACK_USED
+
+    return list(AuditLog.all_tenants.filter(action=EVENT_QUOTA_FALLBACK_USED))
+
+
+async def _fallback_row_ids() -> set[Any]:
+    """The hop's audit rows already in the table — before this test asks.
+
+    DRF-2706. The hop writes its row from a worker thread on that thread's own
+    connection, so it commits outside the transaction of the test that caused
+    it and survives that test's rollback. ``transaction=True`` flushes AFTER a
+    test, not before it: a row left by an earlier test of the same xdist
+    worker is still here. The two nodes below count what THIS ask wrote.
+    """
+    rows = await sync_to_async(_fallback_rows_now, thread_sensitive=False)()
+    return {row.pk for row in rows}
+
+
+async def _fallback_rows_written_since(already_there: set[Any]) -> list[Any]:
+    rows = await sync_to_async(_fallback_rows_now, thread_sensitive=False)()
+    return [row for row in rows if row.pk not in already_there]
+
+
 async def _ask(stubs: dict[str, StubProvider]) -> CompletionResult:
     provider = _router_with(stubs).get_provider(None, skill="concierge", op="complete")
     return await provider.complete([{"role": "user", "content": "привет"}], model="smart")
@@ -204,15 +229,11 @@ class TestUnavailabilityHops:
     async def test_hop_writes_an_unavailable_fallback_audit_row(
         self, pages: list[dict[str, Any]]
     ) -> None:
-        from apps.audit.models import AuditLog
-        from apps.llm.router import EVENT_QUOTA_FALLBACK_USED
+        already_there = await _fallback_row_ids()
 
         await _ask(_down_and_healthy(_timeout_exhausted()))
 
-        rows = await sync_to_async(
-            lambda: list(AuditLog.all_tenants.filter(action=EVENT_QUOTA_FALLBACK_USED)),
-            thread_sensitive=False,
-        )()
+        rows = await _fallback_rows_written_since(already_there)
         assert len(rows) == 1
         payload = rows[0].payload
         assert payload["from_provider"] == "anthropic"
@@ -336,15 +357,11 @@ class TestQuotaStillHops:
     async def test_quota_audit_row_keeps_its_source(self, pages: list[dict[str, Any]]) -> None:
         """Panels filter on ``source="quota_fallback"``; a quota hop must
         still say so, and only an unavailability hop says otherwise."""
-        from apps.audit.models import AuditLog
-        from apps.llm.router import EVENT_QUOTA_FALLBACK_USED
+        already_there = await _fallback_row_ids()
 
         await _ask(_down_and_healthy(LLMVendorCreditsExhausted("anthropic: no credits")))
 
-        rows = await sync_to_async(
-            lambda: list(AuditLog.all_tenants.filter(action=EVENT_QUOTA_FALLBACK_USED)),
-            thread_sensitive=False,
-        )()
+        rows = await _fallback_rows_written_since(already_there)
         assert len(rows) == 1
         assert rows[0].payload["source"] == "quota_fallback"
         assert rows[0].payload["kind"] == "quota"

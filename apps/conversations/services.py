@@ -666,3 +666,49 @@ def record_global_message(
         role,
     )
     return message
+
+
+def amend_global_assistant_text(
+    conversation: Conversation,
+    *,
+    trace_id: uuid.UUID | str | None,
+    expected: str,
+    text: str,
+) -> int:
+    """Заменить текст уже записанной реплики ассистента на этом ходе (DRF-2686).
+
+    Консьерж пишет свой ответ в переписку сам, а канал после этого может
+    дописать к нему строку, которую человек увидит (эхо голосового «Я
+    услышала: …»). Чтобы в переписке осталось то, что человек прочитал,
+    строка правится на месте — её токены, ``action_type`` и ``action_data``
+    сохраняются, второй строки не появляется.
+
+    Один UPDATE со сверкой прежнего текста (``expected``): чужую строку он не
+    тронет, а строку, которую между записью и правкой обезличило «забудь
+    всё» (``content`` уже пуст), не зальёт текстом обратно. Возвращает число
+    обновлённых строк — вызывающий ждёт ровно 1.
+    """
+
+    from apps.identity.services.global_tenant import get_global_bot_tenant
+
+    sentinel = get_global_bot_tenant()
+    if conversation.tenant_id != sentinel.id:
+        raise ValueError(
+            "amend_global_assistant_text: conversation.tenant_id="
+            f"{conversation.tenant_id!r} is not the global_bot sentinel {sentinel.id!r}."
+        )
+
+    if trace_id is None:
+        ctx_trace = current_trace_id()
+        trace_id = uuid.UUID(ctx_trace) if ctx_trace else None
+    elif isinstance(trace_id, str):
+        trace_id = uuid.UUID(trace_id)
+    if trace_id is None:
+        return 0
+
+    return Message.all_tenants.filter(
+        conversation=conversation,
+        role=Message.Role.ASSISTANT,
+        trace_id=trace_id,
+        content=expected,
+    ).update(content=text, rendered_text=text)

@@ -35,9 +35,20 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[3]
 
 #: Имена, которые в аргументе лога называют человека или его id в канале.
+#:
+#: ``external_user_id`` (DRF-2187) — тот же id канала в другой обёртке:
+#: ``bot:{channel}:{channel_user_id}`` (``apps/integrations/ayla/user_proxy.py``).
+#: До DRF-2187 имени здесь не было, и клиенты Ayla печатали его сырым в 27
+#: вызовах логгера; поиск по тексту ``ext_user=`` находил из них 9 — остальные
+#: писали ``ext=``. Поэтому сторож — по имени аргумента, а не по ключу в строке.
 CLASS_NAMES: frozenset[str] = frozenset(
-    {"channel_user_id", "first_name", "last_name", "display", "phone"}
+    {"channel_user_id", "first_name", "last_name", "display", "phone", "external_user_id"}
 )
+#: Вызовы, под которыми имя класса законно: они возвращают маркер, а не id.
+#: ``external_user_log_ref`` — ключёванный усечённый хеш
+#: (``apps/integrations/ayla/log_ref.py``). Список закрытый: новое имя сюда —
+#: это решение «эта функция не выпускает id наружу», а не способ погасить сторожа.
+MASKING_CALLS: frozenset[str] = frozenset({"external_user_log_ref"})
 #: Переменные, у которых ``.user_id`` — id человека в канале (``VerifiedInitData``).
 VERIFIED_NAMES: frozenset[str] = frozenset({"verified"})
 LOG_METHODS: frozenset[str] = frozenset(
@@ -67,9 +78,24 @@ def _is_logger_call(node: ast.AST) -> bool:
     return "log" in name.lower()
 
 
+def _walk_outside_masks(expr: ast.AST):
+    """``ast.walk``, но без захода внутрь вызовов из :data:`MASKING_CALLS`."""
+    stack = [expr]
+    while stack:
+        node = stack.pop()
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id in MASKING_CALLS
+        ):
+            continue
+        yield node
+        stack.extend(ast.iter_child_nodes(node))
+
+
 def _identity_tokens(expr: ast.AST) -> list[str]:
     found = []
-    for sub in ast.walk(expr):
+    for sub in _walk_outside_masks(expr):
         if isinstance(sub, ast.Name) and sub.id in CLASS_NAMES:
             found.append(sub.id)
         elif isinstance(sub, ast.Attribute):
@@ -176,6 +202,31 @@ def test_the_pattern_sees_the_class_and_leaves_internal_keys():
         (1, "channel_user_id"),
         (2, "verified.user_id"),
         (3, "display,first_name"),
+    ]
+
+
+def test_the_pattern_sees_a_raw_external_id_and_lets_the_marker_through():
+    """DRF-2187: внешний id — это id канала; маркер вместо него — нет.
+
+    Ключ в строке формата сторожу безразличен: ``ext_user=``, ``ext=`` и ``who=``
+    ловятся одинаково, потому что смотрит он на аргумент. Маскирующий вызов
+    гасит только СВОЙ аргумент: сырой id рядом с маркером в том же вызове виден.
+    """
+    sample = ast.parse(
+        "logger.warning('x ext_user=%s', external_user_id)\n"
+        "logger.info('y ext=%s', external_user_id)\n"
+        "log.error('z who=%s', self.external_user_id)\n"
+        "logger.warning('ok ext_ref=%s', external_user_log_ref(external_user_id))\n"
+        "logger.warning('half %s %s', external_user_log_ref(external_user_id), external_user_id)\n"
+        "logger.warning('other %s', some_other_wrapper(external_user_id))\n"
+    )
+    _calls, hits = _violations(sample)
+    assert hits == [
+        (1, "external_user_id"),
+        (2, "external_user_id"),
+        (3, "external_user_id"),
+        (5, "external_user_id"),
+        (6, "external_user_id"),
     ]
 
 

@@ -32,8 +32,8 @@
  *     color-only) — handled via aria-label.
  */
 
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { useLocation, useNavigate, useParams } from "react-router-dom";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useState } from "react";
+import { useLocation, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { ScreenLayout } from "../components/ScreenLayout";
 import { StickyCta } from "../components/StickyCta";
 import {
@@ -45,7 +45,8 @@ import { OfflineBanner } from "../components/OfflineBanner";
 import { StateError } from "../components/StateError";
 import { useOnline } from "../hooks/useOnline";
 import { useHaptics } from "../hooks/useHaptics";
-import { getCustomerSlots } from "../lib/customer-booking";
+import { fetchService } from "../lib/api";
+import { getCustomerMaster, getCustomerSlots } from "../lib/customer-booking";
 import { formatDateLabel, formatSlotTime } from "../lib/format";
 import {
   SUGGESTED_MARK,
@@ -54,7 +55,7 @@ import {
   groupByDayPart,
   type DayWithCount,
 } from "../lib/booking-time";
-import { setVisitAt, useBookingDraft } from "../state/booking";
+import { alignMaster, alignService, setVisitAt, useBookingDraft } from "../state/booking";
 import { backTo } from "../lib/screen-back";
 
 interface SlotRow {
@@ -118,13 +119,59 @@ export function CustomerSlotsScreen() {
     masterId ? `/customer/masters/${masterId}` : "/customer/catalog",
   );
 
+  // DRF-2752 — услуга из адреса главнее черновика. Экран времени стоит на шве
+  // «специалист → время»: услуга приезжает сюда в `?service=`, а черновик
+  // к этому моменту может быть пустым (перезагрузка, прямая ссылка) или
+  // остаться от прошлого выбора. Раньше адрес здесь не читался вовсе:
+  // пустой черновик уводил в каталог, чужой — показывал окна чужой услуги.
+  // Без `?service=` правило прежнее — услуга берётся из черновика.
+  const [params] = useSearchParams();
+  const routeService = params.get("service");
+  const serviceId = routeService ?? draft.serviceId;
+
+  // Черновик приводится к тому, что показано, ДО отрисовки: подтверждение
+  // читает его, и время, выбранное у другого мастера или под другую услугу,
+  // не должно остаться выбранным ни на кадр.
+  useLayoutEffect(() => {
+    if (!masterId || !serviceId) return;
+    if (routeService) alignService(routeService);
+    alignMaster(masterId);
+  }, [masterId, serviceId, routeService]);
+
+  // Имена — только из проверенного источника. На прямом входе их в черновике
+  // нет, а подтверждение показывает их человеку: спрашиваем сервер, а не
+  // оставляем прочерк. Не ответил — прочерк честнее выдуманного имени.
+  const needMasterName = draft.masterId === masterId && !draft.masterName;
+  const needServiceName = draft.serviceId === serviceId && !draft.serviceName;
+  useEffect(() => {
+    if (!masterId || !serviceId) return;
+    let alive = true;
+    if (needMasterName) {
+      getCustomerMaster(masterId)
+        .then(({ master }) => {
+          if (alive) alignMaster(masterId, master.name);
+        })
+        .catch(() => undefined);
+    }
+    if (needServiceName) {
+      fetchService(serviceId)
+        .then(({ service }) => {
+          if (alive) alignService(serviceId, service.name);
+        })
+        .catch(() => undefined);
+    }
+    return () => {
+      alive = false;
+    };
+  }, [masterId, serviceId, needMasterName, needServiceName]);
+
   const load = useCallback(() => {
-    if (!masterId || !draft.serviceId) return;
+    if (!masterId || !serviceId) return;
     setState({ kind: "loading" });
     let cancelled = false;
     getCustomerSlots({
       masterId,
-      serviceId: draft.serviceId,
+      serviceId,
       days: 14,
       offsetDays: windowOffset,
     })
@@ -150,17 +197,18 @@ export function CustomerSlotsScreen() {
     return () => {
       cancelled = true;
     };
-  }, [masterId, draft.serviceId, windowOffset]);
+  }, [masterId, serviceId, windowOffset]);
 
   useEffect(() => {
-    if (!masterId || !draft.serviceId) {
+    if (!masterId || !serviceId) {
       // Missing prerequisites — bounce back to catalog rather than
-      // showing an empty / broken screen.
+      // showing an empty / broken screen. Ни адрес, ни черновик услугу не
+      // называют: выбрать её заново — безопаснее, чем угадывать.
       navigate("/customer/catalog", { replace: true });
       return;
     }
     return load();
-  }, [masterId, draft.serviceId, navigate, load]);
+  }, [masterId, serviceId, navigate, load]);
 
   // Сдвинули окно — прежний выбранный день в нём может не лежать.
   useEffect(() => {
@@ -239,7 +287,7 @@ export function CustomerSlotsScreen() {
     return (
       <ScreenLayout back={back} title="Выбери время">
         <MasterSubstitutionCallout
-          masterName={draft.masterName ?? "она"}
+          masterName={draft.masterName || "она"}
           laterWindow={windowOffset > 0}
           canLookFurther={windowOffset + WINDOW_DAYS < MAX_LOOKAHEAD_DAYS}
           onOtherDates={() => setWindowOffset((o) => o + WINDOW_DAYS)}

@@ -122,9 +122,13 @@ _PAIN_STEMS: frozenset[str] = frozenset(
 
 # ─── DRF-973 — phrases that carry a pain stem and are not pain ────────────
 #
-# Every entry below was OBSERVED to misfire on the pre-patch classifier
-# (2026-08-24 run, `docs/REPORT_DRF973.md`). They are BLANKED before any
-# pain test, so the rest of the message is still read in full.
+# The list was introduced in DRF-973 as phrases that misfired on the
+# pre-patch classifier in a run on 2026-08-24. The record of that run
+# (`docs/REPORT_DRF973.md`) is LOST — it is in neither repository nor in
+# the working docs (DRF-2657) — so the membership of this list is not
+# confirmed by any run that can be re-read today. Treat it as a curated
+# list, not as a measured one. Entries are BLANKED before any pain test,
+# so the rest of the message is still read in full.
 #
 # The list is a CLOSED set of phrases, deliberately not an open «word
 # that happens to start with a stem» rule: the guarded direction here is

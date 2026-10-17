@@ -25,12 +25,14 @@ import dataclasses
 import logging
 import uuid
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
 
 from apps.orchestrator.discovery import DiscoveryReply
+from apps.orchestrator.knowledge_licence import KnowledgeLicence
 from apps.orchestrator.turn_seam import (
     DISCOVERY_NOT_CARRIED,
     DISCOVERY_TO_TURN,
@@ -91,6 +93,8 @@ DISCOVERY_PROBES: dict[str, Any] = {
     "persisted": True,
     "outage": True,
     "tool_trace": ({"tool": "search_masters", "arguments": {"city": "Пенза"}},),
+    # DRF-2725 — лицензия знания хода: пустая, но настоящая; None — умолчание.
+    "knowledge_licence": KnowledgeLicence(read_at=datetime(2026, 10, 2, 12, 0, tzinfo=UTC)),
 }
 
 SKILL_RESULT_PROBES: dict[str, Any] = {

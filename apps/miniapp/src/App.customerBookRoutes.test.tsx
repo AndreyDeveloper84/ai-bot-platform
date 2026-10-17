@@ -111,7 +111,7 @@ describe("§31 — канонические адреса", () => {
     setMaster("mst-1", "Анна Соколова");
     renderAppAt("/customer/book/when");
     expect(
-      await screen.findByRole("heading", { name: "Выберите время" }),
+      await screen.findByRole("heading", { name: "Выбери время" }),
     ).toBeInTheDocument();
   });
 });
@@ -131,7 +131,7 @@ describe("§31 — старые адреса остаются алиасами",
     setMaster("mst-1", "Анна Соколова");
     renderAppAt("/book/when");
     expect(
-      await screen.findByRole("heading", { name: "Выберите время" }),
+      await screen.findByRole("heading", { name: "Выбери время" }),
     ).toBeInTheDocument();
   });
 });

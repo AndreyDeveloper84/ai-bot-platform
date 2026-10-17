@@ -166,6 +166,12 @@ class Meal:
     dish: str
     calories: int
     meal_type: str
+    #: DRF-2761 — оценка калорий ИИ (решение владельца 02.10): справочник
+    #: блюда не знает, число дала модель. ``0`` — оценки нет. Заполняется
+    #: только когда проверенных ``calories`` нет: проверенное бьёт оценку.
+    #: Это НЕ ``calories`` — в суммы и сравнение с целью не идёт и
+    #: показывается только с пометкой «Оценка ИИ».
+    ai_calories: int = 0
     #: When the entry was logged, verbatim as Ayla sent it (``""`` when she
     #: sent nothing parseable). Carried, never interpreted here: the late-
     #: dinner trigger (DRF-1464 T5) is the one consumer, and hour arithmetic
@@ -275,12 +281,14 @@ def meals_from_summary(summary: Any) -> tuple[Meal, ...]:
             # honest; «блюдо» as a placeholder would be filler presented as
             # a record.
             continue
+        calories = _clamp_kcal(row.get("calories"))
         meals.append(
             Meal(
                 dish=dish,
-                calories=_clamp_kcal(row.get("calories")),
+                calories=calories,
                 meal_type=_clean_meal_type(row.get("meal_type")),
                 logged_at=_clean_logged_at(row.get("logged_at")),
+                ai_calories=0 if calories else _clamp_ai_kcal(row.get("ai_calories")),
             )
         )
     return tuple(meals)
@@ -366,6 +374,17 @@ def _clean_dish(raw: Any) -> str:
     if not name or name.isdigit():
         return ""
     return name[:MAX_DISH_CHARS]
+
+
+def _clamp_ai_kcal(raw: Any) -> int:
+    """Оценка ИИ из строки каталога — число, и только число.
+
+    ``True`` для ``float()`` — единица, а строка «250» — не то число, которое
+    каталог присылает: и то и другое здесь оценкой не считается.
+    """
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        return 0
+    return _clamp_kcal(raw)
 
 
 def _clamp_kcal(raw: Any) -> int:

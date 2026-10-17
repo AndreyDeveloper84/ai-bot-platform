@@ -773,7 +773,11 @@ class TestTheConciergePromptIsNotAFoodSurface:
 
         settings.FOOD_SCANNER_MEMORY_ENABLED = False
 
-        block = render_current_personal_context(resolver["uuid"])
+        # DRF-2697: читатель берёт человека и сам спрашивает согласие. Субъект
+        # сверяется явно — иначе «None» значило бы «человек не связан», а не
+        # «строки не дошли».
+        assert bot_user.ayla_user_id == resolver["uuid"]
+        block = render_current_personal_context(bot_user)
         assert block is None or "борщ" not in block.lower()
 
 

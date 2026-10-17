@@ -7,10 +7,13 @@ without entering a tenant_scope. The per-tenant functions stay untouched.
 
 from __future__ import annotations
 
+import uuid
+
 import pytest
 
 from apps.conversations.models import Conversation, Message
 from apps.conversations.services import (
+    amend_global_assistant_text,
     record_global_message,
     record_message,
     resolve_active_conversation,
@@ -111,3 +114,55 @@ def test_global_input_channel_default_voice_and_rejects(settings) -> None:
     with pytest.raises(ValueError, match="only valid for role='user'"):
         record_global_message(conv, role="assistant", content="x", input_channel="voice")
     assert Message.all_tenants.filter(conversation=conv).count() == 2
+
+
+def test_amend_rewrites_exactly_the_assistant_row_of_the_turn(settings) -> None:
+    """DRF-2686 — правка на месте: одна строка хода, токены и действие целы."""
+    settings.STRICT_TENANT_SCOPE = "strict"
+    bot_user = resolve_or_create_global_bot_user(channel="max", channel_user_id="g-2686")
+    conv = resolve_active_global_conversation(bot_user)
+    assert conv is not None
+    trace, other = str(uuid.uuid4()), str(uuid.uuid4())
+    record_global_message(conv, role="user", content="привет", trace_id=trace)
+    mine = record_global_message(
+        conv, role="assistant", content="Ответ", rendered_text="Ответ", trace_id=trace,
+        action_type="concierge", tokens_in=7, tokens_out=3,
+    )  # fmt: skip
+    earlier = record_global_message(conv, role="assistant", content="Ответ", trace_id=other)
+
+    amended = amend_global_assistant_text(
+        conv, trace_id=trace, expected="Ответ", text="Я услышала: «привет»\n\nОтвет"
+    )
+
+    assert amended == 1
+    mine.refresh_from_db()
+    assert mine.content == mine.rendered_text == "Я услышала: «привет»\n\nОтвет"
+    assert (mine.action_type, mine.tokens_in, mine.tokens_out) == ("concierge", 7, 3)
+    earlier.refresh_from_db()
+    assert earlier.content == "Ответ"  # тот же текст, другой ход — не тронут
+    assert Message.all_tenants.filter(conversation=conv, role="user").get().content == "привет"
+
+
+def test_amend_leaves_a_row_whose_text_has_moved_on(settings) -> None:
+    """Сверка прежнего текста: обезличенную («забудь всё») строку текстом не заливаем."""
+    settings.STRICT_TENANT_SCOPE = "strict"
+    bot_user = resolve_or_create_global_bot_user(channel="max", channel_user_id="g-2687")
+    conv = resolve_active_global_conversation(bot_user)
+    assert conv is not None
+    trace = str(uuid.uuid4())
+    row = record_global_message(conv, role="assistant", content="Ответ", trace_id=trace)
+    Message.all_tenants.filter(pk=row.pk).update(content="", rendered_text="")
+
+    assert amend_global_assistant_text(conv, trace_id=trace, expected="Ответ", text="эхо") == 0
+    row.refresh_from_db()
+    assert row.content == ""
+    assert amend_global_assistant_text(conv, trace_id=None, expected="", text="эхо") == 0
+
+
+def test_amend_rejects_a_non_sentinel_conversation(settings) -> None:
+    settings.STRICT_TENANT_SCOPE = "strict"
+    tenant = Tenant.objects.create(slug="amend-2686", name="Amend 2686")
+    bot_user = BotUser.all_tenants.create(tenant=tenant, channel="max", channel_user_id="t-2686")
+    conv = Conversation.all_tenants.create(tenant=tenant, bot_user=bot_user)
+    with pytest.raises(ValueError, match="not the global_bot sentinel"):
+        amend_global_assistant_text(conv, trace_id=str(uuid.uuid4()), expected="a", text="b")

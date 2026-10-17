@@ -64,10 +64,10 @@ logger = logging.getLogger(__name__)
 #: confirmation. The person knows a human is coming; what they do not know
 #: is that the bot has deliberately stepped back, and for how long.
 SILENCE_ANNOUNCED_HERE_TEXT = (
-    "Ваш вопрос уже у сотрудника — он с ним разбирается.\n"
-    "Пока сотрудник на связи, я не отвечаю: иначе вы получите от нас "
+    "Твой вопрос уже у сотрудника — он с ним разбирается.\n"
+    "Пока сотрудник на связи, я не отвечаю: иначе ты получишь от нас "
     "два разных ответа на один вопрос.\n"
-    "Как только он закончит, я напишу вам и снова смогу помочь."
+    "Как только он закончит, я напишу тебе и снова смогу помочь."
 )
 
 #: The mute engaged in a dialog that never mentioned an operator — the
@@ -75,10 +75,10 @@ SILENCE_ANNOUNCED_HERE_TEXT = (
 #: connection is invisible from where they are sitting, so it is the first
 #: thing the message says.
 SILENCE_TRANSFERRED_TEXT = (
-    "Здесь я пока не отвечаю: вы просили связать вас с сотрудником "
-    "в другом нашем чате, и он уже занимается вашим вопросом.\n"
-    "Мы не отвечаем одновременно, чтобы вы не получили два разных ответа.\n"
-    "Как только сотрудник закончит, я напишу вам сюда и снова смогу помочь."
+    "Здесь я пока не отвечаю: была просьба связать тебя с сотрудником "
+    "в другом нашем чате, и он уже занимается твоим вопросом.\n"
+    "Мы не отвечаем одновременно, чтобы у тебя не оказалось двух разных ответов.\n"
+    "Как только сотрудник закончит, я напишу тебе сюда и снова смогу помочь."
 )
 
 #: The mute lifted. Until DRF-1486 the bot simply started answering again
@@ -86,7 +86,7 @@ SILENCE_TRANSFERRED_TEXT = (
 #: of silence, they had every reason not to send.
 SILENCE_RELEASED_TEXT = (
     "Сотрудник завершил разговор — я снова на связи.\n"
-    "Если вопрос ещё открыт, напишите его здесь, я помогу."
+    "Если вопрос ещё открыт, напиши его здесь, я помогу."
 )
 
 #: Tags the assistant turns in the transcript so an operator reading the

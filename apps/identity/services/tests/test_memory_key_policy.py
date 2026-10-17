@@ -12,6 +12,7 @@ from __future__ import annotations
 import uuid
 from datetime import timedelta
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 from ayla_ai_core import INFERRED_MARK, MEMORY_INFERRED_HEADER
@@ -32,6 +33,18 @@ from apps.persona.memory_surface import render_current_personal_context
 pytestmark = pytest.mark.django_db
 
 _T0 = timezone.now() - timedelta(days=10)
+
+
+@pytest.fixture(autouse=True)
+def _memory_consent_open(monkeypatch):
+    # DRF-2697: читатель сам спрашивает согласие. Эти узлы — про абзац, а не про
+    # затвор (его держит apps/persona/tests/test_memory_surface_consent_2697.py),
+    # поэтому затвор здесь открыт явно.
+    monkeypatch.setattr("apps.persona.memory_surface.can_store_green_memory", lambda bot_user: True)
+
+
+def _person(user_id: uuid.UUID) -> Any:
+    return SimpleNamespace(ayla_user_id=user_id)
 
 
 def _upc() -> UserPersonalContext:
@@ -57,6 +70,20 @@ def _green(upc, *, source=MemoryEntry.SOURCE_EXPLICIT, created_at=None, **overri
         MemoryEntry.objects.filter(pk=entry.pk).update(created_at=created_at)
         entry.created_at = created_at
     return entry
+
+
+#: Подтверждённое предположение (DRF-2781): так его оставляет подтверждение.
+_CONFIRMED = {
+    "provenance": MemoryEntry.PROVENANCE_USER_CONFIRMED_INFERENCE,
+    "status": MemoryEntry.STATUS_ACTIVE,
+}
+
+
+def _allow_inference(monkeypatch) -> None:
+    """Согласие на предположения действует (его затвор держат узлы DRF-2781)."""
+    monkeypatch.setattr(
+        "apps.identity.services.memory_proposals.inference_use_allowed", lambda user_id: True
+    )
 
 
 def _block_for(user_id, monkeypatch) -> str:
@@ -87,7 +114,7 @@ class TestExplicitCorrection:
         assert "Диета: keto" in block
         assert "vegan" not in block
 
-        out = render_current_personal_context(upc.user_id)
+        out = render_current_personal_context(_person(upc.user_id))
         assert out is not None
         assert "кето" in out
         assert "веганского" not in out
@@ -111,7 +138,7 @@ class TestInferredDoesNotDisplaceExplicit:
         assert "Диета: vegan" in block
         assert "keto" not in block
 
-        out = render_current_personal_context(upc.user_id)
+        out = render_current_personal_context(_person(upc.user_id))
         assert out is not None
         assert "веганского" in out
         assert "keto" not in out
@@ -148,7 +175,7 @@ class TestMultiValueKey:
         block = _block_for(upc.user_id, monkeypatch)
         assert "Предпочитает районы: Центр, Набережная" in block
 
-        out = render_current_personal_context(upc.user_id)
+        out = render_current_personal_context(_person(upc.user_id))
         assert out is not None
         assert "любит Центр" in out
         assert "любит Набережную" in out
@@ -215,12 +242,25 @@ class TestProvenanceReachesThePrompt:
     """
 
     def test_inferred_row_is_marked_in_the_block(self, monkeypatch) -> None:
+        # DRF-2781: в промпт выведенное попадает только ПОДТВЕРЖДЁННЫМ и при
+        # действующем согласии на предположения — и всё равно с пометкой.
         upc = _upc()
-        _green(upc, source=MemoryEntry.SOURCE_INFERRED)
+        _green(upc, source=MemoryEntry.SOURCE_INFERRED, **_CONFIRMED)
+        _allow_inference(monkeypatch)
         block = _block_for(upc.user_id, monkeypatch)
         assert "Диета: vegan" in block
         assert INFERRED_MARK in block
         assert MEMORY_INFERRED_HEADER in block
+
+    def test_an_unconfirmed_inference_never_reaches_the_block(self, monkeypatch) -> None:
+        """DRF-2781 — «предположение не становится фактом без подтверждения»."""
+        upc = _upc()
+        _green(upc, source=MemoryEntry.SOURCE_EXPLICIT, content={"key": "city", "value": "x"})
+        proposal = _green(upc, source=MemoryEntry.SOURCE_INFERRED)
+        assert [e.pk for e in read_green_entries(upc.user_id)][-1] == proposal.pk
+        _allow_inference(monkeypatch)
+        block = _block_for(upc.user_id, monkeypatch)
+        assert "vegan" not in block
 
     def test_explicit_row_is_not_marked_as_a_guess(self, monkeypatch) -> None:
         upc = _upc()
@@ -234,12 +274,22 @@ class TestProvenanceReachesThePrompt:
         """Сам факт различимости: один и тот же факт из двух источников."""
         stated_upc, inferred_upc = _upc(), _upc()
         _green(stated_upc, source=MemoryEntry.SOURCE_EXPLICIT)
-        _green(inferred_upc, source=MemoryEntry.SOURCE_INFERRED)
+        _green(inferred_upc, source=MemoryEntry.SOURCE_INFERRED, **_CONFIRMED)
+        _allow_inference(monkeypatch)
         assert _block_for(stated_upc.user_id, monkeypatch) != _block_for(
             inferred_upc.user_id, monkeypatch
         )
 
-    def test_signal_row_counts_as_derived(self, monkeypatch) -> None:
+    def test_a_signal_row_does_not_reach_the_block(self, monkeypatch) -> None:
+        """DRF-2781 — сигнал тоже вывод, а пути подтверждения у него нет.
+
+        До Ф4 сигнальная строка шла в промпт с пометкой «вывод». Теперь в
+        разговор идёт только сказанное и подтверждённое; сигналу подтвердиться
+        нечем, поэтому он в разговор не идёт вовсе.
+        """
         upc = _upc()
-        _green(upc, source=MemoryEntry.SOURCE_SIGNAL)
-        assert INFERRED_MARK in _block_for(upc.user_id, monkeypatch)
+        signal = _green(upc, source=MemoryEntry.SOURCE_SIGNAL)
+        assert [e.pk for e in read_green_entries(upc.user_id)] == [signal.pk]
+        _allow_inference(monkeypatch)
+        block = _block_for(upc.user_id, monkeypatch)
+        assert "vegan" not in block

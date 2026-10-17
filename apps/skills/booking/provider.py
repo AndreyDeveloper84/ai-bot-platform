@@ -54,6 +54,7 @@ from apps.integrations.ayla.booking_client import (
     BookingRateLimitedError,
     BookingUnavailableError,
 )
+from apps.integrations.ayla.edge_duration import duration_from_edge
 from apps.integrations.ayla.health_check import is_health_check_code
 from apps.integrations.ayla.offer_refusal import reason_from_edge, reason_from_refusal
 from apps.integrations.yclients.client import (
@@ -67,6 +68,11 @@ from apps.integrations.yclients.client import (
 )
 
 logger = logging.getLogger(__name__)
+
+#: What every «not this salon's master» refusal says, whatever its reason
+#: (DRF-2677): an invented id, another salon's master and an unverifiable
+#: one are one answer on the outside.
+_MASTER_NOT_FOUND = "specialist_not_found"
 
 
 def get_booking_provider(*, bot_user: Any) -> Any:
@@ -200,11 +206,17 @@ class AylaYClientsAdapter:
             rows = self._client.get_services()
         return [_to_yc_service(r) for r in rows]
 
-    def get_staff(self, *, staff_id: int | str | None = None) -> list[Staff]:
+    def get_staff(self) -> list[Staff]:
+        """This salon's roster.
+
+        DRF-2677: the YClients-shaped ``staff_id`` is gone from this side of
+        the seam, as it went from ``get_services`` (DRF-1019). It forwarded
+        to ``specialists/{id}/`` — a read by id with no salon in it — and no
+        caller ever passed one. Whether a given master is this salon's is
+        :meth:`_require_master_of_this_salon`'s question.
+        """
         with _translate_errors():
-            rows = self._client.get_masters(
-                specialist_id=str(staff_id) if staff_id is not None else None
-            )
+            rows = self._client.get_masters()
         return [_to_yc_staff(r) for r in rows]
 
     def get_available_dates(
@@ -215,6 +227,7 @@ class AylaYClientsAdapter:
     ) -> list[str]:
         if staff_id is None:
             return []
+        self._require_master_of_this_salon(staff_id, door="get_available_dates")
         with _translate_errors():
             # #1051: service_id is mandatory on the Ayla slots path. Pass the
             # selected service through ("" when absent → the client raises a
@@ -231,6 +244,7 @@ class AylaYClientsAdapter:
         date: str,
         service_ids: list[int] | list[str] | None = None,
     ) -> list[AvailableTime]:
+        self._require_master_of_this_salon(staff_id, door="get_available_times")
         with _translate_errors():
             rows = self._client.get_available_times(
                 specialist_id=self.catalog_specialist_id(staff_id),
@@ -264,6 +278,7 @@ class AylaYClientsAdapter:
                 "ayla_client_id_missing: BotUser has no ayla_user_id — cannot "
                 "create on behalf of an Ayla-unlinked user"
             )
+        self._require_master_of_this_salon(staff_id, door="create_record")
         service_id = _first_id(services) or ""
         # AMD-002: payment_required rides the create body AND the idempotency
         # seed — a retry with the same intent dedups; a deliberate intent flip
@@ -379,6 +394,129 @@ class AylaYClientsAdapter:
             rows = self._client.get_user_appointments(external_user_id=self._external_user_id)
         return [_to_yc_user_record(r) for r in rows]
 
+    def _edge_rows_of_this_salon(
+        self, *, staff_id: int | str, service_id: int | str | None
+    ) -> list[dict[str, Any]]:
+        """Edge rows for the quote — only of THIS salon (DRF-2669).
+
+        The catalog's mirror door takes ``tenant`` as an optional filter by a
+        recorded decision (``beautygo_backend/docs/CATALOG_INTERNAL_API_CONTRACT.md`` §2a: «Verify,
+        don't trust — the consumer should re-check it»), and the edge read
+        sends none. So every returned row is re-checked against the bound
+        salon, the same test as ``upsert_master_services``:
+
+        * a row stamped with another salon is dropped — always;
+        * a row with an empty ``tenant`` is *unverifiable, not foreign* (same
+          contract) — kept only for a master this salon's mirror knows (by
+          mirror key or catalog id, saleable or not). For a master the model
+          named that the mirror does not place here, nothing vouches for it,
+          and it is dropped.
+
+        The catalog is still asked for a master the mirror has not caught up
+        with: a row stamped with THIS salon is kept, so such a master keeps
+        the edge price (DRF-1067) and the preview keeps ``quoted_price``
+        (DRF-1708). A master of another salon gets exactly what an invented
+        id gets — the salon's own base price; nothing about them leaks.
+
+        Unbound adapter (no tenant): nothing to verify against — as before.
+        """
+        with _translate_errors():
+            rows = self._client.get_specialist_service_edges(
+                specialist_id=self.catalog_specialist_id(staff_id),
+                service_id=str(service_id),
+            )
+        tenant = self._tenant
+        if tenant is None:
+            return rows
+        ours = str(tenant.id)
+        member = self._mirror_places_here(staff_id)
+        # Same test as upsert_master_services: an empty tenant is unverifiable.
+        kept = [r for r in rows if r.get("tenant") == ours or (member and not r.get("tenant"))]
+        if len(kept) != len(rows):
+            logger.warning(
+                "booking.edge.rows_not_of_this_salon_dropped tenant=%s staff_id=%s "
+                "member=%s dropped=%d",
+                ours,
+                staff_id,
+                member,
+                len(rows) - len(kept),
+            )
+        return kept
+
+    def _mirror_places_here(self, staff_id: int | str) -> bool:
+        """Does this salon's mirror hold the master — by mirror key or by
+        catalog id, WHETHER OR NOT saleable: the question is which salon, not
+        whether bookable. ``objects`` under ``tenant_scope`` is this salon's
+        rows only; the sale filter is the opt-in ``.bookable()``, not applied
+        here. Same path as :meth:`catalog_specialist_id` (MKT1: no
+        ``all_tenants`` outside the marketplace)."""
+
+        from django.db.models import Q
+
+        from apps.catalog.models import CatalogMaster
+        from apps.tenancy.context import tenant_scope
+
+        key = str(staff_id)
+        try:
+            uuid.UUID(key)
+        except ValueError:
+            return False
+        with tenant_scope(self._tenant):
+            return (
+                CatalogMaster.objects.filter(tenant=self._tenant)
+                .filter(Q(pk=key) | Q(catalog_specialist_id=key))
+                .exists()
+            )
+
+    def _require_master_of_this_salon(self, staff_id: int | str, *, door: str) -> None:
+        """Refuse a master who is not this salon's — before the door (DRF-2677).
+
+        ``specialists/{id}/slots/`` and the create take a master by id and
+        carry no salon, and a typed ``cb:book:pick_master:<id>:<svc>`` reaches
+        them without the roster allow-set the model's tools go through. So
+        «is this master ours» is asked here, for every door that sends a
+        ``staff_id`` to the catalog:
+
+        * this salon's mirror holds the master (:meth:`_mirror_places_here` —
+          by mirror key or catalog id, saleable or not) → ours, no network;
+        * otherwise the catalog is asked for the profile, and its ``tenant``
+          stamp is compared with the bound salon.
+
+        The mirror only shortcuts «ours». «Not ours» comes from the catalog
+        alone, so a master of this salon the mirror has not caught up with
+        stays bookable. An empty stamp is *unverifiable, not foreign* (same
+        contract as :meth:`_edge_rows_of_this_salon`): nothing vouches for
+        the master, so the door stays shut — under its own reason in the log.
+
+        Every refusal raises the one error, with no call to the door: «no
+        such master», «a master of another salon» and «cannot tell» must not
+        be tellable apart from outside. The reason lives in the log only.
+        Unbound adapter (no tenant): nothing to verify against — as before.
+        """
+        tenant = self._tenant
+        if tenant is None or self._mirror_places_here(staff_id):
+            return
+        with _translate_errors():
+            try:
+                rows = self._client.get_masters(specialist_id=str(staff_id))
+            except BookingBadRequestError as exc:
+                if exc.status_code != 404:
+                    raise
+                reason = "membership_unknown"
+            else:
+                stamp = rows[0].raw.get("tenant") if rows else None
+                if stamp and str(stamp) == str(tenant.id):
+                    return
+                reason = "membership_foreign" if stamp else "membership_unverifiable"
+        logger.warning(
+            "booking.master.not_of_this_salon reason=%s door=%s tenant=%s staff_id=%s",
+            reason,
+            door,
+            tenant.id,
+            staff_id,
+        )
+        raise YClientsAPIError(_MASTER_NOT_FOUND)
+
     def get_specialist_service_quote(
         self,
         *,
@@ -388,22 +526,16 @@ class AylaYClientsAdapter:
         """Цена и длительность ребра мастер+услуга — то, что Ayla поставит
         на НОВУЮ запись (DRF-1708). ``None`` в любой позиции — значение
         не известно; превью тогда его не показывает и не шлёт.
+
+        Длительность — разрешённая каталогом (``resolved_duration``), а не
+        сырое переопределение мастера: у мастера, который наследует
+        длительность салона, сырое поле пусто (DRF-2678).
         """
-        with _translate_errors():
-            rows = self._client.get_specialist_service_edges(
-                specialist_id=self.catalog_specialist_id(staff_id),
-                service_id=str(service_id),
-            )
+        rows = self._edge_rows_of_this_salon(staff_id=staff_id, service_id=service_id)
         if not rows:
             return None, None
         _refuse_unsellable(rows[0])
-        duration = rows[0].get("duration_minutes")
-        return (
-            _parse_edge_price(rows[0].get("price")),
-            duration
-            if isinstance(duration, int) and not isinstance(duration, bool) and duration > 0
-            else None,
-        )
+        return _parse_edge_price(rows[0].get("price")), duration_from_edge(rows[0])
 
     def get_specialist_service_price(
         self,
@@ -426,11 +558,7 @@ class AylaYClientsAdapter:
         — the behaviour before this change. Errors are translated like every
         other read so the caller can degrade instead of crashing the quote.
         """
-        with _translate_errors():
-            rows = self._client.get_specialist_service_edges(
-                specialist_id=self.catalog_specialist_id(staff_id),
-                service_id=str(service_id),
-            )
+        rows = self._edge_rows_of_this_salon(staff_id=staff_id, service_id=service_id)
         if not rows:
             return None
         _refuse_unsellable(rows[0])
@@ -650,7 +778,9 @@ def _to_yc_service(svc: AylaService) -> Service:
         # float-typed (anti-touch) and nothing downstream renders these two.
         price_min=svc.price_min,  # type: ignore[arg-type]
         price_max=svc.price_max,  # type: ignore[arg-type]
-        duration_s=svc.duration_s,
+        # DRF-2705: ``None`` = the catalog resolves no duration; same
+        # anti-touch DTO, and nothing downstream reads this field either.
+        duration_s=svc.duration_s,  # type: ignore[arg-type]
         category_id=svc.category_id,  # type: ignore[arg-type]
         raw=svc.raw,
     )

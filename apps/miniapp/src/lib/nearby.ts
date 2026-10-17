@@ -37,7 +37,7 @@ export function formatDistance(meters: number | null | undefined): string {
 }
 
 /** Есть ли в списке хоть одно известное расстояние — только тогда список
- *  зовётся «Рядом с вами» (#1653: имя обещает сортировку по близости). */
+ *  зовётся «Рядом с тобой» (#1653: имя обещает сортировку по близости). */
 export function hasKnownDistance(masters: ReadonlyArray<{ distance_meters?: number | null }>): boolean {
   return masters.some((m) => typeof m.distance_meters === "number");
 }

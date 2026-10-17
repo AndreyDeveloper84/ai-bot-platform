@@ -58,7 +58,7 @@ pytestmark = pytest.mark.django_db(transaction=True)
 # ---------------------------------------------------------------------------
 #
 # ``pick_slot`` refuses a slot that is already in the past — «Контекст
-# записи устарел. Начните выбор услуги заново.» (``skill.py``,
+# записи устарел. Начни выбор услуги заново.» (``skill.py``,
 # ``booking.pick_slot.past_slot``). That guard is correct: a keyboard can
 # outlive the day it was drawn for.
 #
@@ -371,7 +371,7 @@ class TestShowMastersFlow:
         assert isinstance(result, SkillResult)
         assert result.should_handoff is False
         # Deterministic prompt, not LLM-generated text.
-        assert result.reply_text == "Выберите мастера:"
+        assert result.reply_text == "Выбери мастера:"
         assert result.tool_calls_made == [tc]
 
     def test_emits_master_pick_keyboard(self, context: SkillContext, tenant: Tenant) -> None:
@@ -496,7 +496,7 @@ class TestMasterPickCallback:
                 result = BookingSkill().handle(ctx)
         assert result.should_handoff is False
         # Date-cards keyboard rendered deterministically.
-        assert result.reply_text == "Выберите дату:"
+        assert result.reply_text == "Выбери дату:"
         assert result.action_data is not None
         buttons = result.action_data["attachments"][0]["payload"]["buttons"]
         # One button per date, callback embeds master_id + date + service_id.
@@ -591,7 +591,7 @@ class TestDatePickCallback:
         # not a question, so the times are rendered straight away. The keyboard
         # is therefore unchanged; only the sentence above it names the day and
         # the part it belongs to.
-        assert result.reply_text == f"{BOOKING_DAY_LABEL}, днём — выберите время:"
+        assert result.reply_text == f"{BOOKING_DAY_LABEL}, днём — выбери время:"
         assert result.action_data is not None
         buttons = result.action_data["attachments"][0]["payload"]["buttons"]
         assert f"cb:book:pick_slot:11:22:{BOOKING_DATE}T14:00:00" in [
@@ -643,7 +643,7 @@ class TestDatePickCallback:
         # DRF-1325 renamed the prompt (see TestDatePickCallback above); the
         # property this test exists for — no 14-day fan-out once the user has
         # named a day — is unchanged and still asserted below.
-        assert result.reply_text == f"{BOOKING_DAY_LABEL}, днём — выберите время:"
+        assert result.reply_text == f"{BOOKING_DAY_LABEL}, днём — выбери время:"
         assert client.dates_calls == []
         assert client.times_calls == [{"staff_id": 11, "date": BOOKING_DATE, "service_ids": [22]}]
 
@@ -749,7 +749,7 @@ class TestShowSlotsFlow:
             with tenant_scope(tenant):
                 result = BookingSkill().handle(context)
         assert result.should_handoff is False
-        assert result.reply_text == "Выберите время:"
+        assert result.reply_text == "Выбери время:"
         # Keyboard envelope with cb:book:pick_slot:<master>:<service>:<datetime> callback.
         assert result.action_data is not None
         buttons = result.action_data["attachments"][0]["payload"]["buttons"]
@@ -803,7 +803,7 @@ class TestSlotPickCallback:
                 result = BookingSkill().handle(ctx)
         mock_complete.assert_not_called()
         assert result.should_handoff is False
-        assert "Подтверждаете?" in result.reply_text
+        assert "Подтверждаешь?" in result.reply_text
         # Preview keyboard carries the pending token.
         assert result.action_data is not None
         pending_meta = result.action_data["pending_action"]
@@ -943,7 +943,7 @@ class TestSlotPickCallback:
         mock_complete.assert_not_called()
         assert result.should_handoff is False
         assert "занято" in result.reply_text.lower()
-        assert "выберите другую дату" in result.reply_text.lower()
+        assert "выбери другую дату" in result.reply_text.lower()
         assert result.action_data is not None
         assert result.action_data["kind"] == "date_pick"
         # The dead-ended day is not offered back — tapping it returns here.
@@ -982,7 +982,7 @@ class TestSlotPickCallback:
         mock_complete.assert_not_called()
         assert result.should_handoff is False
         assert "занято" in result.reply_text.lower()
-        assert "выберите другую дату" not in result.reply_text.lower()
+        assert "выбери другую дату" not in result.reply_text.lower()
         assert result.action_data is None
         assert PendingBookingAction.all_tenants.count() == 0
 
@@ -1151,7 +1151,7 @@ class TestSlotPickCallback:
                 result = BookingSkill().handle(ctx)
         mock_complete.assert_not_called()
         assert result.should_handoff is False
-        assert "Подтверждаете?" in result.reply_text
+        assert "Подтверждаешь?" in result.reply_text
         assert PendingBookingAction.all_tenants.count() == 1
 
     def test_flag_on_uuid_pick_slot_creates_pending(
@@ -1213,7 +1213,7 @@ class TestSlotPickCallback:
                     result = BookingSkill().handle(ctx)
         mock_complete.assert_not_called()
         assert result.should_handoff is False
-        assert "Подтверждаете?" in result.reply_text
+        assert "Подтверждаешь?" in result.reply_text
         assert result.action_data is not None
         token = result.action_data["pending_action"]["token"]
         row = PendingBookingAction.all_tenants.get(pk=token)
@@ -1312,7 +1312,7 @@ class TestSlotPickCallback:
                     result = BookingSkill().handle(ctx)
         mock_complete.assert_not_called()
         assert result.should_handoff is False
-        assert "Подтверждаете?" in result.reply_text
+        assert "Подтверждаешь?" in result.reply_text
         assert result.action_data is not None
         token = result.action_data["pending_action"]["token"]
         row = PendingBookingAction.all_tenants.get(pk=token)
@@ -1437,7 +1437,7 @@ class TestSlotPickCallback:
             _BROKEN_CALLBACK_TEXT,
         }
         assert result.should_handoff is False
-        assert "Подтверждаете?" in result.reply_text
+        assert "Подтверждаешь?" in result.reply_text
         assert result.action_data is not None
         token = result.action_data["pending_action"]["token"]
         assert PendingBookingAction.all_tenants.get(pk=token).payload["master_id"] == master_uuid
@@ -1608,7 +1608,7 @@ class TestSlotPickCallback:
                 result = BookingSkill().handle(ctx)
         mock_complete.assert_not_called()
         assert result.should_handoff is False
-        assert "Подтверждаете?" in result.reply_text
+        assert "Подтверждаешь?" in result.reply_text
         assert PendingBookingAction.all_tenants.count() == 1
 
     def test_old_slot_payload_without_master_service_is_rejected(
@@ -1793,7 +1793,7 @@ class TestCreateFlowServiceContext:
                 r_preview = _tap(cb_slot)
         # Only the very first turn consumed an LLM completion.
         assert mock_complete.call_count == 1
-        assert "Подтверждаете?" in r_preview.reply_text
+        assert "Подтверждаешь?" in r_preview.reply_text
         assert r_preview.action_data is not None
         token = r_preview.action_data["pending_action"]["token"]
         row = PendingBookingAction.all_tenants.get(pk=token)
@@ -2298,7 +2298,7 @@ class TestE0RegressionGuards:
         )
         completions = [
             _completion(tool_calls=[tc]),
-            _completion(text="Подтверждаете запись?"),
+            _completion(text="Подтверждаешь запись?"),
         ]
         with (
             _patch_yclients(client),
@@ -3115,7 +3115,7 @@ class TestGatedWithoutContraindicationsHandsOver:
         self._edge(tenant, resolved=False, contraindications="")
         result, _ = self._pick_slot(context, tenant)
         assert result.should_handoff is False
-        assert "Подтверждаете?" in result.reply_text
+        assert "Подтверждаешь?" in result.reply_text
         assert PendingBookingAction.all_tenants.count() == 1
         assert AdminTask.all_tenants.count() == 0
 

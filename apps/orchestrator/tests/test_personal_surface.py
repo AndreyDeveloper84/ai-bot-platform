@@ -808,6 +808,31 @@ class TestDeterministicClaim:
         assert "Калории" in result.reply_text
         assert result.action_data["buttons"]
 
+    def test_drf2766_a_diary_ask_honours_numbers_hidden(self, monkeypatch):
+        """«Без чисел»: «что я ел» отвечает днём без калорий и БЖУ."""
+        from apps.nutrition_proactive.prefs import write_prefs
+        from apps.orchestrator.nutrition_global import try_handle_structured_nutrition_turn
+
+        _install_ayla(
+            monkeypatch, _FakeAyla(summary=_summary(), water=_water(), profile=_profile())
+        )
+        bot_user = _bot_user("det-2766")
+        write_prefs(bot_user, {"numbers_hidden": True})
+
+        result = try_handle_structured_nutrition_turn(
+            text="что я ел сегодня",
+            attachments=None,
+            bot_user=bot_user,
+            conversation=_conversation(bot_user),
+            trace_id="t",
+        )
+
+        assert result is not None
+        assert result.action_type == "nutrition_diary_shown"
+        assert "Итоги дня" in result.reply_text
+        assert "Калории" not in result.reply_text
+        assert "ккал" not in result.reply_text
+
     def test_a_photo_turn_is_never_hijacked_by_the_diary(self, monkeypatch):
         """The scanner owns the bytes. Answering «вот твой день» while dropping
         the photo the person just sent is the worse of the two mistakes."""

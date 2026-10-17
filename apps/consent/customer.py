@@ -128,6 +128,35 @@ DATA_STORAGE_WITHDRAW_SOURCE = "miniapp:profile_data_storage_revoke"
 _MARKETING = ConsentRecord.ConsentType.MARKETING.value
 _PERSONAL_DATA = ConsentRecord.ConsentType.PERSONAL_DATA.value
 
+#: DRF-2709 — повторная выдача согласия на хранение данных из профиля.
+#: Решение владельца 04.10: «согласие должно быть везде» — восстановить его
+#: можно в приложении, а не только через приветствие в чате.
+DATA_STORAGE_REGRANT_SOURCE = "miniapp:profile_regrant"
+
+#: Версия документа, которую записывает повторная выдача: та же, что у
+#: приветственного согласия (``global_onboarding.CONSENT_DOCUMENT_VERSION``) —
+#: объём тот же, что человек принимал. Клиент обязан прислать её в теле: это
+#: доказательство, под каким текстом человек нажал (152-ФЗ, информированное
+#: согласие), — без совпадения сервер не пишет ничего. Каким текстом её
+#: показывать — решение владельца (DRF-2709); равенство с онбордингом держит
+#: узел дрейфа.
+DATA_STORAGE_REGRANT_DOCUMENT_VERSION = "welcome-s2-v1"
+
+#: Тот же объём, что пишет приветствие (``global_onboarding``): базовое
+#: согласие и зелёная зона памяти — одной версией документа.
+_DATA_STORAGE_REGRANT_TYPES = (
+    _PERSONAL_DATA,
+    ConsentRecord.ConsentType.MEMORY_GREEN.value,
+)
+
+#: Why «Подсказки Ayla» cannot be turned on after the data-storage consent was
+#: withdrawn. The SAME slug the proactive gate uses
+#: (:data:`apps.notifications.proactive.BLOCK_REASONS`): owner decision §47.3
+#: calls the fact «consent_revoked», the code has called it
+#: ``consent_withdrawn`` since DRF-1301, and a second name for one legal fact
+#: is exactly what that decision is against.
+PROACTIVE_HINTS_BLOCKED_REASON = "consent_withdrawn"
+
 
 def _person_shells(bot_user: "BotUser") -> list["BotUser"]:
     """Оболочки человека по его каналу. Fail-closed до самой строки.
@@ -208,6 +237,44 @@ def _active_states(shells: list["BotUser"]) -> dict[str, dict[str, Any]]:
     return states
 
 
+def proactive_hints_state(
+    bot_user: "BotUser",
+    *,
+    shells: list["BotUser"] | None = None,
+    states: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Состояние тумблера «Подсказки Ayla»: включено ли и можно ли включить.
+
+    Один источник и для документа согласий, и для отказа
+    :func:`set_proactive_hints` — чтобы экран не мог показать обычный тумблер
+    там, где сервер откажет (решение владельца §47.3).
+
+    ``can_enable`` — ``False`` только после ОТЗЫВА: согласие на хранение
+    данных у человека было и сейчас не действует — то же определение, каким
+    сторож рассылок отличает ``consent_withdrawn`` от «не давал никогда».
+    ``blocked_reason`` тогда называет причину, иначе пуст. Человека, который
+    согласия не давал вовсе, замок не касается: §47.3 говорит об отзыве, и
+    его тумблер ведёт себя как прежде. Текст объяснения для человека сюда
+    намеренно не входит — он приходит вместе с экраном.
+    """
+    if shells is None:
+        shells = _person_shells(bot_user)
+    if states is None:
+        states = _active_states(shells)
+    withdrawn = (
+        not states[_PERSONAL_DATA]["granted"]
+        and ConsentRecord.all_tenants.filter(
+            bot_user_id__in=[s.id for s in shells],
+            consent_type=_PERSONAL_DATA,
+        ).exists()
+    )
+    return {
+        "enabled": not bool(getattr(bot_user, "proactive_messages_opt_out", False)),
+        "can_enable": not withdrawn,
+        "blocked_reason": PROACTIVE_HINTS_BLOCKED_REASON if withdrawn else "",
+    }
+
+
 def read_consents(bot_user: "BotUser") -> dict[str, Any]:
     """Полное состояние согласий человека — все типы, без выборки.
 
@@ -232,12 +299,11 @@ def read_consents(bot_user: "BotUser") -> dict[str, Any]:
     Дату отдаёт реестр: ``granted_at`` — момент действующей строки согласия.
     Если согласие отозвано, даты нет, и это правда, а не пробел.
     """
-    states = _active_states(_person_shells(bot_user))
+    shells = _person_shells(bot_user)
+    states = _active_states(shells)
     return {
         "consents": states,
-        "proactive_hints": {
-            "enabled": not bool(getattr(bot_user, "proactive_messages_opt_out", False)),
-        },
+        "proactive_hints": proactive_hints_state(bot_user, shells=shells, states=states),
         "data_storage": {
             **states[_PERSONAL_DATA],
             "revocation": {
@@ -245,7 +311,60 @@ def read_consents(bot_user: "BotUser") -> dict[str, Any]:
                 "consequences": list(DATA_STORAGE_REVOCATION_CONSEQUENCES),
                 "retained": list(DATA_STORAGE_REVOCATION_RETAINED),
             },
+            # DRF-2709: под какой версией документа принимается повторная
+            # выдача — клиент шлёт её обратно как доказательство показа.
+            "regrant": {"document_version": DATA_STORAGE_REGRANT_DOCUMENT_VERSION},
         },
+        # DRF-2779 — умная память Ф4: добровольное согласие на предположения.
+        # ``grant`` — под какой версией текста выдаётся сейчас (клиент шлёт
+        # её обратно) и что текст ещё на юр-проверке (#947).
+        "preference_inference": {
+            **states[ConsentRecord.ConsentType.PREFERENCE_INFERENCE.value],
+            "grant": _preference_inference_grant_terms(),
+        },
+        # DRF-2867 — согласие на ИИ-оценку еды: выдача и отзыв из Mini App.
+        "ai_food_estimation": _ai_food_estimation_state(bot_user),
+    }
+
+
+def _ai_food_estimation_state(bot_user: "BotUser") -> dict[str, Any]:
+    """Согласие на ИИ-оценку еды — для экрана выдачи и для настроек (DRF-2867).
+
+    ``granted`` — тем же предикатом, что стоит перед отправкой блюда наружу
+    (:func:`apps.consent.ai_food_estimation.is_granted`): действует сейчас и
+    выдано под ТЕКУЩЕЙ версией текста. Общий ``consents[...]`` версию не
+    сверяет — экран, читающий его, показал бы «разрешено» человеку, которого
+    гейт уже не пускает.
+
+    ``required`` — включён ли механизм. Пока он выключен, оценка идёт всем,
+    и экрану нечего предлагать: согласие ничего бы не меняло.
+
+    ``grant.text`` — полный текст, под которым выдаётся согласие; ``None``,
+    пока владелец его не утвердил. Тогда выдача закрыта и на сервере: экран
+    не может показать человеку то, под чем он подписывается.
+    """
+    from apps.consent import ai_food_estimation as afe
+
+    return {
+        "granted": afe.is_granted(bot_user),
+        "required": afe.consent_required(),
+        "grant": {
+            "document_version": afe.AI_FOOD_ESTIMATION_DOCUMENT_VERSION,
+            "pending_legal": afe.PENDING_LEGAL,
+            "text": afe.AI_FOOD_ESTIMATION_TEXT,
+        },
+    }
+
+
+def _preference_inference_grant_terms() -> dict[str, Any]:
+    from apps.consent.preference_inference import (
+        PENDING_LEGAL,
+        PREFERENCE_INFERENCE_DOCUMENT_VERSION,
+    )
+
+    return {
+        "document_version": PREFERENCE_INFERENCE_DOCUMENT_VERSION,
+        "pending_legal": PENDING_LEGAL,
     }
 
 
@@ -258,10 +377,32 @@ def set_proactive_hints(bot_user: "BotUser", *, enabled: bool) -> None:
 
     Оставляет audit-строку: тумблер решает, будет ли бот писать первым, и
     «кто и когда это переключил» — вопрос, на который придётся отвечать.
+
+    **Включение спрашивает согласие, выключение — нет** (решение владельца
+    §47.3, DRF-2708). После отзыва согласия тумблер не должен позволять
+    создать ложное «подсказки включены»: сообщения всё равно остановлены
+    ``consent_withdrawn``. Проверка стоит здесь, а не на экране — ручка
+    доступна любому с валидной initData. ``enabled=False`` не отказывает
+    никогда: это нужно и человеку, и каскаду отзыва.
+
+    Raises:
+      ProactiveHintsUnavailable: при ``enabled=True`` после отзыва согласия
+        на хранение данных, пока оно не выдано заново.
     """
     from apps.identity.models import BotUser as BotUserModel
 
     shells = _person_shells(bot_user)
+    if enabled:
+        state = proactive_hints_state(bot_user, shells=shells)
+        if not state["can_enable"]:
+            from apps.consent.exceptions import ProactiveHintsUnavailable
+
+            logger.info(
+                "consent.customer.proactive_hints_refused bot_user=%s reason=%s",
+                bot_user.id,
+                state["blocked_reason"],
+            )
+            raise ProactiveHintsUnavailable(state["blocked_reason"])
     opt_out = not enabled
     with transaction.atomic():
         BotUserModel.all_tenants.filter(id__in=[s.id for s in shells]).update(
@@ -388,16 +529,13 @@ def revoke_data_storage(bot_user: "BotUser") -> "DeleteCascadeResult":
        показывать выключено, раз эффект выключен, — иначе человек видит
        включённый тумблер при остановленных сообщениях.
 
-       Это **сброс, а не замок**, и границу стоит назвать вслух.
-       :func:`set_proactive_hints` согласия не проверяет, поэтому сразу
-       после отзыва человек может включить тумблер обратно — и снова
-       увидит «включено» при остановленных ``consent_withdrawn``
-       сообщениях. В обратную сторону: повторная выдача согласия колонку
-       не возвращает в ``False``, подсказки остаются выключенными, пока
-       человек сам не включит их. Обе ветки — вопрос к владельцу
-       (TODO(Q-CLIENT-04)): §35 п.9 говорит про момент отзыва и молчит
-       про то, что происходит после него. Пока сделано ровно то, что
-       решено, и ни шага сверх.
+       Это **замок, а не сброс** — решение владельца §47.3 (DRF-2708).
+       :func:`set_proactive_hints` включение отклоняет, пока согласия нет,
+       поэтому вернуть тумблер следующим тапом нельзя: ложного «включено»
+       при остановленных ``consent_withdrawn`` сообщениях не бывает. В
+       обратную сторону: повторная выдача согласия колонку в ``False`` не
+       возвращает, и это тоже решено — человек выключил подсказки своим
+       действием, возвращается возможность включить, а не включение.
     2. **Потом запускается процедура по уже накопленному** —
        :func:`apps.identity.services.privacy.delete_personal_data`, та самая
        предусмотренная процедура C5.2: удаление персональных данных в Ayla,
@@ -506,11 +644,85 @@ def revoke_data_storage(bot_user: "BotUser") -> "DeleteCascadeResult":
     return result
 
 
+def regrant_data_storage(bot_user: "BotUser") -> None:
+    """Выдать согласие на хранение данных заново (DRF-2709). Идемпотентно.
+
+    Зеркало :func:`revoke_data_storage` по множеству: отзыв снимает согласие
+    по ПОЛНОМУ резолву личности, и выдача возвращает его туда же — иначе
+    оболочка, отозванная через ``ayla_user_id``, осталась бы без согласия при
+    «Разрешено» на экране.
+
+    Пишется тот же объём, что у приветствия: ``personal_data`` и
+    ``memory_green`` одной версией документа. Что НЕ возвращается:
+
+    * **подсказки** — решение владельца §47.3: «возвращаем возможность
+      включить, но не само включение». ``proactive_messages_opt_out``,
+      поставленный отзывом, не трогается; замок снимается сам — его считает
+      :func:`proactive_hints_state` от действующего согласия;
+    * **маркетинг** и **согласие дневника** — у каждого своя выдача на своём
+      экране; отзыв их снял, и вернуть их без отдельного «да» было бы
+      согласием, которого человек не давал;
+    * **удалённые данные** — отзыв запустил их удаление, выдача начинает
+      хранение заново, а не восстанавливает прежнее.
+
+    Версия документа здесь не проверяется — это делает ручка до вызова, как
+    у отзыва.
+    """
+    from apps.identity.models import BotUser as BotUserModel
+    from apps.identity.services.privacy import person_shell_ids
+
+    try:
+        shell_ids = list(person_shell_ids(bot_user))
+    except Exception:  # noqa: BLE001 — резолв личности не должен ронять выдачу
+        logger.exception(
+            "consent.customer.regrant_shell_resolve_failed bot_user=%s — narrowing",
+            bot_user.id,
+        )
+        shell_ids = [s.id for s in _person_shells(bot_user)]
+    shells = list(BotUserModel.all_tenants.filter(id__in=shell_ids).select_related("tenant"))
+
+    # Одной транзакцией: выданное наполовину согласие — то же худшее
+    # состояние, что и снятое наполовину.
+    with transaction.atomic():
+        for shell in shells:
+            for consent_type in _DATA_STORAGE_REGRANT_TYPES:
+                record_global_consent(
+                    shell,
+                    consent_type=consent_type,
+                    source=DATA_STORAGE_REGRANT_SOURCE,
+                    document_version=DATA_STORAGE_REGRANT_DOCUMENT_VERSION,
+                )
+
+    write_audit(
+        "consent.data_storage_regranted",
+        target="BotUser",
+        target_id=bot_user.id,
+        actor_id=bot_user.id,
+        payload={
+            "actor": "customer",
+            "shells": len(shells),
+            "document_version": DATA_STORAGE_REGRANT_DOCUMENT_VERSION,
+            # §47.3: выдача подсказки не включает — поле отвечает на
+            # «почему после „Разрешить“ подсказки всё ещё выключены».
+            "proactive_hints_enabled": False,
+        },
+    )
+    logger.info(
+        "consent.customer.data_storage_regranted bot_user=%s shells=%d",
+        bot_user.id,
+        len(shells),
+    )
+
+
 __all__ = [
+    "DATA_STORAGE_REGRANT_DOCUMENT_VERSION",
     "DATA_STORAGE_REVOCATION_CONSEQUENCES",
     "DATA_STORAGE_REVOCATION_DISCLOSURE_VERSION",
     "DATA_STORAGE_REVOCATION_RETAINED",
+    "PROACTIVE_HINTS_BLOCKED_REASON",
+    "proactive_hints_state",
     "read_consents",
+    "regrant_data_storage",
     "revoke_data_storage",
     "set_marketing",
     "set_proactive_hints",

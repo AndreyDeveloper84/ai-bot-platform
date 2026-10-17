@@ -3,7 +3,7 @@
 Network is mocked via ``pytest-httpx`` so CI never hits real Ayla. We
 exercise the wire-shape contract: Bearer auth + tenant filter + DRF
 PageNumberPagination + retry / error-mapping + DTO parsing against
-``docs/CATALOG_INTERNAL_API_CONTRACT.md``.
+``beautygo_backend/docs/CATALOG_INTERNAL_API_CONTRACT.md``.
 """
 
 from __future__ import annotations
@@ -356,7 +356,7 @@ _SPEC_SVC_URL = f"{_BASE}/api/v1/internal/catalog/specialist-services/"
 
 
 def _edge_row(**overrides: Any) -> dict[str, Any]:
-    """A specialist-services row per CATALOG_INTERNAL_API_CONTRACT.md §2."""
+    """A specialist-services row per beautygo_backend/docs/CATALOG_INTERNAL_API_CONTRACT.md §2."""
     row = {
         "id": "a4e00000-0000-4000-8000-000000000010",
         "salon_service": "6f1c0000-0000-4000-8000-000000000011",

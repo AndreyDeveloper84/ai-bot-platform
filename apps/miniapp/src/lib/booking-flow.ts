@@ -28,6 +28,7 @@
  */
 import type { Master, Service } from "./api";
 import { formatDuration, priceFromLabel } from "./format";
+import { NO_REVIEWS_LABEL, publicRating, reviewCountLabel } from "./rating";
 import type { CatalogBrowseData } from "./customer-booking";
 
 /** Кадр 1 — дословно с макета. */
@@ -147,26 +148,54 @@ export function serviceMeta(service: Service): string {
   return parts.join(" · ");
 }
 
-/** «4.8 · 74 отзыва» — или пусто. Нет данных — нет скобок (DRF-1778). */
-export function providerMeta(master: Master): string {
+/**
+ * DRF-2755 — услуги, которые ЭТОТ мастер оказывает и на которые можно
+ * записаться: каталог (`GET /services`) ∩ `service_ids` мастера.
+ *
+ * Обе половины — с сервера: связь мастер↔услуга и цена с длительностью.
+ * Клиент ничего не достраивает:
+ * - услуги из `service_ids`, которой нет в каталоге (снята, отключена, чужой
+ *   салон), в списке нет — сервер её не отдал;
+ * - услуги каталога, которую мастер не оказывает, в списке нет;
+ * - `is_bookable === false` — в списке нет: запись на неё не предлагается.
+ *
+ * Порядок — как в каталоге. Не по цене и не по выгоде (§4.10: цена —
+ * нейтральный факт, не основание порядка).
+ */
+export function masterServices(catalog: Service[] | null, serviceIds: string[]): Service[] {
+  if (catalog === null) return [];
+  const offered = new Set(serviceIds);
+  return catalog.filter((service) => offered.has(service.id) && service.is_bookable);
+}
+
+/**
+ * DRF-2755 — «1 ч · от 3 200 ₽» для строки услуги на карточке мастера.
+ *
+ * Отдельно от {@link serviceMeta}: тот при `price_from === null` отдаёт
+ * прочерк («60 мин · —»), а здесь решение владельца прямое — нет цены в
+ * данных, цену не показывать. Цена ниже 1 ₽ — тоже не цена (DRF-1989).
+ * Нет ни длительности, ни цены — пустая строка: останется одно название.
+ */
+export function masterServiceMeta(service: Service): string {
   const parts: string[] = [];
-  if (master.rating) parts.push(master.rating);
-  const count = master.review_count ?? 0;
-  if (count > 0) parts.push(`${count} ${reviewWord(count)}`);
+  const duration = formatDuration(service.duration_min);
+  if (duration) parts.push(duration);
+  // `!= null` — и `null`, и отсутствующее поле: `priceFromLabel` на них
+  // отдаёт прочерк, а прочерк здесь — не цена.
+  if (service.price_from != null) {
+    const price = priceFromLabel(service.price_from);
+    if (price) parts.push(`от ${price}`);
+  }
   return parts.join(" · ");
 }
 
-function reviewWord(count: number): string {
-  const tail = count % 100;
-  if (tail >= 11 && tail <= 14) return "отзывов";
-  switch (count % 10) {
-    case 1:
-      return "отзыв";
-    case 2:
-    case 3:
-    case 4:
-      return "отзыва";
-    default:
-      return "отзывов";
-  }
+/**
+ * «4.8 · 74 отзыва» — или «Пока нет отзывов» (DRF-2875, решение владельца
+ * 07.10, п.20): оценка называется только вместе с числом отзывов.
+ */
+export function providerMeta(master: Master): string {
+  const rating = publicRating(master.rating, master.review_count);
+  if (rating === null) return NO_REVIEWS_LABEL;
+  return `${rating.toFixed(1)} · ${reviewCountLabel(master.review_count)}`;
 }
+

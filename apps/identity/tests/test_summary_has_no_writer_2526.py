@@ -24,6 +24,7 @@ from __future__ import annotations
 import ast
 import uuid
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -120,7 +121,7 @@ def test_nobody_writes_the_summary():
 
 @pytest.mark.django_db
 @pytest.mark.parametrize("blank", [None, "", "   ", "\n\t"])
-def test_a_blank_summary_never_reaches_the_prompt(blank):
+def test_a_blank_summary_never_reaches_the_prompt(blank, monkeypatch):
     """Пустое поле не даёт ни абзаца, ни пустой строки внутри абзаца.
 
     Сравнение — с тем же человеком без строки контекста вовсе: пустота в
@@ -131,13 +132,21 @@ def test_a_blank_summary_never_reaches_the_prompt(blank):
     from apps.identity.services.memory_writer import write_entry
     from apps.persona.memory_surface import render_current_personal_context
 
+    # DRF-2697: читатель сам спрашивает согласие. Эти узлы — про абзац, а не про
+    # затвор (его держит apps/persona/tests/test_memory_surface_consent_2697.py),
+    # поэтому затвор здесь открыт явно.
+    monkeypatch.setattr("apps.persona.memory_surface.can_store_green_memory", lambda bot_user: True)
+
+    def _paragraph(user_id):  # noqa: ANN001, ANN202
+        return render_current_personal_context(SimpleNamespace(ayla_user_id=user_id))
+
     def _person(summary):  # noqa: ANN001, ANN202
         user_id = uuid.uuid4()
         upc = UserPersonalContext.objects.create(user_id=user_id, summary=summary)
         return user_id, upc
 
     alone_id, _ = _person(blank)
-    assert render_current_personal_context(alone_id) is None
+    assert _paragraph(alone_id) is None
 
     with_fact_id, upc = _person(blank)
     reference_id, reference_upc = _person(None)
@@ -153,15 +162,15 @@ def test_a_blank_summary_never_reaches_the_prompt(blank):
             purpose="test:drf2526",
         )
 
-    paragraph = render_current_personal_context(with_fact_id)
+    paragraph = _paragraph(with_fact_id)
     assert paragraph is not None
-    assert paragraph == render_current_personal_context(reference_id), repr(paragraph)
+    assert paragraph == _paragraph(reference_id), repr(paragraph)
 
     # Контроль: непустое поле абзац МЕНЯЕТ. Без него равенство выше прошло бы
     # и у сборки, которая summary не читает вовсе.
     upc.summary = "любит тишину"
     upc.save(update_fields=["summary"])
-    assert "любит тишину" in (render_current_personal_context(with_fact_id) or "")
+    assert "любит тишину" in (_paragraph(with_fact_id) or "")
 
 
 @pytest.mark.django_db

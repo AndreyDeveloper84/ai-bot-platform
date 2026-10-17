@@ -178,7 +178,9 @@ class TestPrecedence:
     def test_the_runtime_does_not_use_the_historical_wording(self) -> None:
         source = inspect.getsource(g7_question)
         # presence first: the registered wording IS in the module …
-        assert "кажется, что вы вот-вот потеряете сознание" in source
+        assert "кажется, что ты вот-вот потеряешь сознание" in source
+        # DRF-2712 — прежняя форма обращения в исходнике не осталась
+        assert "вы вот-вот потеряете" not in source
         assert G7_QUESTION_TEXT != HISTORICAL_18_09
         # … and the historical 18.09 wording is not
         assert HISTORICAL_18_09 not in source
@@ -188,7 +190,7 @@ class TestQuestionContract:
     def test_exact_text_and_labels(self) -> None:
         assert G7_QUESTION_ID == "health_screening.g7"
         assert G7_QUESTION_TEXT == (
-            "Сейчас есть хотя бы один из признаков: кажется, что вы вот-вот потеряете "
+            "Сейчас есть хотя бы один из признаков: кажется, что ты вот-вот потеряешь "
             "сознание; трудно самостоятельно стоять, говорить или дышать; появилась "
             "спутанность; состояние быстро ухудшается?"
         )

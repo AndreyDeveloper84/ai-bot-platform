@@ -579,7 +579,7 @@ class TestMiniAppBookingsUnchanged:
             handle_booking_created(_created_envelope())
 
         assert len(send.client) == 1
-        assert "Вы записаны" in send.client[0]["text"]
+        assert "Запись подтверждена" in send.client[0]["text"]
         assert len(send.salon) == 1
 
         proxy = _proxy()

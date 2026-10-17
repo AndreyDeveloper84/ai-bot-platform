@@ -1,0 +1,90 @@
+{
+  "_source": {
+    "captured_on": "2026-10-02",
+    "catalog_commit": "77de9bcd",
+    "catalog_repo": "beautygo_backend",
+    "how": "DRF APIClient against services.knowledge_api.InternalProcedureKnowledgeView on a Postgres test database; rows are synthetic.",
+    "what": "Live responses of GET /api/v1/internal/knowledge/procedures/ - captured, not hand-written."
+  },
+  "responses": {
+    "known_by_salon_service": {
+      "body": {
+        "data": {
+          "as_of": "2026-10-02T06:56:52.501674+00:00",
+          "claims": [
+            {
+              "claim_id": "d698ee16-a81f-4aef-b9ea-85ba27e6eb8c",
+              "expected_effect": "SYNTHETIC effect",
+              "goal_links": [
+                {
+                  "claim_id": "e961f272-9fed-4217-b796-d5f700078782",
+                  "course_pattern": "SYNTHETIC course",
+                  "goal_key": "probe-skin",
+                  "kind": "goal_link",
+                  "limitations": "",
+                  "provenance": {
+                    "confirmed_at": "2026-10-01T09:00:00+00:00",
+                    "confirmed_kind": "rule",
+                    "confirmed_rule": "owner-table",
+                    "evidence_kind": "",
+                    "evidence_source": "SYNTHETIC source",
+                    "rule_version": "v1",
+                    "source_ref": "probe-ref-2",
+                    "valid_until": null
+                  },
+                  "result_horizon": "SYNTHETIC horizon",
+                  "variability_note": "SYNTHETIC note"
+                }
+              ],
+              "key": "even-tone",
+              "kind": "capability",
+              "limitations": "SYNTHETIC limitation",
+              "provenance": {
+                "confirmed_at": "2026-10-01T09:00:00+00:00",
+                "confirmed_kind": "human",
+                "confirmed_rule": "",
+                "evidence_kind": "practice",
+                "evidence_source": "SYNTHETIC source",
+                "rule_version": "",
+                "source_ref": "probe-ref-1",
+                "valid_until": "2027-10-01T09:00:00+00:00"
+              },
+              "text_client": "SYNTHETIC client text"
+            }
+          ],
+          "state": "known",
+          "subject": {
+            "salon_service_id": "d98cfcc4-ba87-4270-bef5-c459f69f0f2e",
+            "template_id": "e92856eb-c51f-43fc-baff-0d2d30061b46"
+          },
+          "unknown_reason": null
+        }
+      },
+      "status": 200
+    },
+    "not_found": {
+      "body": {
+        "error": {
+          "code": "NOT_FOUND",
+          "message": "Salon service not found"
+        }
+      },
+      "status": 404
+    },
+    "unknown_by_salon_service": {
+      "body": {
+        "data": {
+          "as_of": "2026-10-02T06:56:52.530058+00:00",
+          "claims": [],
+          "state": "unknown",
+          "subject": {
+            "salon_service_id": "85533e18-94a5-4b5d-9dd0-c5bb6080fa7a",
+            "template_id": "e92856eb-c51f-43fc-baff-0d2d30061b46"
+          },
+          "unknown_reason": "no_confirmed_knowledge"
+        }
+      },
+      "status": 200
+    }
+  }
+}

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from collections.abc import Sequence
 from dataclasses import replace
 from typing import Any, NamedTuple, Protocol, TypeVar
 from uuid import UUID
@@ -40,6 +41,7 @@ from django.db.models.functions import Cast, Coalesce, Length, Replace, Trim
 
 from apps.catalog.master_state import AVAILABLE
 from apps.catalog.models import CatalogMaster, CatalogService, sellable_edge_q
+from apps.catalog.rating import public_rating
 from apps.marketplace.dto import MasterCard, SalonCard, ServiceCard
 from apps.tenancy.models import Tenant
 
@@ -1932,20 +1934,36 @@ _MAX_NAME_TOKENS = 4
 #: the ENDING («к Архипкину», «к Денису», «у Сазоновой») while the mirror
 #: stores the nominative, so a spoken token is matched by its stem. Two
 #: characters is the longest Russian case ending in play here; five is the
-#: floor, so «Инна» and «Денис» are never cut at all.
+#: floor for that cut — shorter tokens follow the rule below.
 _NAME_STEM_MIN = 5
+
+#: DRF-2829. A short name inflects too: «к Анне», «Ольге», «Марии», «с Анной».
+#: Up to five letters only a case ENDING is cut — «ой»/«ей», or one trailing
+#: vowel or «й» — and never below three letters. «Денис» and «Олег» end in a
+#: consonant and stay whole.
+_SHORT_NAME_ENDINGS_2 = ("ой", "ей")
+_SHORT_NAME_VOWEL_ENDINGS = frozenset("аеёиоуыэюяй")
+_SHORT_NAME_STEM_MIN = 3
 
 
 def _name_stem(token: str) -> str:
     """The prefix of ``token`` that survives Russian case inflection.
 
-    «архипкину» → «архипкин», «денису» → «денис», «инна» → «инна». Chops at
-    most two characters and never below :data:`_NAME_STEM_MIN`, so it can only
-    ever WIDEN a match — a widened match becomes a disambiguation question
-    with real names in it, while a missed one becomes «такого мастера нет»
-    about someone who is on the list.
+    «архипкину» → «архипкин», «денису» → «денис». Chops at most two
+    characters and never below :data:`_NAME_STEM_MIN`, so it can only ever
+    WIDEN a match — a widened match becomes a disambiguation question with
+    real names in it, while a missed one becomes «такого мастера нет» about
+    someone who is on the list.
+
+    Short tokens (DRF-2829): «анне» → «анн», «анной» → «анн», «марии» →
+    «мари», «денис» → «денис». Without this «к Анне» found nobody while «Анна»
+    was on the list — most common female names are five letters or fewer.
     """
     if len(token) <= _NAME_STEM_MIN:
+        if token.endswith(_SHORT_NAME_ENDINGS_2) and len(token) - 2 >= _SHORT_NAME_STEM_MIN:
+            return token[:-2]
+        if token[-1:] in _SHORT_NAME_VOWEL_ENDINGS and len(token) - 1 >= _SHORT_NAME_STEM_MIN:
+            return token[:-1]
         return token
     return token[: max(_NAME_STEM_MIN, len(token) - 2)]
 
@@ -1978,6 +1996,7 @@ def find_masters_by_name(
     city: str | None = None,
     service: str | None = None,
     limit: int = _DEFAULT_LIMIT,
+    require_service: bool = False,
 ) -> list[MasterCard]:
     """Bookable masters whose NAME contains every token of ``name``.
 
@@ -2002,11 +2021,19 @@ def find_masters_by_name(
     when given, stamps the one service that matched it (same rule and same
     deliverability gate as :func:`discover_masters`), so the booking handoff
     starts with the service context instead of asking for it again.
+
+    ``require_service`` (DRF-2829, «только к Анне на педикюр»): only masters
+    who match ``service`` by the SAME rule :func:`discover_masters` uses. The
+    stamp above cannot answer «does she do it» — an unstamped card may mean an
+    ambiguous match or a flag that is off, not a missing service.
     """
     tokens = _name_tokens(name)
     if not tokens:
         return []
-    qs = _bookable_qs()
+    if require_service and service and service.strip():
+        qs = _bookable_qs(specialization=service)
+    else:
+        qs = _bookable_qs()
     for token in tokens:
         # Match on the STEM of the spoken token so an inflected form still
         # finds the nominative in the mirror (:func:`_name_stem`).
@@ -2424,6 +2451,26 @@ def discover_masters_for_service(
     ]
 
 
+def catalog_salon_service_ids(service_ids: Sequence[UUID]) -> list[str]:
+    """Mirror service ids -> the catalog's own salon-service ids, same order.
+
+    DRF-2729. ``MasterCard.service_id`` is the mirror row id; the catalog's
+    knowledge endpoint is addressed by ITS id of the salon service
+    (``CatalogService.ayla_service_id``). The lookup is cross-tenant for the
+    reason discovery itself is (MKT1): the cards it translates came from a
+    cross-tenant search. A row with no catalog id is dropped, not guessed.
+    """
+    if not service_ids:
+        return []
+    by_pk = {
+        row_id: str(ayla_id)
+        for row_id, ayla_id in CatalogService.all_tenants.filter(
+            pk__in=list(service_ids), ayla_service_id__isnull=False
+        ).values_list("pk", "ayla_service_id")
+    }
+    return [by_pk[service_id] for service_id in service_ids if service_id in by_pk]
+
+
 def _to_card(master: CatalogMaster) -> MasterCard:
     """Map a catalog row to the public DTO — the single projection point.
 
@@ -2436,7 +2483,8 @@ def _to_card(master: CatalogMaster) -> MasterCard:
         master_id=master.id,
         name=master.name,
         specialization=master.specialization,
-        rating=master.rating,
+        rating=public_rating(master.rating, master.review_count),
         photo_url=master.photo_url,
         city=master.tenant.city,
+        review_count=int(master.review_count or 0),
     )

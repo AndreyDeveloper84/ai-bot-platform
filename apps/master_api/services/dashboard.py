@@ -55,7 +55,7 @@ from apps.master_api.services.visit_source import (
     master_client_ids,
     master_visits,
 )
-from apps.catalog.models import CatalogMaster, CatalogService
+from apps.catalog.models import CatalogMaster, CatalogService, MasterService
 from apps.internal_chat.models import MasterAdminMessage
 from apps.integrations.ayla.salon_client import (
     SalonAPIError,
@@ -969,6 +969,27 @@ def get_states(master: CatalogMaster, now: datetime) -> DashboardStates:
 # Top-level aggregator --------------------------------------------------
 
 
+def get_services_count(master: CatalogMaster) -> int:
+    """Сколько действующих услуг у мастера — по зеркалу (DRF-2881).
+
+    «Сегодня» решало «услуг нет» по ``CatalogMaster.specialization`` — полю,
+    которое не заполняет ни один путь синхронизации: фраза «Вам ещё не
+    назначили услуги» показывалась каждому мастеру без записей на сегодня.
+    Счёт — тот же, что у списка услуг кабинета (``views._services_for_master``):
+    связи ``MasterService`` с действующей услугой своего салона.
+
+    Зеркало отстаёт от каталога до одной синхронизации (15 минут). Салонному
+    мастеру услуги назначает администратор, и его путь пишет зеркало сразу;
+    solo-мастер настраивает услуги сам, но салонной фразы не видит вовсе.
+    """
+    service_ids = MasterService.all_tenants.filter(
+        master_id=master.id, tenant=master.tenant
+    ).values_list("service_id", flat=True)
+    return CatalogService.all_tenants.filter(
+        id__in=list(service_ids), tenant=master.tenant, is_active=True
+    ).count()
+
+
 def build_dashboard(master: CatalogMaster, now: datetime) -> DashboardSnapshot:
     """Compose every helper into a :class:`DashboardSnapshot`.
 
@@ -989,6 +1010,7 @@ def build_dashboard(master: CatalogMaster, now: datetime) -> DashboardSnapshot:
             "name": master.name,
             "specialization": master.specialization,
             "photo_url": master_photo_path(master.id, master.photo_url),
+            "services_count": get_services_count(master),
         },
         salon={
             "id": str(master.tenant_id),

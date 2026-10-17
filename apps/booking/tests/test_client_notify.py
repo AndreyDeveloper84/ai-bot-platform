@@ -282,7 +282,7 @@ class TestConfirmationText:
         _make_master(tenant)
         _notify(tenant, client_bot_user)
         text = send.calls[0]["text"]
-        assert "Вы записаны" in text
+        assert "Запись подтверждена" in text
         assert "УЗ-кавитация — 1 зона" in text
         assert "Тихонова Ольга" in text
         assert "22.05.2026 в 15:00" in text
@@ -550,7 +550,7 @@ class TestConsumerWiring:
             handle_booking_created(_created_envelope())
         assert [c["addr"] for c in send.calls] == [CLIENT_USER_ID]
         text = send.calls[0]["text"]
-        assert "Вы записаны" in text
+        assert "Запись подтверждена" in text
         assert "УЗ-кавитация — 1 зона" in text
         assert "Тихонова Ольга" in text
         assert "22.05.2026 в 15:00" in text
@@ -693,7 +693,7 @@ class TestPrepaymentFlow:
         send: SendRecorder,
         django_capture_on_commit_callbacks: Any,
     ) -> None:
-        """«Вы записаны» before payment would be untrue."""
+        """«Запись подтверждена» before payment would be untrue."""
 
         with django_capture_on_commit_callbacks(execute=True):
             handle_booking_created(_created_envelope(status="awaiting_payment"))
@@ -785,7 +785,7 @@ class TestSalonAddress:
         tenant.refresh_from_db()
         _notify(tenant, client_bot_user)
         text = send.calls[0]["text"]
-        assert "Вы записаны" in text
+        assert "Запись подтверждена" in text
         assert "Адрес: ул. Карпинского, 33А" in text
 
     def test_a_salon_that_said_no_address_is_not_named_twice(
@@ -803,4 +803,4 @@ class TestSalonAddress:
     ) -> None:
         assert tenant.address is None  # зеркало молчит — как у пилотного салона
         _notify(tenant, client_bot_user)
-        assert "Адрес: Уточните адрес в салоне" in send.calls[0]["text"]
+        assert "Адрес: Уточни адрес в салоне" in send.calls[0]["text"]

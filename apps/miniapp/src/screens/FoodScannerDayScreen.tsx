@@ -24,6 +24,7 @@ import { useScreenBack } from "../hooks/useScreenBack";
 import { ApiError } from "../lib/api";
 import type { FoodDiaryEntry } from "../lib/customer-wellness";
 import { dayLabel, getDiaryDay, type DiaryDay } from "../lib/diary-days";
+import { aiCaloriesOf, aiKcalPhrase } from "../lib/format";
 import {
   MEAL_TYPE_ICON,
   MEAL_TYPE_LABEL,
@@ -229,6 +230,15 @@ export function FoodScannerDayScreen() {
                         {showNumbers && entry.calories != null && (
                           <span className="food-scanner-diary__entry-cal">
                             {DAY_COPY.kcal(entry.calories)}
+                          </span>
+                        )}
+                        {/* DRF-2761 — оценка калорий ИИ видна в записи
+                            (решение владельца 02.10), всегда с пометкой
+                            «Оценка ИИ». Тот же выключатель чисел, что у
+                            проверенного; в итог дня не входит. */}
+                        {showNumbers && aiCaloriesOf(entry) != null && (
+                          <span className="food-scanner-diary__entry-cal" data-testid="ai-kcal">
+                            {aiKcalPhrase(aiCaloriesOf(entry) as number)}
                           </span>
                         )}
                         {/* DRF-2455 — БЖУ приходили в ответе и не

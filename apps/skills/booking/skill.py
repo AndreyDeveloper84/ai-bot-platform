@@ -68,8 +68,9 @@ things are settled here and are not tuning knobs:
   the day Ayla starts sending it shows up instead of being guessed at.
 
 Scope, stated plainly: this is the conversational channel's routing
-policy, not a platform-wide interlock. No other booking entry point
-reads the flag.
+policy, not a bot-wide interlock. No other booking entry point of the bot
+reads the flag. The catalog enforces its own gate server-side when the
+booking is created (DRF-2614; see ``_service_requires_health_check``).
 
 ### Deterministic callback short-circuits
 
@@ -158,6 +159,7 @@ from apps.integrations.ayla.offer_refusal import OFFER_NOT_SELLABLE_SLUG, client
 from apps.skills.booking.provider import YClientsScheduleUnavailableError
 from apps.skills.booking.prompts import BrandVoiceConfig, build_booking_prompt
 from apps.skills.booking.tools import (
+    INVALID_ARGUMENT,
     BOOKING_TOOL_SPECS,
     BUY_CERTIFICATE_TOOL_SPEC,
     CALC_PRICE_TOOL_SPEC,
@@ -226,13 +228,13 @@ _HEALTH_CHECK_HANDOFF_TEXT = HANDOFF_TEXT
 # Buttons carry the data — text only frames the choice. Kept short
 # because MAX inline_keyboard wraps below the message body and the
 # user reads the buttons, not the prose.
-_MASTER_PICK_PROMPT = "Выберите мастера:"
+_MASTER_PICK_PROMPT = "Выбери мастера:"
 
 # Same pattern for slot picking after show_slots returns candidates.
-_SLOT_PICK_PROMPT = "Выберите время:"
+_SLOT_PICK_PROMPT = "Выбери время:"
 
 # Date picker — shown after master pick, before slot listing.
-_DATE_PICK_PROMPT = "Выберите дату:"
+_DATE_PICK_PROMPT = "Выбери дату:"
 
 # DRF-1474 — the SAME picker, expanded. Live pilot 04.09:
 #
@@ -259,8 +261,8 @@ _DATE_PICKER_FALLBACK_NO_DATES = "У выбранного мастера нет 
 # the flow just performed; the authoritative answer is still `create` with
 # its 409 (docs/OD_SALON_P0_CONTRACT.md).
 _PART_PICK_PROMPT = "Когда удобно {day}?"
-_PART_SLOT_PROMPT = "{day}, {part} — выберите время:"
-_HEARD_SLOT_PROMPT = "Вы просили {heard} — вот что есть:"
+_PART_SLOT_PROMPT = "{day}, {part} — выбери время:"
+_HEARD_SLOT_PROMPT = "Была просьба: {heard} — вот что есть:"
 _DAY_UNAVAILABLE_PROMPT = "На {day} у мастера свободного времени нет. Вот ближайшие дни:"
 # DRF-1490 — the same sentence, for the case where there is nothing to put
 # under it. «Вот ближайшие дни:» ends in a colon and promises a list; a
@@ -270,7 +272,7 @@ _DAY_UNAVAILABLE_PROMPT = "На {day} у мастера свободного в�
 # promising instead of promising and not delivering.
 _DAY_UNAVAILABLE_NO_DATES = (
     "На {day} у мастера свободного времени нет, "
-    "других свободных дней у него сейчас не вижу. Выберите другого мастера."
+    "других свободных дней у него сейчас не вижу. Выбери другого мастера."
 )
 _PART_UNAVAILABLE_PROMPT = "{day} {part} у мастера свободного времени нет. Есть так:"
 _PART_EMPTY_PROMPT = "Свободного времени на {part} в этот день нет. Вот весь день:"
@@ -317,17 +319,17 @@ _MAX_DAY_CHIPS = 3
 #
 # Every one of them exits through :func:`_refuse_callback`, which is what
 # guarantees the journal line and the user's line agree.
-_STALE_CONTEXT_TEXT = "Контекст записи устарел. Начните выбор услуги заново."
+_STALE_CONTEXT_TEXT = "Контекст записи устарел. Начни выбор услуги заново."
 _BROKEN_CALLBACK_TEXT = (
     "Эта кнопка пришла без части данных — не вижу, что было выбрано. "
-    "Выберите услугу ещё раз, пожалуйста."
+    "Выбери услугу ещё раз, пожалуйста."
 )
 _CONTEXT_GONE_TEXT = (
-    "Не нахожу этого мастера или эту услугу в расписании салона. Выберите услугу заново."
+    "Не нахожу этого мастера или эту услугу в расписании салона. Выбери услугу заново."
 )
-_SLOT_TAKEN_PROMPT = "Это время уже занято. Выберите другое:"
+_SLOT_TAKEN_PROMPT = "Это время уже занято. Выбери другое:"
 _SLOT_TAKEN_NO_ALTERNATIVES = (
-    "Это время уже занято, и на эту дату свободного времени больше нет. Выберите другую дату:"
+    "Это время уже занято, и на эту дату свободного времени больше нет. Выбери другую дату:"
 )
 # DRF-1490 / OPEN_DECISIONS §25 п.5 — «выберите другую дату» without a date
 # picker is an instruction the person cannot follow: the free-text branch of
@@ -336,7 +338,7 @@ _SLOT_TAKEN_NO_ALTERNATIVES = (
 # other free day, and it names a step that exists.
 _SLOT_TAKEN_NO_DATES = (
     "Это время уже занято, и других свободных дат у этого мастера сейчас не вижу. "
-    "Выберите другого мастера."
+    "Выбери другого мастера."
 )
 
 # How many dates to render in the picker. YClients usually returns
@@ -368,7 +370,7 @@ _MAX_SLOT_BUTTONS = 24
 
 _SLOT_OVERFLOW_SUFFIX = (
     "\n\nПоказываю первые {shown} из {total}. "
-    "Если нужного времени в списке нет — напишите, во сколько вам удобно."
+    "Если нужного времени в списке нет — напиши, во сколько тебе удобно."
 )
 
 # E0#1 Variant A (founder verdict 2026-06-02) — cap on pre-injected
@@ -393,8 +395,8 @@ _FLOW_STATE_TTL = timedelta(minutes=10)
 _FLOW_STAGE_AWAITING_SELECTION = "awaiting_selection"
 
 _FLOW_ABORT_REPLIES = {
-    "reschedule": "Хорошо, не переношу запись. Если передумаете — напишите.",
-    "cancel": "Хорошо, не отменяю запись. Если передумаете — напишите.",
+    "reschedule": "Хорошо, не переношу запись. Если передумаешь — напиши.",
+    "cancel": "Хорошо, не отменяю запись. Если передумаешь — напиши.",
 }
 
 
@@ -642,7 +644,7 @@ class BookingSkill:
             if master_id is None:
                 logger.warning("booking.pick_master.bad_id raw=%r", raw_payload)
                 return _build_skill_result(
-                    text="Не удалось распознать выбор мастера. Напишите имя ещё раз?",
+                    text="Не удалось распознать выбор мастера. Напиши имя ещё раз?",
                     tool_calls_made=[],
                     confidence=None,
                 )
@@ -725,7 +727,7 @@ class BookingSkill:
             except (TypeError, ValueError):
                 logger.warning("booking.pick_date.bad_payload raw=%r", payload)
                 return _build_skill_result(
-                    text="Не удалось распознать дату. Попробуйте ещё раз.",
+                    text="Не удалось распознать дату. Попробуй ещё раз.",
                     tool_calls_made=[],
                     confidence=None,
                 )
@@ -735,7 +737,7 @@ class BookingSkill:
             if master_id is None:
                 logger.warning("booking.pick_date.bad_payload raw=%r", payload)
                 return _build_skill_result(
-                    text="Не удалось распознать дату. Попробуйте ещё раз.",
+                    text="Не удалось распознать дату. Попробуй ещё раз.",
                     tool_calls_made=[],
                     confidence=None,
                 )
@@ -1102,8 +1104,11 @@ class BookingSkill:
             confirmation=_confirmation_payload(tool_result),
             pending=_pending_payload(tool_result),
             user_bookings=_bookings_payload(tool_result, tool_name),
+            bookings_check_failed=tool_result.bookings_check_failed,
             price=_price_payload(tool_result),
             certificate=_certificate_payload(tool_result),
+            refusal=_refusal_payload(tool_result, tool_name),
+            no_slots=_no_slots_payload(tool_result, tool_name),
         )
         # #473 LLM Y3 envelope expansion: same rationale as Phase 1
         # call site — catch all LLMError variants and produce a
@@ -1219,7 +1224,7 @@ def _dispatch_tool(
         # cross-turn yet). Fall back to the full staff list as the
         # allow-set so legitimate flows aren't blocked while still
         # rejecting outright fabrications.
-        allow_masters = _fetch_master_ids(yclients)
+        allow_masters = _fetch_master_ids(yclients, tenant)
         result = show_slots(
             client=yclients,
             arguments=arguments,
@@ -1228,6 +1233,10 @@ def _dispatch_tool(
         )
         if result.error == "invalid_master_id":
             return result, "booking_invalid_master_id"
+        # DRF-2667: аргумент модели не того типа — не сбой провайдера и не
+        # передача менеджеру; как ``invalid_datetime``, ответ собирает Phase 3.
+        if result.error == INVALID_ARGUMENT:
+            return result, ""
         # DRF-997: transient schedule outage (e.g. 429) is returned to the
         # user as a retry message, not a manager handoff.
         if result.error == "schedule_unavailable":
@@ -1237,8 +1246,8 @@ def _dispatch_tool(
         return result, ""
 
     if tool_name == CONFIRM_BOOKING_TOOL_SPEC["name"]:
-        allow_masters = _fetch_master_ids(yclients)
-        master_lookup = _fetch_master_lookup(yclients)
+        allow_masters = _fetch_master_ids(yclients, tenant)
+        master_lookup = _fetch_master_lookup(yclients, tenant)
         result = confirm_booking(
             client=yclients,
             arguments=arguments,
@@ -1253,6 +1262,10 @@ def _dispatch_tool(
             return result, "booking_invalid_master_id"
         if result.error == "invalid_service_id":
             return result, "booking_invalid_service_id"
+        # DRF-2667: аргумент модели не того типа — не сбой провайдера и не
+        # передача менеджеру; как ``invalid_datetime``, ответ собирает Phase 3.
+        if result.error == INVALID_ARGUMENT:
+            return result, ""
         # DRF-997: transient schedule outage (e.g. 429) is returned to the
         # user as a retry message, not a manager handoff.
         if result.error == "schedule_unavailable":
@@ -1275,6 +1288,10 @@ def _dispatch_tool(
         )
         if result.error == "invalid_record_id":
             return result, "booking_invalid_record_id"
+        # DRF-2667: аргумент модели не того типа — не сбой провайдера и не
+        # передача менеджеру; как ``invalid_datetime``, ответ собирает Phase 3.
+        if result.error == INVALID_ARGUMENT:
+            return result, ""
         # DRF-997: transient schedule outage (e.g. 429) is returned to the
         # user as a retry message, not a manager handoff.
         if result.error == "schedule_unavailable":
@@ -1300,8 +1317,9 @@ def _dispatch_tool(
             # NOT a handoff — the LLM should phrase the clarification
             # itself ("на это время уже занято — могу подобрать
             # соседний слот?"). Return ``result`` with no handoff
-            # reason; the skill's second LLM call will see the empty
-            # ``pending`` field and pick the clarification template.
+            # reason; the second LLM call is told about the refusal by
+            # :func:`_refusal_payload` (DRF-2672 — before it, the call
+            # saw nothing at all: there is no «clarification template»).
             return result, ""
         if result.error == "invalid_datetime":
             return result, ""
@@ -1353,9 +1371,9 @@ def _dispatch_tool(
     return BookingToolResult(error="unknown_tool"), "booking_unknown_tool"
 
 
-def _fetch_master_ids(yclients: Any) -> set[int | str]:
+def _fetch_master_ids(yclients: Any, tenant: Any) -> set[int | str]:
     try:
-        return {_id_key(s.id) for s in yclients.get_staff(staff_id=None)}
+        return set(_roster_lookup(tenant, yclients.get_staff()))
     except YClientsScheduleUnavailableError:
         # DRF-997: do not silently disable the anti-hallucination guard on a
         # transient 429. Let the caller surface the retry text.
@@ -1364,14 +1382,62 @@ def _fetch_master_ids(yclients: Any) -> set[int | str]:
         return set()
 
 
-def _fetch_master_lookup(yclients: Any) -> dict[int | str, str]:
+def _fetch_master_lookup(yclients: Any, tenant: Any) -> dict[int | str, str]:
     try:
-        return build_master_lookup(yclients.get_staff(staff_id=None))
+        return _roster_lookup(tenant, yclients.get_staff())
     except YClientsScheduleUnavailableError:
         # DRF-997: same guard as _fetch_master_ids.
         raise
     except Exception:  # noqa: BLE001
         return {}
+
+
+def _roster_lookup(tenant: Any, staff_rows: list[Any]) -> dict[int | str, str]:
+    """``id → name`` for the roster, under BOTH ids a master goes by (DRF-2695).
+
+    The roster comes from the catalog and names a master by the catalog id.
+    Inside the bot a master is the mirror row's primary key — the concierge
+    card and every ``cb:book:`` button drawn from it carry that — and for a
+    glued invite or a solo master the two differ (DRF-1933). Checked against
+    the catalog ids alone, such a master was drawn days and times and then
+    refused at the part-of-day and slot taps as unknown.
+
+    So a roster master whose mirror row in this salon has another primary
+    key is listed under that key too. Only an alias: a master not on the
+    roster gets none, so whatever the roster stands for — this salon's, and
+    a live catalog profile — holds for both ids. Legacy int ids (flag OFF)
+    name no mirror row and pass through unchanged.
+    """
+    lookup = build_master_lookup(staff_rows)
+    catalog_ids = []
+    for key in lookup:
+        try:
+            catalog_ids.append(uuid.UUID(str(key)))
+        except (ValueError, AttributeError, TypeError):
+            continue
+    if not catalog_ids:
+        return lookup
+    from apps.catalog.models import CatalogMaster
+
+    for pk, catalog_id in CatalogMaster.all_tenants.filter(
+        tenant=tenant, catalog_specialist_id__in=catalog_ids
+    ).values_list("pk", "catalog_specialist_id"):
+        lookup.setdefault(str(pk), lookup[str(catalog_id)])
+    return lookup
+
+
+def _mirror_master_q(master_key: uuid.UUID) -> Any:
+    """The edge's master, named by mirror key OR by catalog id (DRF-2695).
+
+    ``MasterService.master`` is the mirror row, but the id in hand may be the
+    catalog's — that is what the roster, the master cards and the model
+    carry. Read by primary key alone, a glued or solo master's edge was «not
+    found», and the health gate, closed on unknown, sent every booking of
+    theirs to a human.
+    """
+    from django.db.models import Q
+
+    return Q(master_id=master_key) | Q(master__catalog_specialist_id=master_key)
 
 
 # ---------------------------------------------------------------------------
@@ -1439,7 +1505,7 @@ def _offer_refusal_for_edge(
     from apps.catalog.models import MasterService
 
     edge = MasterService.all_tenants.filter(
-        tenant=tenant, master_id=master_key, service__ayla_service_id=service_key
+        _mirror_master_q(master_key), tenant=tenant, service__ayla_service_id=service_key
     )
     if edge.sellable().exists() or not edge.exists():
         return None
@@ -1488,8 +1554,8 @@ def _resolved_health_check_for_edge(
         return None
     return (
         MasterService.all_tenants.filter(
+            _mirror_master_q(master_key),
             tenant=tenant,
-            master_id=master_key,
             service__ayla_service_id=service_key,
         )
         .values_list("resolved_requires_health_check", flat=True)
@@ -1533,10 +1599,18 @@ def _service_requires_health_check(
     Note what this gate is and is not. No other booking entry point in this
     codebase consults it — ``apps/booking/services/create.py``,
     ``apps/admin_api/views_booking_create.py`` and the miniapp all create
-    bookings without reading the flag — and Ayla's ``appointments`` app does
-    not enforce it server-side either. It is the conversational channel's
-    routing policy ("hand this one to a human"), not a system-wide safety
-    interlock.
+    bookings without reading the flag. Within the bot it is the
+    conversational channel's routing policy ("hand this one to a human"),
+    not a bot-wide interlock.
+
+    DRF-2614 — this paragraph used to add «and Ayla's ``appointments`` app
+    does not enforce it server-side either». That stopped being true: the
+    catalog refuses the booking itself, in
+    ``appointments/application/services/create_booking_service.py``
+    (``check_health_screening``), outside the time-override branch and
+    fail-closed on an unknown verdict. So the server-side interlock exists —
+    in the catalog, not here. Do not rebuild it in the bot on the strength
+    of the old sentence.
     """
     if _booking_via_ayla():
         resolved = _resolved_health_check_for_edge(tenant, master_id, service_id)
@@ -1894,7 +1968,7 @@ def _handle_pick_slot_callback(
     if len(parts) != 3:
         logger.warning("booking.pick_slot.bad_payload raw=%r", raw_payload)
         return _build_skill_result(
-            text="Не удалось распознать время. Напишите ещё раз?",
+            text="Не удалось распознать время. Напиши ещё раз?",
             tool_calls_made=[],
             confidence=None,
         )
@@ -1933,7 +2007,7 @@ def _handle_pick_slot_callback(
     # failure here is a handoff, NOT a "stale context" verdict — the two
     # failure modes must stay distinguishable for the user.
     try:
-        staff_rows = yclients.get_staff(staff_id=None)
+        staff_rows = yclients.get_staff()
     except (YClientsAPIError, YClientsUnavailableError) as exc:
         logger.warning("booking.pick_slot.staff_failed err=%s", exc)
         return _handoff(
@@ -1942,8 +2016,8 @@ def _handle_pick_slot_callback(
             text=_FALLBACK_HANDOFF_TEXT,
             tenant_id=tenant_id,
         )
-    allowed_master_ids = {_id_key(s.id) for s in staff_rows}
-    master_lookup = build_master_lookup(staff_rows)
+    master_lookup = _roster_lookup(tenant, staff_rows)
+    allowed_master_ids = set(master_lookup)
     if master_id not in allowed_master_ids:
         return _refuse_callback(
             step="pick_slot",
@@ -2471,7 +2545,7 @@ def _slots_in_part(slots: list, part: str) -> list:
 
 
 def _slot_prompt(date: str, part: str | None, today: Any, *, heard: str = "") -> str:
-    """«Завтра вечером — вот что свободно:» / «Выберите время:».
+    """«Завтра вечером — вот что свободно:» / «Выбери время:».
 
     ``heard`` carries the user's own words when the narrowing came from what
     they SAID rather than from a tap, so the reply shows the request was
@@ -2723,6 +2797,32 @@ def _certificate_payload(result: BookingToolResult) -> dict[str, Any] | None:
     }
 
 
+def _refusal_payload(result: BookingToolResult, tool_name: str) -> dict[str, Any] | None:
+    """DRF-2672 — the refusal itself, for the second LLM call.
+
+    Every other payload here reads a success field, so a refusal that is
+    not a handoff reached the second call as an empty prompt — the model
+    answered blind. ``buy_certificate`` is the one tool that already
+    reports its own failure (:func:`_certificate_payload`), so it is left
+    to that block rather than told twice.
+    """
+    if not result.error or result.certificate is not None:
+        return None
+    return {"tool": tool_name, "error": result.error}
+
+
+def _no_slots_payload(result: BookingToolResult, tool_name: str) -> dict[str, Any] | None:
+    """DRF-2672 — ``show_slots`` succeeded and found no free time.
+
+    Not an error, so :func:`_refusal_payload` does not see it, and
+    :func:`_slots_payload` is ``None`` on an empty list — the «нет» stayed
+    in ``result.text`` and never reached the model.
+    """
+    if tool_name != SHOW_SLOTS_TOOL_SPEC["name"] or result.error or result.slots:
+        return None
+    return {"rendered_text": result.text}
+
+
 def _bookings_payload(result: BookingToolResult, tool_name: str) -> list[dict[str, Any]] | None:
     if tool_name != SHOW_MY_BOOKINGS_TOOL_SPEC["name"]:
         return None
@@ -2732,6 +2832,8 @@ def _bookings_payload(result: BookingToolResult, tool_name: str) -> list[dict[st
             "visit_at": b.visit_at,
             "master_name": b.master_name,
             "service_name": b.service_name,
+            # DRF-2701 — расписание прочитано, записи в нём нет.
+            "unconfirmed": b.unconfirmed,
         }
         for b in result.bookings
     ]

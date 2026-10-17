@@ -61,6 +61,7 @@ from django.conf import settings
 
 from apps.integrations.ayla.url_builder import AylaUrlBuilder, AylaUrlError
 from apps.integrations.ayla.request_id import with_request_id
+from apps.integrations.ayla.log_ref import external_user_log_ref
 
 logger = logging.getLogger(__name__)
 
@@ -287,8 +288,8 @@ class WellnessContextHttpClient:
             # В лог — только класс ошибки и адресат-идентификатор, не URL
             # с query и не тело: тела на этом контуре могут нести значения.
             logger.warning(
-                "wellness_context.http.network_failure ext=%s exc=%s",
-                external_user_id,
+                "wellness_context.http.network_failure ext_ref=%s exc=%s",
+                external_user_log_ref(external_user_id),
                 type(exc).__name__,
             )
             raise WellnessContextUnavailableError(f"network: {type(exc).__name__}") from exc
@@ -303,8 +304,8 @@ class WellnessContextHttpClient:
             )
         if response.status_code >= 500:
             logger.warning(
-                "wellness_context.http.server_error ext=%s status=%d",
-                external_user_id,
+                "wellness_context.http.server_error ext_ref=%s status=%d",
+                external_user_log_ref(external_user_id),
                 response.status_code,
             )
             raise WellnessContextUnavailableError(f"server: HTTP {response.status_code}")
