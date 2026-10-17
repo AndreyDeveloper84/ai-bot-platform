@@ -187,6 +187,7 @@ class _Wired:
     def __init__(self) -> None:
         self.booking: list[str] = []
         self.concierge: list[str] = []
+        self.upcoming = None  # DRF-2982 — что вернёт список предстоящих визитов
 
 
 @pytest.fixture
@@ -214,6 +215,14 @@ def wired(monkeypatch, settings, mock_send, fake_redis):
 
     monkeypatch.setattr("apps.skills.registry.dispatch", fake_dispatch)
     monkeypatch.setattr(max_handler, "orchestrate_turn", fake_turn)
+    # DRF-2982 — «отмени запись …» читает предстоящие визиты; по умолчанию их
+    # нет (ход идёт дальше, как до DRF-2982), сеть не трогается.
+    from apps.booking.services.records import VisitsResult
+    from apps.orchestrator import visits as visits_mod
+
+    seen.upcoming = VisitsResult(status="empty")
+    monkeypatch.setattr(visits_mod, "list_upcoming", lambda **kwargs: seen.upcoming)
+    monkeypatch.setattr(visits_mod, "list_visits", lambda **kwargs: VisitsResult(status="empty"))
     return seen
 
 
@@ -763,6 +772,34 @@ class TestAStopCommandMidBooking:
 
         assert wired.concierge == ["отмени запись на завтра", "ту, что на завтра"]
         assert wired.booking == [f"cb:book:pick_master:{master.id}:{_LYMPH}"]
+
+    def test_with_a_visit_ahead_the_stop_shows_the_visits_and_drops_the_context(
+        self, wired, salon, mock_send
+    ) -> None:
+        """DRF-2982 — есть что отменять: вместо консьержа — список визитов с
+        «Отменить», и контекст недописанной записи снят, как и без визитов."""
+        from apps.booking.services.records import Visit, VisitsResult
+
+        wired.upcoming = VisitsResult(
+            status="ok",
+            visits=(
+                Visit(
+                    appointment_id=str(uuid.uuid4()),
+                    service_name="Маникюр",
+                    master_name="Анна",
+                    start_at="2026-08-26T12:00:00+00:00",
+                    price=None,
+                ),
+            ),
+        )
+        tenant, master, catalog = salon
+        _tap_with_service(tenant, master, catalog["lymph"].id)
+
+        GlobalMaxHandler()(_raw(_typed("отмени запись на завтра", "mm-stop-visits")))
+
+        assert "Маникюр" in mock_send[-1]["text"]
+        assert load_booking_context(_global_conversation()) is None
+        assert wired.concierge == []  # empty-assert-ok: ответил список визитов — assert выше
 
     def test_twin_a_day_correction_still_continues_the_booking(self, wired, salon) -> None:
         tenant, master, catalog = salon

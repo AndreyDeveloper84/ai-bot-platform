@@ -36,7 +36,7 @@ from django.utils import timezone
 from apps.booking.models import BookingRequest, RemoteBookingProxy
 from apps.booking.services.records import Visit, VisitsResult
 from apps.channels.max import handler as max_handler
-from apps.conversations.models import Conversation
+from apps.conversations.models import Conversation, Message
 from apps.handoff.models import AdminTask
 from apps.handoff.services import resolve_admin_task
 from apps.identity.models import BotUser
@@ -471,3 +471,174 @@ class TestDetectorBoundaries:
 
         assert mock_send[-1]["text"] == "Какая услуга интересует?"
         spy_concierge.assert_called_once()
+
+
+# --------------------------------------------------------------------------- #
+# DRF-2982 — «отмени запись на завтра» → список визитов с «Отменить»          #
+# --------------------------------------------------------------------------- #
+
+
+def _global_conversation(user_id: int = 222):
+    from apps.conversations.services import resolve_active_global_conversation
+    from apps.identity.services import resolve_or_create_global_bot_user
+
+    bot_user = resolve_or_create_global_bot_user(
+        channel="max", channel_user_id=str(user_id), chat_id=str(user_id)
+    )
+    return resolve_active_global_conversation(bot_user, create_if_missing=False)
+
+
+class TestCancelGoesToVisits:
+    """Замер на dev ``79b15ec3``: «отмени запись на завтра», «удали мою запись»,
+    «сними меня с записи» и ещё десяток уходили консьержу — «Какая услуга
+    интересует?», а глагола отмены у него нет. Отмена — на карточке визита."""
+
+    @pytest.mark.parametrize(
+        "text", ["отмени запись на завтра", "удали мою запись к мастеру", "сними меня с записи"]
+    )
+    def test_a_cancel_shows_the_visits_with_their_cancel_button(
+        self, mock_send, fake_redis, spy_concierge, backend, text
+    ):
+        backend["upcoming"] = VisitsResult(status="ok", visits=(_visit(),))
+
+        _run_global(text, mid="c1")
+
+        assert "УЗ-кавитация" in mock_send[-1]["text"]
+        assert backend["subjects"] == ["222", "222"]  # предстоящие и прошлые
+        spy_concierge.assert_not_called()
+        last = (
+            Message.all_tenants.filter(conversation=_global_conversation(), role="assistant")
+            .order_by("-created_at")
+            .first()
+        )
+        assert last is not None and last.action_type == "booking_cancel_lookup"
+
+    def test_with_nothing_ahead_the_turn_goes_on_as_before(
+        self, mock_send, fake_redis, spy_concierge, backend
+    ):
+        """Ответ списка без предстоящих — про прошлые визиты и салоны, на отмену
+        он не отвечает; нового текста без слова владельца нет — ход дальше."""
+        _run_global("отмени запись на завтра", mid="c2")
+
+        spy_concierge.assert_called_once()
+        assert mock_send[-1]["text"] == "Какая услуга интересует?"
+
+    def test_an_unreadable_backend_is_said_honestly(
+        self, mock_send, fake_redis, spy_concierge, backend
+    ):
+        backend["upcoming"] = VisitsResult(status="backend_unavailable")
+
+        _run_global("отмени запись на завтра", mid="c3")
+
+        assert "позже" in mock_send[-1]["text"].lower()
+        spy_concierge.assert_not_called()
+
+    def test_a_failing_route_does_not_cost_the_turn(
+        self, mock_send, fake_redis, spy_concierge, backend, monkeypatch
+    ):
+        def broken(**kwargs):
+            raise RuntimeError("backend exploded")
+
+        monkeypatch.setattr(visits_mod, "list_upcoming", broken)
+
+        _run_global("отмени запись на завтра", mid="c4")
+
+        spy_concierge.assert_called_once()
+        assert mock_send[-1]["text"] == "Какая услуга интересует?"
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "удали запись переписки",  # бывает просьбой стереть ПДн
+            "удали запись голосового",
+            "удали все записи обо мне",
+            "забудь про запись",
+            "удали запись в дневнике питания",
+            "сколько стоит отмена записи?",
+        ],
+    )
+    def test_a_record_that_is_not_a_visit_still_goes_to_the_concierge(
+        self, mock_send, fake_redis, spy_concierge, backend, text
+    ):
+        backend["upcoming"] = VisitsResult(status="ok", visits=(_visit(),))
+
+        _run_global(text, mid="c5")
+
+        spy_concierge.assert_called_once()
+        assert mock_send[-1]["text"] == "Какая услуга интересует?"
+        assert backend["subjects"] == []  # empty-assert-ok: ход взял консьерж — assert выше
+
+    def test_after_a_diary_reply_a_bare_record_is_the_diary(
+        self, mock_send, fake_redis, spy_concierge, backend
+    ):
+        """Под «Записала: Борщ — 250 ккал.» — «🗑 Удалить запись»; слова «дневник» нет."""
+        backend["upcoming"] = VisitsResult(status="ok", visits=(_visit(),))
+        _run_global("привет", mid="c6a")
+        conversation = _global_conversation()
+        Message.all_tenants.create(
+            tenant=conversation.tenant,
+            conversation=conversation,
+            role="assistant",
+            content="Записала: Борщ — 250 ккал.",
+            action_type="food_logged",
+        )
+        spy_concierge.reset_mock()
+
+        _run_global("удали запись", mid="c6b")
+        diary_turn_concierge = spy_concierge.call_count
+        _run_global("удали запись на завтра", mid="c6c")
+
+        assert diary_turn_concierge == 1
+        assert "УЗ-кавитация" in mock_send[-1]["text"]
+        assert spy_concierge.call_count == 1  # «на завтра» — визит, консьерж не звался
+
+    def test_the_cancel_turn_writes_no_facts_about_the_person(
+        self, mock_send, fake_redis, spy_concierge, backend, monkeypatch
+    ):
+        """«Отмени запись на вечер, к Ольге» — не «приходит вечером», не «любимый
+        мастер — Ольга»: смысл наоборот. Близнец — ход «покажи мои записи»."""
+        from unittest.mock import MagicMock
+
+        from apps.orchestrator.memory_announce import WriteSink
+
+        spy = MagicMock(return_value=WriteSink())
+        monkeypatch.setattr(max_handler, "record_turn_facts", spy)
+        backend["upcoming"] = VisitsResult(status="ok", visits=(_visit(),))
+
+        _run_global("покажи мои записи", mid="c7a")
+        lookup_writes = spy.call_count
+        _run_global("отмени запись на вечер к Ольге", mid="c7b")
+
+        assert lookup_writes >= 1
+        assert "УЗ-кавитация" in mock_send[-1]["text"]
+        assert spy.call_count == lookup_writes
+
+    def test_a_first_contact_cancel_is_not_swallowed_by_the_welcome(
+        self, mock_send, fake_redis, spy_concierge, backend, settings
+    ):
+        settings.GLOBAL_BOT_ONBOARDING = True
+        backend["upcoming"] = VisitsResult(status="ok", visits=(_visit(),))
+
+        _run_global("отмени запись на завтра", mid="c8", user_id=333, chat_id=333)
+
+        assert "УЗ-кавитация" in mock_send[-1]["text"]
+        assert "Привет! Я Ayla" not in mock_send[-1]["text"]
+
+    def test_with_memory_on_forget_all_is_still_a_memory_command(
+        self, mock_send, fake_redis, spy_concierge, backend
+    ):
+        """Маршрут стоит ниже команд памяти: «удали всё» — запрос «забудь всё»."""
+        from apps.consent.services import record_global_consent
+        from apps.identity.services import resolve_or_create_global_bot_user
+        from apps.persona.memory_commands import FORGET_ALL_PROMPT
+
+        bot_user = resolve_or_create_global_bot_user(
+            channel="max", channel_user_id="444", chat_id="444", ayla_user_id=uuid.uuid4()
+        )
+        record_global_consent(bot_user, source="welcome")
+        backend["upcoming"] = VisitsResult(status="ok", visits=(_visit(),))
+
+        _run_global("удали всё", mid="c9", user_id=444, chat_id=444)
+
+        assert mock_send[-1]["text"] == FORGET_ALL_PROMPT
+        assert backend["subjects"] == []  # empty-assert-ok: ответила команда памяти — assert выше
