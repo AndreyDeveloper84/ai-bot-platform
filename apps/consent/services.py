@@ -165,11 +165,14 @@ def record_global_consent(
     the general chat, extending the food-scanner server journal (#956) to the
     marketplace welcome flow.
 
-    Unlike :func:`grant` this does NOT emit the ``customer.consent.changed`` domain
-    event: that eventbus helper is tenant-scoped and the sentinel tenant is not a
-    real salon. The local ``consent_granted`` analytics event + audit row are
-    enough for the pilot proof-of-consent; the domain-bus mirror is post-pilot
-    (S1.7 memory wiring, #1054).
+    Like :func:`grant` it publishes ``customer.consent.changed`` (granted=True)
+    on the domain bus, under the row's own (sentinel) tenant (DRF-2974). The
+    withdrawal of the same row already went to the bus — :func:`withdraw` runs
+    in ``tenant_scope(shell.tenant)``, the sentinel for a chat shell — so
+    without the grant the catalog knew «withdrawn» and never heard the new
+    grant: a person who withdrew the food diary and agreed again in the chat
+    was still refused by the catalog's diary writes (``CONSENT_REQUIRED
+    withdrawn``) and dropped from the beauty insight.
 
     **Idempotent for sequential re-taps.** Uses ``get_or_create`` keyed on the
     active grant ``(bot_user, consent_type, granted=True, withdrawn_at=None)`` so a
@@ -254,6 +257,24 @@ def record_global_consent(
                     "global": True,
                 },
             )
+            # Domain bus — taxonomy §3.2 customer.consent.changed, as in
+            # :func:`grant`. Swallowed so a bus outage never breaks the grant.
+            try:
+                eventbus_services.emit_customer_consent_changed(
+                    customer_id=str(bot_user.id),
+                    consent_type=consent_type,
+                    granted=True,
+                    granted_at=record.captured_at.isoformat(),
+                    granted_via=source[:80],
+                    actor_id=str(bot_user.id),
+                    tenant=sentinel,
+                )
+            except Exception:  # noqa: BLE001 — domain telemetry never breaks the grant
+                logger.exception(
+                    "consent.grant(global).eventbus_emit_failed bot_user=%s type=%s",
+                    bot_user.id,
+                    consent_type,
+                )
 
         if created:
             transaction.on_commit(_emit_grant)
