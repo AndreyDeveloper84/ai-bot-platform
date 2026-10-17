@@ -75,7 +75,13 @@ from apps.orchestrator.knowledge_licence import KnowledgeLicence
 from apps.orchestrator.safety.claim_gate import shadow_observe
 from apps.orchestrator.safety.medical_emergency import MEDICAL_EMERGENCY_TEXT_V2
 from apps.orchestrator.safety.outbound import evaluate_action_promise, evaluate_outbound
-from apps.orchestrator.safety.pre_check import SafetyResult, SafetyVerdict, pre_check
+from apps.orchestrator.safety.normalize import without_inner_marks
+from apps.orchestrator.safety.pre_check import (
+    _VERDICT_PRIORITY,
+    SafetyResult,
+    SafetyVerdict,
+    pre_check,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -121,6 +127,35 @@ class SafetyGateOutcome:
     #: ``assess()`` ставит ``rule_id``/``evidence_ref`` по совпавшему
     #: паттерну, а ветка CLARIFY/ALLOW выше отдаёт только строку verdict.
     result: SafetyResult | None = None
+    #: DRF-2922 — вердикт дала копия без знаков внутри предложения, а не текст
+    #: как есть. Для наблюдаемости: сколько тревог добавила копия.
+    normalized: bool = False
+
+
+_PRIORITY = {verdict: rank for rank, verdict in enumerate(_VERDICT_PRIORITY)}
+
+
+def _stricter_check(text: str) -> tuple[SafetyResult, bool]:
+    """``pre_check`` по тексту как есть и по копии без знаков внутри предложения.
+
+    DRF-2922. Многословные шаблоны ждут между словами пробел: набранное «Не
+    хочу, жить.» без копии проходило. Побеждает более строгий вердикт, при
+    равенстве — текст как есть. Копия держит «.», «!», «?» (см.
+    :mod:`apps.orchestrator.safety.normalize`): склеенные предложения давали бы
+    ложные тревоги. Второй проход не нужен, если первый уже кризис или копия
+    совпадает с текстом — так голосу, которому отдаётся копия без всех знаков,
+    достаётся ровно один проход, как раньше.
+    """
+    raw = pre_check(text)
+    if raw.verdict == SafetyVerdict.HANDOFF:
+        return raw, False
+    copy = without_inner_marks(text)
+    if copy == text:
+        return raw, False
+    alt = pre_check(copy)
+    if _PRIORITY[alt.verdict.value] > _PRIORITY[raw.verdict.value]:
+        return alt, True
+    return raw, False
 
 
 def evaluate_inbound(text: str) -> SafetyGateOutcome:
@@ -135,7 +170,7 @@ def evaluate_inbound(text: str) -> SafetyGateOutcome:
     the LLM intent classifier (that is the pipeline's step 6, dead in prod). This
     is the pure-regex guard, which is exactly what catches the red-flag stems.
     """
-    result: SafetyResult = pre_check(text)
+    result, normalized = _stricter_check(text)
     verdict = result.verdict
 
     if verdict == SafetyVerdict.HANDOFF:
@@ -146,6 +181,7 @@ def evaluate_inbound(text: str) -> SafetyGateOutcome:
             reason=result.reason,
             matched_patterns=list(result.matched_patterns),
             result=result,
+            normalized=normalized,
         )
     if verdict == SafetyVerdict.MEDICAL:
         # DRF-2000 (S-2): the «неотложка» group ends the safety-sensitive
@@ -158,6 +194,7 @@ def evaluate_inbound(text: str) -> SafetyGateOutcome:
             reason=result.reason,
             matched_patterns=list(result.matched_patterns),
             result=result,
+            normalized=normalized,
         )
     if verdict == SafetyVerdict.BLOCK:
         return SafetyGateOutcome(
@@ -167,11 +204,16 @@ def evaluate_inbound(text: str) -> SafetyGateOutcome:
             reason=result.reason,
             matched_patterns=list(result.matched_patterns),
             result=result,
+            normalized=normalized,
         )
 
     # CLARIFY + ALLOW → proceed to normal handling.
     return SafetyGateOutcome(
-        allowed=True, verdict=verdict.value, reason=result.reason, result=result
+        allowed=True,
+        verdict=verdict.value,
+        reason=result.reason,
+        result=result,
+        normalized=normalized,
     )
 
 

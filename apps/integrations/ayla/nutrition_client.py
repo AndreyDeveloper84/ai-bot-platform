@@ -32,7 +32,7 @@ Resilience:
   Telegram-alert path on transition.
 * Caller-side retries are out of scope — the bot fires once per turn.
 
-Schema fix note (per memory ``reference_ayla_backend.md``): Ayla nests
+Schema fix note: Ayla nests
 ``norms.*`` under ``data.norms.{daily_kcal, ...}``. The original mysite
 client carried a flat-top-level fallback for backward compat; DRF-270
 removed it. This port matches the DRF-270 state.
@@ -388,6 +388,10 @@ class DiaryDayRow:
     meals_count: int
     kcal: float | None
     has_entries: bool
+    #: DRF-2766 (фаза 2) — сколько записей дня без какого-либо значения
+    #: калорий (итог дня неполный) и сколько вошло в ``kcal`` оценкой ИИ.
+    uncounted_meals: int = 0
+    kcal_ai_included: int = 0
 
 
 @dataclass(frozen=True)
@@ -424,6 +428,32 @@ class DishEstimate:
     #: число дала модель. ``kcal`` при ней ``None``; показывать только с
     #: пометкой «Оценка ИИ».
     kcal_ai_estimate: float | None = None
+    #: DRF-2822 — почему числа ИИ нет (или что оно есть): одно из
+    #: ``KCAL_AI_STATUSES``. ``None`` — каталог поля не прислал (старый) или
+    #: прислал незнакомое значение; карточка тогда говорит нейтрально.
+    kcal_ai_status: str | None = None
+
+
+#: DRF-2822 — статус оценки ИИ, как его ставит каталог в ``food-estimate``.
+KCAL_AI_ESTIMATED = "estimated"
+KCAL_AI_UNAVAILABLE = "unavailable"
+KCAL_AI_DISABLED = "disabled"
+KCAL_AI_STATUSES = frozenset(
+    {
+        KCAL_AI_ESTIMATED,
+        KCAL_AI_UNAVAILABLE,
+        KCAL_AI_DISABLED,
+        "not_attempted",
+        "not_permitted",
+        "not_applicable",
+        "declined",
+    }
+)
+
+
+def _kcal_ai_status(raw: Any) -> str | None:
+    """Знакомый статус — или ``None``: незнакомое значение причиной не называем."""
+    return raw if isinstance(raw, str) and raw in KCAL_AI_STATUSES else None
 
 
 def _float_or_none(raw: Any) -> float | None:
@@ -454,12 +484,40 @@ def _optional_int(raw: Any) -> int | None:
         return None
 
 
+def _optional_float(raw: Any) -> float | None:
+    """Число — или ``None`` (DRF-2766): «итога нет» не становится нулём.
+
+    Булево числом не считается; мусор — ``None``, а не ноль.
+    """
+    if raw is None or isinstance(raw, bool):
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _count(raw: Any) -> int:
+    """Неотрицательный счётчик провода; отсутствие и мусор — ``0``."""
+    if isinstance(raw, bool):
+        return 0
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return 0
+    return value if value > 0 else 0
+
+
 @dataclass(frozen=True)
 class SummaryResponse:
     """Subset of ``NutritionSummaryResponseSerializer`` data we care about."""
 
     date: str
-    calories_total: float
+    #: DRF-2766 (фаза 2) — ``None``: записи за день есть, а калорий ни у одной
+    #: нет (ни проверенного числа, ни оценки ИИ). Это НЕ ноль: раньше здесь
+    #: стояло ``or 0.0``, и человек, записавший еду, видел «0 из N».
+    #: Пустой день каталог отдаёт честным нулём.
+    calories_total: float | None
     #: ``None`` — ОРИЕНТИРА НЕТ. Ayla перестала присылать ключ вовсе
     #: (§82: «Текущая плоская норма калорий для всех удаляется»), и
     #: нормализовать это в ноль на нашей стороне нельзя: ноль здесь
@@ -472,6 +530,12 @@ class SummaryResponse:
     entries: list[dict[str, Any]]
     raw: dict[str, Any]
     ai_comment: str | None = None
+    #: DRF-2766 (фаза 2) — сколько записей вошло в ``calories_total`` оценкой
+    #: ИИ: итог тогда приблизительный («≈ …, включая оценки ИИ»).
+    calories_ai_included: int = 0
+    #: DRF-2766 — сколько записей без какого-либо значения калорий: итог
+    #: неполный. Старый каталог полей не шлёт — ``0``, как было.
+    calories_unscored: int = 0
 
 
 def _targets_source(body: dict[str, Any]) -> str:
@@ -1114,8 +1178,14 @@ class NutritionClient:
         external_user_id: str,
         dish_name: str,
         portion_g: float | None = None,
+        ai_estimate_allowed: bool,
     ) -> DishEstimate:
         """POST ``/api/v1/nutrition/internal/food-estimate/`` — оценка без записи.
+
+        ``ai_estimate_allowed`` (DRF-2845) — можно ли каталогу отдать название
+        блюда внешней модели. Обязателен и без умолчания: каждое место вызова
+        решает это само, прямым вызовом
+        ``apps.consent.ai_food_estimation.estimate_permitted``.
 
         DRF-1837, §109 шаги 2–4: показать «Я распознала так» до того, как
         число стало данными человека. Каталог не пишет ничего.
@@ -1136,7 +1206,10 @@ class NutritionClient:
                 "X-External-User-ID": external_user_id,
             }
         )
-        body: dict[str, Any] = {"dish_name": dish_name}
+        body: dict[str, Any] = {
+            "dish_name": dish_name,
+            "ai_estimate_allowed": bool(ai_estimate_allowed),
+        }
         if portion_g is not None:
             body["portion_g"] = portion_g
 
@@ -1170,6 +1243,7 @@ class NutritionClient:
                 carbs_g=_float_or_none(data.get("carbs_g")),
                 raw=data,
                 kcal_ai_estimate=_float_or_none(data.get("kcal_ai_estimate")),
+                kcal_ai_status=_kcal_ai_status(data.get("kcal_ai_status")),
             )
         if resp.status_code >= 500:
             self._breaker(BreakerPurpose.NUTRITION).record_failure(now=now)
@@ -1192,10 +1266,15 @@ class NutritionClient:
         portion_multiplier: float = 1.0,
         idempotency_key: str | None = None,
         entry_origin: str | None = None,
+        ai_estimate_allowed: bool,
     ) -> FoodLogResponse:
         """POST ``/api/v1/nutrition/internal/food-log/``.
 
         At least one of ``scan_id`` / ``dish_name`` must be provided.
+
+        ``ai_estimate_allowed`` (DRF-2845) — можно ли записи взять сохранённую
+        оценку ИИ. Обязателен, как у :meth:`estimate_dish`: согласие могли
+        отозвать между показом карточки и записью.
         """
         now = time.monotonic()
         if self._breaker(BreakerPurpose.NUTRITION).is_open(now=now):
@@ -1213,6 +1292,7 @@ class NutritionClient:
         body: dict[str, Any] = {
             "meal_type": meal_type,
             "portion_multiplier": portion_multiplier,
+            "ai_estimate_allowed": bool(ai_estimate_allowed),
         }
         if scan_id:
             body["scan_id"] = scan_id
@@ -1675,7 +1755,7 @@ class NutritionClient:
             body = resp.json().get("data", {})
             return SummaryResponse(
                 date=str(body.get("date") or ""),
-                calories_total=float(body.get("calories_total") or 0.0),
+                calories_total=_optional_float(body.get("calories_total")),
                 calories_goal=_optional_int(body.get("calories_goal")),
                 protein_g=float(body.get("protein_g") or 0.0),
                 fat_g=float(body.get("fat_g") or 0.0),
@@ -1683,6 +1763,8 @@ class NutritionClient:
                 entries=list(body.get("entries") or []),
                 raw=body,
                 ai_comment=body.get("ai_comment") or None,
+                calories_ai_included=_count(body.get("calories_ai_included")),
+                calories_unscored=_count(body.get("calories_unscored")),
             )
         if resp.status_code >= 500:
             self._breaker(purpose).record_failure(now=now)
@@ -1793,6 +1875,8 @@ class NutritionClient:
                     meals_count=int(row.get("meals_count") or 0),
                     kcal=_float_or_none(row.get("kcal")),
                     has_entries=bool(row.get("has_entries")),
+                    uncounted_meals=_count(row.get("uncounted_meals")),
+                    kcal_ai_included=_count(row.get("kcal_ai_included")),
                 )
                 for row in rows
             )

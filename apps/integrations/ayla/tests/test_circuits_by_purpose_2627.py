@@ -182,6 +182,10 @@ BOOKING_PATHS = {
     "get_booking_detail",
     "get_appointment_version",
     "get_repeat_intent",
+    # DRF-2785 — мастер действует на своей записи (подтвердить, отменить,
+    # закрыть, неявка, перенос): это запись, автомат записи, как у
+    # cancel/reschedule клиента.
+    "act_as_specialist",
 }
 
 
@@ -234,7 +238,7 @@ def _purposes_by_method() -> dict[str, set[str]]:
 
 
 class TestP6Census:
-    def test_every_public_path_has_exactly_one_breaker_and_booking_is_thirteen(self) -> None:
+    def test_every_public_path_has_exactly_one_breaker_and_booking_is_fourteen(self) -> None:
         purposes = _purposes_by_method()
         # Положительный контроль сканера — известные носители каждого автомата.
         assert purposes["create_appointment"] == {"booking"}
@@ -248,4 +252,5 @@ class TestP6Census:
         media = {k for k, v in purposes.items() if v == {"media"}}
         assert booking == BOOKING_PATHS
         # До DRF-2627 на автомате записи — 44 пути; после — 13, чтений — 31.
-        assert (len(booking), len(read), len(media)) == (13, 31, 1)
+        # DRF-2785: +1 запись — действия мастера на своей записи.
+        assert (len(booking), len(read), len(media)) == (14, 31, 1)

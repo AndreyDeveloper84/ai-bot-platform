@@ -136,6 +136,13 @@ class SalonNotice:
     extra: tuple[MaxAddress, ...] = ()
     #: Лог-контекст (имена полей → значения), без персональных данных.
     log: dict[str, Any] = field(default_factory=dict)
+    #: Готовая клавиатура в формате провода MAX (DRF-2769): кнопки персонала —
+    #: ``cb:staff:*`` и нативный ``open_app`` с ``web_app`` — которые
+    #: :class:`Button` выразить не может. Идёт впереди ``buttons``.
+    keyboard: tuple[dict[str, str], ...] = ()
+    #: ``False`` — уведомление адресовано только ``extra`` (итог мастеру о его
+    #: дне, DRF-2769): управляющим копию не шлём.
+    to_managers: bool = True
 
 
 # ── колбэки ──────────────────────────────────────────────────────────
@@ -179,7 +186,7 @@ def render(notice: SalonNotice) -> str:
 def _keyboard(notice: SalonNotice) -> list[dict[str, Any]] | None:
     from apps.channels.max.outbound import make_inline_keyboard_attachment
 
-    buttons: list[dict[str, Any]] = []
+    buttons: list[dict[str, Any]] = [dict(b) for b in notice.keyboard]
     for b in notice.buttons:
         if b.url:
             buttons.append({"label": b.label, "url": b.url})
@@ -221,11 +228,13 @@ def notify(notice: SalonNotice) -> StaffSendResult | None:
 
     text = render(notice)
     attachments = _keyboard(notice)
-    result = send_to_staff(notice.tenant, MANAGER, text, attachments)
-    sent, failed, recipients = result.sent, result.failed, result.recipients
+    sent = failed = recipients = 0
+    if notice.to_managers:
+        result = send_to_staff(notice.tenant, MANAGER, text, attachments)
+        sent, failed, recipients = result.sent, result.failed, result.recipients
 
     seen: set[str] = set()
-    if notice.extra:
+    if notice.extra and notice.to_managers:
         from apps.channels.max.staff_outbound import manager_recipients
 
         # Мастер, который сам владелец/админ, уже получил копию выше.
@@ -626,11 +635,21 @@ def booking_attention_notice(
 # ── тип 6 — утренний итог ────────────────────────────────────────────
 
 
-def digest_notice(tenant: Any, *, local_date: date, lines: list[str]) -> SalonNotice:
+def digest_notice(
+    tenant: Any,
+    *,
+    local_date: date,
+    lines: list[str],
+    keyboard: list[dict[str, str]] | tuple[dict[str, str], ...] = (),
+) -> SalonNotice:
     """Тип 6: «Доброе утро! Итог на 22.09:» + строки сводки приветствия (DRF-2114).
 
     ``ref`` — местная дата салона: один итог в день на салон, и дата в
     поясе салона, не UTC (Владивосток встречает 22-е, когда в UTC ещё 21-е).
+
+    ``keyboard`` (DRF-2769) — кнопки персонала по роли адресата, собранные
+    вызывающим (:func:`apps.channels.max.salon_greeting.digest_admin_buttons`).
+    Без неё — прежняя единственная дверь «Открыть салон».
     """
 
     return SalonNotice(
@@ -639,8 +658,37 @@ def digest_notice(tenant: Any, *, local_date: date, lines: list[str]) -> SalonNo
         ref=local_date.isoformat(),
         title=f"Доброе утро! Итог на {local_date.strftime('%d.%m')}:",
         facts=tuple(lines),
-        buttons=_door("Открыть салон", "admin/today"),
+        buttons=() if keyboard else _door("Открыть салон", "admin/today"),
         log={"date": local_date.isoformat()},
+        keyboard=tuple(keyboard),
+    )
+
+
+def master_digest_notice(
+    tenant: Any,
+    *,
+    local_date: date,
+    master_id: Any,
+    address: MaxAddress,
+    lines: list[str],
+    keyboard: list[dict[str, str]] | tuple[dict[str, str], ...] = (),
+) -> SalonNotice:
+    """Тип 6 мастеру (DRF-2769): тот же заголовок, строки — его день, адресат — он один.
+
+    ``ref`` — местная дата и мастер: квота «один итог в день» у каждого своя
+    и не пересекается с итогом управляющим (``ref`` = только дата).
+    """
+
+    return SalonNotice(
+        kind="digest",
+        tenant=tenant,
+        ref=f"{local_date.isoformat()}:m:{master_id}",
+        title=f"Доброе утро! Итог на {local_date.strftime('%d.%m')}:",
+        facts=tuple(lines),
+        extra=(address,),
+        to_managers=False,
+        keyboard=tuple(keyboard),
+        log={"date": local_date.isoformat(), "master": str(master_id)},
     )
 
 
@@ -658,6 +706,7 @@ __all__ = [
     "callback",
     "digest_notice",
     "handoff_waiting_notice",
+    "master_digest_notice",
     "master_unavailable_notice",
     "notify",
     "parse_callback",

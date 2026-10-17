@@ -244,6 +244,7 @@ class TestLogMeal:
             external_user_id="bot:1",
             dish_name="Cottage cheese",
             meal_type="breakfast",
+            ai_estimate_allowed=True,
         )
         assert result.log_id == "log-7"
         assert result.calories == 220

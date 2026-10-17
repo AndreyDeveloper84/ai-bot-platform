@@ -79,7 +79,7 @@ class Tenant(models.Model):
         ),
         verbose_name="Салон подключён",
     )
-    # Sprint 2 / E1 — Sprint-1-debt fields per PHASE0_DESIGN.md §3.1.
+    # Sprint 2 / E1 — Sprint-1-debt fields per mysite/docs/arch/PHASE0_DESIGN.md §3.1.
     # All have safe defaults so the migration is backward-compatible
     # for the single existing tenant (formula-tela).
     features = models.JSONField(

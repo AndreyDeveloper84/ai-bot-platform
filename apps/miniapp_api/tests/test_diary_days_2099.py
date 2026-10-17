@@ -198,34 +198,73 @@ class TestDays:
             body = _get(client, bot_user, "customer_diary_days").json()
         assert body["timezone"] == "Europe/Moscow"
         assert (body["from"], body["to"]) == ("2026-09-13", "2026-09-19")
+        # DRF-2766 (фаза 2) — у строки дня два счётчика: записей без калорий
+        # и вошедших оценкой ИИ.
+        zero = {"uncounted_meals": 0, "kcal_ai_included": 0}
         assert body["days"] == [
-            {"date": "2026-09-13", "meals_count": 0, "kcal": None, "has_entries": False},
-            {"date": "2026-09-14", "meals_count": 2, "kcal": 640.0, "has_entries": True},
+            {"date": "2026-09-13", "meals_count": 0, "kcal": None, "has_entries": False, **zero},
+            {"date": "2026-09-14", "meals_count": 2, "kcal": 640.0, "has_entries": True, **zero},
         ]
         # анкеты нет вовсе — это не отказ чтения, числа показываются
         assert body["nutrition_numbers_hidden"] is False
 
-    def test_numbers_hidden_follows_the_profile_flag(
+    def test_drf2766_a_week_row_forwards_its_counters(
         self, client: Client, bot_user: BotUser, consent
     ) -> None:
-        patcher, _ = _patch_client(days=WEEK, profile=_Profile({"eating_disorder": True}))
+        """Фаза 2: строка дня несёт, сколько записей без калорий и сколько оценкой."""
+        week = DiaryDaysResponse(
+            timezone="Europe/Moscow",
+            date_from="2026-09-16",
+            date_to="2026-09-16",
+            days=(
+                DiaryDayRow("2026-09-16", 3, 447.0, True, uncounted_meals=1, kcal_ai_included=1),
+            ),
+        )
+        patcher, _ = _patch_client(days=week, profile=None)
         with patcher:
             body = _get(client, bot_user, "customer_diary_days").json()
-        assert body["nutrition_numbers_hidden"] is True
+        (row,) = body["days"]
+        assert row["kcal"] == 447.0
+        assert row["uncounted_meals"] == 1
+        assert row["kcal_ai_included"] == 1
+
+    def test_numbers_hidden_follows_the_persons_choice_not_the_profile_flag(
+        self, client: Client, bot_user: BotUser, consent
+    ) -> None:
+        """DRF-2766: флаг РПП числа больше не прячет; прячет выбор «Без чисел»."""
+        from apps.nutrition_proactive.prefs import write_prefs
+
+        patcher, _ = _patch_client(days=WEEK, profile=_Profile({"eating_disorder": True}))
+        with patcher:
+            flagged = _get(client, bot_user, "customer_diary_days").json()
+        bot_user.customer_status = BotUser.CustomerStatus.LINKED
+        bot_user.save(update_fields=["customer_status"])
+        write_prefs(bot_user, {"numbers_hidden": True})
+        patcher, _ = _patch_client(days=WEEK, profile=_Profile({}))
+        with patcher:
+            chosen = _get(client, bot_user, "customer_diary_days").json()
+
+        assert flagged["nutrition_numbers_hidden"] is False
+        assert chosen["nutrition_numbers_hidden"] is True
         # наружу — один булев, не диагноз: сырого флага в теле нет
-        flat = json.dumps(body)
+        flat = json.dumps(flagged)
         assert "nutrition_numbers_hidden" in flat
         assert "health_flags" not in flat
         assert "eating_disorder" not in flat
 
-    def test_profile_unreadable_leaves_the_key_out(
+    def test_profile_unreadable_keeps_the_persons_choice(
         self, client: Client, bot_user: BotUser, consent
     ) -> None:
+        from apps.nutrition_proactive.prefs import write_prefs
+
+        bot_user.customer_status = BotUser.CustomerStatus.LINKED
+        bot_user.save(update_fields=["customer_status"])
+        write_prefs(bot_user, {"numbers_hidden": True})
         patcher, _ = _patch_client(days=WEEK, profile=NutritionUnavailableError("http_503"))
         with patcher:
             body = _get(client, bot_user, "customer_diary_days").json()
         assert body["days"]
-        assert "nutrition_numbers_hidden" not in body
+        assert body["nutrition_numbers_hidden"] is True
 
     def test_catalog_refusal_of_the_period_is_a_named_error_not_an_empty_week(
         self, client: Client, bot_user: BotUser, consent
@@ -280,6 +319,27 @@ class TestDay:
         assert body["date"] == "2026-09-14"
         assert body["entries"] == [self.ENTRY]
         assert body["nutrition_numbers_hidden"] is False
+
+    def test_drf2766_the_day_carries_the_total_and_its_counters(
+        self, client: Client, bot_user: BotUser, consent
+    ) -> None:
+        """Фаза 2: итог с оценками ИИ и счётчики едут на экран дня; «нет итога» — null."""
+        from dataclasses import replace
+
+        summary = replace(
+            _summary([self.ENTRY]),
+            calories_total=None,
+            calories_ai_included=1,
+            calories_unscored=2,
+        )
+        patcher, _ = _patch_client(summary=summary, profile=None)
+        with patcher:
+            resp = _get(client, bot_user, "customer_diary_day", date="2026-09-14")
+        body = resp.json()
+        assert body["entries"] == [self.ENTRY]
+        assert body["calories_total"] is None
+        assert body["calories_ai_included"] == 1
+        assert body["calories_unscored"] == 2
 
     def test_a_day_without_entries_is_an_empty_list_not_an_error(
         self, client: Client, bot_user: BotUser, consent

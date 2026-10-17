@@ -1,0 +1,123 @@
+{
+  "_source": {
+    "captured_on": "2026-10-04",
+    "catalog_commit": "c299a1fc (branch wt-9c/drf-2766-p2)",
+    "catalog_repo": "beautygo_backend",
+    "how": "DRF APIClient on a Postgres test database; synthetic entries: borscht 147 verified, shakshuka 300 AI, one entry without any value.",
+    "what": "Live catalog responses of internal/summary and internal/diary/days with AI-estimated and unvalued entries (DRF-2766 phase 2) - captured, not hand-written."
+  },
+  "responses": {
+    "diary_days_mixed": {
+      "body": {
+        "data": {
+          "days": [
+            {
+              "date": "2026-09-16",
+              "has_entries": true,
+              "kcal": 447.0,
+              "kcal_ai_included": 1,
+              "meals_count": 3,
+              "uncounted_meals": 1
+            }
+          ],
+          "from": "2026-09-16",
+          "timezone": "UTC",
+          "to": "2026-09-16"
+        }
+      },
+      "status": 200
+    },
+    "summary_mixed": {
+      "body": {
+        "data": {
+          "ai_comment": null,
+          "calories_ai_included": 1,
+          "calories_total": 447.0,
+          "calories_unscored": 1,
+          "carbs_g": 20.1,
+          "date": "2026-09-16",
+          "entries": [
+            {
+              "ai_calories": null,
+              "calories": 147.0,
+              "carbs_g": 20.1,
+              "dish_name": "борщ",
+              "entry_origin": "text_estimated_confirmed",
+              "fat_g": 6.6,
+              "has_photo": false,
+              "id": "5bee7f99-e891-406a-ba87-b9013639149d",
+              "logged_at": "2026-09-16T12:00:00+03:00",
+              "meal_type": "lunch",
+              "protein_g": 4.8
+            },
+            {
+              "ai_calories": 300.0,
+              "calories": null,
+              "carbs_g": null,
+              "dish_name": "шакшука",
+              "entry_origin": "text_estimated_confirmed",
+              "fat_g": null,
+              "has_photo": false,
+              "id": "b665af6e-84bb-4bdf-8daa-030d4e5f7b33",
+              "logged_at": "2026-09-16T14:00:00+03:00",
+              "meal_type": "lunch",
+              "protein_g": null
+            },
+            {
+              "ai_calories": null,
+              "calories": null,
+              "carbs_g": null,
+              "dish_name": "зыбзик",
+              "entry_origin": "text_estimated_confirmed",
+              "fat_g": null,
+              "has_photo": false,
+              "id": "9afc4ee9-f1ea-466e-a1f3-ea8615af8ee7",
+              "logged_at": "2026-09-16T16:00:00+03:00",
+              "meal_type": "lunch",
+              "protein_g": null
+            }
+          ],
+          "fat_g": 6.6,
+          "protein_g": 4.8,
+          "unscored_entries": 2,
+          "vitamin_deficits": {},
+          "water_ml": 0
+        }
+      },
+      "status": 200
+    },
+    "summary_unvalued_only": {
+      "body": {
+        "data": {
+          "ai_comment": null,
+          "calories_ai_included": 0,
+          "calories_total": null,
+          "calories_unscored": 1,
+          "carbs_g": null,
+          "date": "2026-09-16",
+          "entries": [
+            {
+              "ai_calories": null,
+              "calories": null,
+              "carbs_g": null,
+              "dish_name": "зыбзик",
+              "entry_origin": "text_estimated_confirmed",
+              "fat_g": null,
+              "has_photo": false,
+              "id": "9afc4ee9-f1ea-466e-a1f3-ea8615af8ee7",
+              "logged_at": "2026-09-16T16:00:00+03:00",
+              "meal_type": "lunch",
+              "protein_g": null
+            }
+          ],
+          "fat_g": null,
+          "protein_g": null,
+          "unscored_entries": 1,
+          "vitamin_deficits": {},
+          "water_ml": 0
+        }
+      },
+      "status": 200
+    }
+  }
+}

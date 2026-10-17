@@ -17,10 +17,10 @@
 согласие ПДн (``_diary_entry_gate``, ``needs_consent=True``) — чтение
 личных записей.
 
-``nutrition_numbers_hidden`` — тот же производный булев, что у сводки, и с
-тем же умолчанием: наружу уходит ОДИН булев, а не ``health_flags``; когда
-анкета не прочиталась, ключа нет и экран прячет числа (fail-closed). Анкеты
-нет вовсе — не отказ чтения: флага нет, числа показываются.
+``nutrition_numbers_hidden`` — тот же булев, что у сводки: с DRF-2766 это
+выбор самого человека «Без чисел» (настройка в боте), а не флаг анкеты.
+Ключ в ответе есть всегда; экран на его отсутствие (старые ответы)
+по-прежнему прячет числа.
 
 Прошлые дни здесь только читаются: правка и удаление записей за прошлые
 дни — предел этой поверхности (не в DRF-2099).
@@ -41,6 +41,7 @@ from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 
 from apps.identity.models import BotUser
+from apps.nutrition_proactive.prefs import numbers_hidden_for
 from apps.miniapp_api.per_person_quota import over_quota, rate_limited
 from apps.miniapp_api.views import (
     _diary_entry_gate,
@@ -53,17 +54,19 @@ logger = logging.getLogger(__name__)
 
 
 def _numbers_hidden(profile_res: Any, *, bot_user: BotUser) -> bool | None:
-    """Как в ``customer_wellness_today``: ``None`` — анкета не прочиталась."""
+    """Как в ``customer_wellness_today``: выбор человека «Без чисел» (DRF-2766).
+
+    Прежде признак выводился из флага расстройства пищевого поведения в
+    анкете; владелец 04.10 это автоматическое скрытие снял. Отказ чтения
+    анкеты на признак больше не влияет — только пишется в журнал.
+    """
     if isinstance(profile_res, Exception):
         logger.warning(
             "diary_days.profile_unavailable bot_user=%s err=%s",
             bot_user.pk,
             type(profile_res).__name__,
         )
-        return None
-    if profile_res is None:
-        return False
-    return bool((profile_res.health_flags or {}).get("eating_disorder"))
+    return numbers_hidden_for(bot_user)
 
 
 def _day_payload(row: Any) -> dict[str, Any]:
@@ -72,6 +75,9 @@ def _day_payload(row: Any) -> dict[str, Any]:
         "meals_count": row.meals_count,
         "kcal": row.kcal,
         "has_entries": row.has_entries,
+        # DRF-2766 (фаза 2) — итог дня неполный / с оценками ИИ.
+        "uncounted_meals": int(getattr(row, "uncounted_meals", 0) or 0),
+        "kcal_ai_included": int(getattr(row, "kcal_ai_included", 0) or 0),
     }
 
 
@@ -259,6 +265,10 @@ def customer_diary_day(request: HttpRequest) -> HttpResponse:
     payload: dict[str, Any] = {
         "date": summary_res.date or date,
         "calories_total": summary_res.calories_total,
+        # DRF-2766 (фаза 2) — итог включает оценки ИИ: сколько вошло
+        # оценкой и сколько записей без калорий (итог неполный).
+        "calories_ai_included": int(getattr(summary_res, "calories_ai_included", 0) or 0),
+        "calories_unscored": int(getattr(summary_res, "calories_unscored", 0) or 0),
         "entries": list(summary_res.entries or []),
     }
     hidden = _numbers_hidden(profile_res, bot_user=bot_user)

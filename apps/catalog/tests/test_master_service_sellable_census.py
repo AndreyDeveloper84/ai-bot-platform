@@ -101,6 +101,13 @@ EXPECTED: dict[str, tuple[int, str, str]] = {
         SHOWS_REASON,
         "салонная админка, услуги мастера — sellable и причина",
     ),
+    "apps/channels/max/staff_booking.py": (
+        1,
+        SELLABLE,
+        "DRF-2786: «✍️ Записать клиента» в салонном боте предлагает услуги мастера — "
+        "только продаваемые рёбра (предикат sellable()); запись создаёт "
+        "create_appointment_as, как экран Mini App",
+    ),
     "apps/admin_api/services/assistant.py": (
         1,
         SELLABLE,
@@ -129,6 +136,14 @@ EXPECTED: dict[str, tuple[int, str, str]] = {
         "матрица MM4 — оператор пишет строки",
     ),
     "apps/admin_api/views_invite.py": (2, NOT_SALE_PATH, "сидер приглашения — писатель"),
+    "apps/master_api/services/dashboard.py": (
+        1,
+        NOT_SALE_PATH,
+        "DRF-2881: «Сегодня» мастера считает ЧИСЛО его услуг, чтобы не говорить «вам не "
+        "назначили услуги» тому, у кого они есть. Клиенту ничего не продаётся и не "
+        "показывается; непродаваемое ребро считается тоже — услуга назначена, даже "
+        "когда продать её пока нельзя",
+    ),
     "apps/admin_api/services/master_deactivation.py": (
         2,
         NOT_SALE_PATH,

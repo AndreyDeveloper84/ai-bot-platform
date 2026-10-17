@@ -49,6 +49,9 @@ ALLOWED_EVENT_NAMES: Final[frozenset[str]] = frozenset(
         # emits it from mark_no_show. It is NOT modelled as
         # booking.cancelled + reason_code.
         "booking.no_show",
+        # DRF-2785: the master confirmed they will take the visit
+        # («✅ Подтверждаю»). Status is unchanged; the fact is the event.
+        "booking.acknowledged",
         "payment.authorized",
         "payment.captured",
         "payment.failed",

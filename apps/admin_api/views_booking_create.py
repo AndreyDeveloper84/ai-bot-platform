@@ -41,7 +41,7 @@ from django.http import HttpRequest, HttpResponse, JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 
-from apps.admin_api.auth import require_admin_role
+from apps.admin_api.auth import require_booking_desk
 from apps.admin_api.services.booking import (
     Refusal,
     bookable_service,
@@ -75,7 +75,7 @@ def _outcome(outcome: str, detail: str, status: int, **extra: Any) -> JsonRespon
 
 @csrf_exempt
 @require_http_methods(["POST"])
-@require_admin_role
+@require_booking_desk
 def create_booking(request: HttpRequest) -> HttpResponse:
     """Create an appointment on behalf of the calling administrator."""
 

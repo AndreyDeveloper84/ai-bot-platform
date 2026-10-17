@@ -108,6 +108,41 @@ class TestFindsTheNamedMaster:
         assert [c.name for c in cards] == ["Архипкин Денис"]
 
 
+class TestShortNamesInflect:
+    """DRF-2829: «только к Анне» — короткое имя тоже склоняется.
+
+    Основа резалась только у слов длиннее пяти букв, поэтому «Анне»,
+    «Ольге», «Марии», «Юлии» искались целиком и не находили «Анна»,
+    «Ольга», «Мария», «Юлия». Это большинство частых женских имён, и
+    «такого мастера нет» звучало про мастера, который в списке есть.
+    """
+
+    @pytest.mark.parametrize(
+        ("spoken", "stored"),
+        [
+            ("Анне", "Анна Смирнова"),
+            ("Анну", "Анна Смирнова"),
+            ("Анной", "Анна Смирнова"),
+            ("Ольге", "Ольга Ветрова"),
+            ("Марии", "Мария Лосева"),
+            ("Юлии", "Юлия Котова"),
+            ("Инне", "Сазонова Инна"),
+        ],
+    )
+    def test_oblique_case_of_a_short_name_finds_the_nominative(
+        self, penza, spoken: str, stored: str
+    ) -> None:
+        _master(penza, stored)
+        _master(penza, "Архипкин Денис")
+        cards = find_masters_by_name(spoken)
+        assert [c.name for c in cards] == [stored]
+
+    def test_a_short_consonant_name_is_not_cut(self, contour) -> None:
+        """«Денис» кончается не падежным окончанием — резать нечего."""
+        cards = find_masters_by_name("Денис")
+        assert [c.name for c in cards] == ["Архипкин Денис"]
+
+
 class TestAmbiguity:
     def test_two_of_the_same_name_return_both(self, contour, penza) -> None:
         """«запиши к Денису» with two Денисов is a QUESTION, not a miss — the

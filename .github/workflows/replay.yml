@@ -210,7 +210,8 @@ jobs:
           fi
           # Under docs/ a path is a document only if a person reads it: prose
           # or a picture. `.py`, `.json`, `.sql` there are code (see ci.yml).
-          NON_DOCS="$(printf '%s\n' "$CHANGED" | grep -viE '^$|\.md$|^docs/.*\.(png|jpe?g|gif|svg|pdf)$' || true)"
+          # DRF-2660 (в): .md в tests/, fixtures/ и docs/state/ читают узлы — это код.
+          NON_DOCS="$(printf '%s\n' "$CHANGED" | sed -E 's#^(docs/state/|(.*/)?(tests|fixtures)/)(.*)\.[mM][dD]$#&.code#' | grep -viE '^$|\.md$|^docs/.*\.(png|jpe?g|gif|svg|pdf)$' || true)"
           if [ -z "$NON_DOCS" ]; then
             echo "code=false" >> "$GITHUB_OUTPUT"
             echo "docs-only PR — engineering jobs are skipped (they report 'skipped', which satisfies branch protection)."

@@ -28,6 +28,7 @@
  */
 import type { Master, Service } from "./api";
 import { formatDuration, priceFromLabel } from "./format";
+import { NO_REVIEWS_LABEL, publicRating, reviewCountLabel } from "./rating";
 import type { CatalogBrowseData } from "./customer-booking";
 
 /** Кадр 1 — дословно с макета. */
@@ -188,26 +189,13 @@ export function masterServiceMeta(service: Service): string {
   return parts.join(" · ");
 }
 
-/** «4.8 · 74 отзыва» — или пусто. Нет данных — нет скобок (DRF-1778). */
+/**
+ * «4.8 · 74 отзыва» — или «Пока нет отзывов» (DRF-2875, решение владельца
+ * 07.10, п.20): оценка называется только вместе с числом отзывов.
+ */
 export function providerMeta(master: Master): string {
-  const parts: string[] = [];
-  if (master.rating) parts.push(master.rating);
-  const count = master.review_count ?? 0;
-  if (count > 0) parts.push(`${count} ${reviewWord(count)}`);
-  return parts.join(" · ");
+  const rating = publicRating(master.rating, master.review_count);
+  if (rating === null) return NO_REVIEWS_LABEL;
+  return `${rating.toFixed(1)} · ${reviewCountLabel(master.review_count)}`;
 }
 
-function reviewWord(count: number): string {
-  const tail = count % 100;
-  if (tail >= 11 && tail <= 14) return "отзывов";
-  switch (count % 10) {
-    case 1:
-      return "отзыв";
-    case 2:
-    case 3:
-    case 4:
-      return "отзыва";
-    default:
-      return "отзывов";
-  }
-}

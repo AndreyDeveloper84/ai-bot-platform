@@ -25,6 +25,9 @@ export interface DiaryDayRow {
   /** `null` — записей нет. */
   kcal: number | null;
   has_entries: boolean;
+  /** DRF-2766 фаза 2 — записей без калорий / вошедших оценкой ИИ. */
+  uncounted_meals?: number;
+  kcal_ai_included?: number;
 }
 
 export interface DiaryDays {

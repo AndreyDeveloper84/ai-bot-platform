@@ -137,6 +137,13 @@ export interface WellnessToday {
    * way a zero can.
    */
   calories_eaten?: number;
+  /**
+   * DRF-2766 фаза 2 — сколько записей вошло в `calories_eaten` оценкой ИИ
+   * и сколько без какого-либо значения калорий. `calories_eaten` нет, а
+   * `calories_unscored > 0` — день прочитан, но итога нет (не сбой чтения).
+   */
+  calories_ai_included?: number;
+  calories_unscored?: number;
   /** User's target (kcal). Pulled from Layer 2 Goals or anketa. */
   calories_target?: number;
   /**

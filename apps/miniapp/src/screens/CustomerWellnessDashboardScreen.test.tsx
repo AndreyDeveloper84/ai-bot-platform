@@ -716,6 +716,62 @@ describe("CustomerWellnessDashboardScreen — degraded reads (DRF-1546)", () => 
     expect(screen.queryByText("Не удалось загрузить")).not.toBeInTheDocument();
   });
 
+  describe("«Без чисел» — выбор человека (DRF-2873)", () => {
+    /**
+     * Решение владельца 04.10: добровольное скрытие калорий, БЖУ и числовых
+     * целей — на ВСЕХ экранах. Главный экран флаг `nutrition_numbers_hidden`
+     * не читал вовсе и рисовал числа у человека, который их выключил.
+     */
+    const DAY = {
+      calories_eaten: 1240,
+      calories_target: 2100,
+      pfc: { protein_g: 65, fat_g: 40, carbs_g: 120 },
+      water_glasses_eaten: 4,
+      water_glasses_target: 8,
+      active_goals: [],
+      display_name: "Анна",
+    };
+
+    it("режим включён: строка «Питание» есть, а чисел, БЖУ и шкалы в ней нет", async () => {
+      serve({ ...DAY, nutrition_numbers_hidden: true }, { this_week_booking_count: 0 });
+      await renderScreen(false);
+
+      // ПРИСУТСТВИЕ на тех же данных: день отрисован (вода видна), и строка
+      // питания на месте — названа, но без чисел.
+      expect(await screen.findByText(/4 \/ 8 стаканов/)).toBeInTheDocument();
+      const food = screen.getByLabelText("Питание");
+      expect(food).toHaveTextContent("Питание");
+
+      // ОТСУТСТВИЕ: ни калорий, ни цели, ни процента, ни БЖУ, ни шкалы.
+      expect(food.textContent).not.toMatch(/ккал/);
+      expect(food.textContent).not.toMatch(/1240|2100|59/);
+      expect(screen.queryByText(/Б 65 · Ж 40 · У/)).not.toBeInTheDocument();
+      expect(screen.queryByRole("progressbar", { name: /Калории/ })).not.toBeInTheDocument();
+      // Скринридер слышит то же, что видно глазу: числа не произносятся.
+      expect(screen.queryByLabelText(/килокалорий/)).not.toBeInTheDocument();
+    });
+
+    it("режим выключен явно: числа на месте", async () => {
+      serve({ ...DAY, nutrition_numbers_hidden: false }, { this_week_booking_count: 0 });
+      await renderScreen(false);
+
+      expect(await screen.findByText(/1240 \/ 2100 ккал · 59 %/)).toBeInTheDocument();
+      expect(screen.getByText(/Б 65 · Ж 40 · У/)).toBeInTheDocument();
+    });
+
+    it("режим включён, день пуст: сказано словами, без чисел", async () => {
+      serve(
+        { ...DAY, calories_eaten: 0, water_glasses_eaten: 0, nutrition_numbers_hidden: true },
+        { this_week_booking_count: 0 },
+      );
+      await renderScreen(false);
+
+      const food = await screen.findByLabelText("Питание: Сегодня ещё ничего не записано");
+      expect(food).toHaveTextContent("Сегодня ещё ничего не записано");
+      expect(food.textContent).not.toMatch(/ккал/);
+    });
+  });
+
   it("zero is still zero: an empty day reads as an empty day", async () => {
     // Ноль — настоящее значение и обязан рисоваться, иначе «опускаем
     // при сбое» превратилось бы в «прячем всегда».
@@ -1549,5 +1605,75 @@ describe("CustomerWellnessDashboardScreen — отмена стакана (DRF-1
     ).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Отменить стакан" })).toBeInTheDocument();
     expect(screen.queryByText("Стакан убран")).not.toBeInTheDocument();
+  });
+});
+
+// ── DRF-2766 фаза 2 — итог дня с оценками ИИ в блоке «Питание» ──────────────
+describe("CustomerWellnessDashboardScreen — итог с оценками ИИ (DRF-2766)", () => {
+  const AI_NOTE = "включая оценки ИИ";
+  const INCOMPLETE = "Итог неполный: не у всех записей есть калории.";
+  const UNKNOWN = "Калории пока не посчитаны.";
+  const DAY = {
+    calories_eaten: 447,
+    calories_target: 1900,
+    water_glasses_eaten: 3,
+    water_glasses_target: 8,
+    display_name: "Анна",
+  };
+
+  function serve(today: unknown) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: unknown) => {
+        const u = String(url);
+        const body = u.includes("/wellness/today")
+          ? today
+          : u.includes("/recent-activity")
+            ? { this_week_booking_count: 0 }
+            : null;
+        if (body === null) throw new Error(`unexpected fetch: ${u}`);
+        return { ok: true, status: 200, json: async () => body } as unknown as Response;
+      }),
+    );
+  }
+
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+    mockedBrowse.mockResolvedValue({ services: [], masters: [], picks: [], picksOutcome: "OK" });
+    window.history.replaceState({}, "", "/customer/main");
+  });
+
+  it("с оценками — «≈ 447 / 1900 ккал» и подпись «включая оценки ИИ»", async () => {
+    serve({ ...DAY, calories_ai_included: 1, calories_unscored: 0 });
+    await renderScreen(false);
+
+    expect(await screen.findByText("≈ 447 / 1900 ккал · 24 %")).toBeInTheDocument();
+    expect(screen.getByTestId("pulse-kcal-note")).toHaveTextContent(AI_NOTE);
+  });
+
+  it("целиком проверенный — без «≈» и без подписи", async () => {
+    serve({ ...DAY, calories_ai_included: 0, calories_unscored: 0 });
+    await renderScreen(false);
+
+    expect(await screen.findByText("447 / 1900 ккал · 24 %")).toBeInTheDocument();
+    expect(screen.queryByTestId("pulse-kcal-note")).not.toBeInTheDocument();
+  });
+
+  it("с записью без калорий — «Итог неполный»", async () => {
+    serve({ ...DAY, calories_ai_included: 0, calories_unscored: 1 });
+    await renderScreen(false);
+
+    expect(await screen.findByText("447 / 1900 ккал · 24 %")).toBeInTheDocument();
+    expect(screen.getByTestId("pulse-kcal-note")).toHaveTextContent(INCOMPLETE);
+  });
+
+  it("итога нет — «Калории пока не посчитаны.», а не «не удалось загрузить»", async () => {
+    const { calories_eaten: _omit, ...withoutTotal } = DAY;
+    void _omit;
+    serve({ ...withoutTotal, calories_unscored: 2 });
+    await renderScreen(false);
+
+    expect(await screen.findByText(UNKNOWN)).toBeInTheDocument();
   });
 });
