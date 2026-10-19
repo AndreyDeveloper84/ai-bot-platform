@@ -918,7 +918,8 @@ def masters_list(request: HttpRequest) -> HttpResponse:
             .values_list("master_id", flat=True)
         )
         qs = qs.filter(id__in=list(master_ids))
-    rows = [_master_to_dict(m) for m in qs]
+    masters = list(qs)
+    rows = [_master_to_dict(m) for m in masters]
 
     # DRF-1707 / OD-PILOT-9 distance contract + решение владельца D3.
     # ``?lat=&lon=`` — одноразовые координаты по кнопке «Показать рядом со
@@ -929,7 +930,7 @@ def masters_list(request: HttpRequest) -> HttpResponse:
     if coords_error:
         return _error("bad_request", coords_error, 400)
     if coords is not None:
-        rows = _attach_distance(rows, lat=coords[0], lon=coords[1])
+        rows = _attach_distance(rows, masters, lat=coords[0], lon=coords[1])
     return JsonResponse({"masters": rows})
 
 
@@ -951,14 +952,28 @@ def _parse_coords(query) -> tuple[tuple[float, float] | None, str | None]:
     return (lat, lon), None
 
 
-def _attach_distance(rows: list[dict[str, Any]], *, lat: float, lon: float) -> list[dict[str, Any]]:
+def _attach_distance(
+    rows: list[dict[str, Any]],
+    masters: list[CatalogMaster],
+    *,
+    lat: float,
+    lon: float,
+) -> list[dict[str, Any]]:
     """Дописать ``distance_meters`` с провода каталога и отсортировать по близости.
 
     Без ответа каталога (флаг выключен, источник лежит, мастер не найден
     в ответе) поля нет вовсе — экран тогда не называет список «Рядом с
     вами» (#1653: имя только при наличии поля). Неизвестное расстояние
     (``null``) — в конец, порядок имён между ними сохраняется.
+
+    DRF-2764: каталог отвечает под id профиля, поэтому строка ищется по
+    колонке ``catalog_specialist_id``, а не по первичному ключу зеркала —
+    у склеенного приглашения и соло-мастера это разные id (DRF-1933). Пустая
+    колонка — каталог мастера не знает, расстояния нет.
     """
+    catalog_of = {
+        str(m.id): str(m.catalog_specialist_id) for m in masters if m.catalog_specialist_id
+    }
     if not getattr(settings, "BOOKING_VIA_AYLA_REST", False):
         return rows
     from apps.integrations.ayla.booking_client import (
@@ -974,8 +989,9 @@ def _attach_distance(rows: list[dict[str, Any]], *, lat: float, lon: float) -> l
     by_id = {m.id: m.distance_meters for m in remote}
     matched = 0
     for row in rows:
-        if row["id"] in by_id:
-            row["distance_meters"] = by_id[row["id"]]
+        catalog_id = catalog_of.get(row["id"])
+        if catalog_id is not None and catalog_id in by_id:
+            row["distance_meters"] = by_id[catalog_id]
             matched += 1
     logger.info("miniapp_api.masters_list.distance geo=1 masters=%d matched=%d", len(rows), matched)
     if matched == 0:
@@ -1005,7 +1021,53 @@ def master_detail(request: HttpRequest, master_id: str) -> HttpResponse:
     ]
     payload = _master_to_dict(master)
     payload["service_ids"] = service_ids
+    # DRF-2755 — расстояние до мастера на его карточке. Правило то же, что у
+    # списка (``_attach_distance``): одноразовые ``?lat=&lon=``, считает
+    # каталог, координаты не хранятся и не пишутся в журнал.
+    coords, coords_error = _parse_coords(request.GET)
+    if coords_error:
+        return _error("bad_request", coords_error, 400)
+    if coords is not None:
+        _attach_master_distance(payload, master, lat=coords[0], lon=coords[1])
     return JsonResponse({"master": payload})
+
+
+def _attach_master_distance(
+    payload: dict[str, Any], master: CatalogMaster, *, lat: float, lon: float
+) -> None:
+    """Дописать ``distance_meters`` одного мастера с провода каталога.
+
+    Без ответа каталога (флаг выключен, источник лежит, каталог вернул
+    другого мастера) поля нет вовсе; ``null`` с провода — неизвестно, и
+    экран блок не рисует.
+
+    DRF-1933: в каталог уходит id профиля из колонки, а не первичный ключ
+    зеркала — у склеенного приглашения и соло-мастера это разные id. Колонка
+    пуста — звать каталог не с чем, поля нет.
+    """
+    if not getattr(settings, "BOOKING_VIA_AYLA_REST", False):
+        return
+    from apps.integrations.ayla.booking_client import (
+        BookingAPIError,
+        get_ayla_booking_client,
+    )
+
+    try:
+        catalog_id = catalog_specialist_id(master)
+    except CatalogSpecialistUnresolved:
+        logger.info("miniapp_api.master_detail.distance geo=1 unresolved=1")
+        return
+    try:
+        remote = get_ayla_booking_client().get_masters(
+            specialist_id=catalog_specialist_id(master), lat=lat, lon=lon
+        )
+    except BookingAPIError:
+        logger.warning("miniapp_api.master_detail.distance_unavailable geo=1")
+        return
+    match = next((m for m in remote if m.id == catalog_id), None)
+    logger.info("miniapp_api.master_detail.distance geo=1 matched=%d", int(match is not None))
+    if match is not None:
+        payload["distance_meters"] = match.distance_meters
 
 
 # --- POST /bookings (4a) ---------------------------------------------------

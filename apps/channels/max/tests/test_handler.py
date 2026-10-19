@@ -485,7 +485,7 @@ class TestKeyboardPassThrough:
 
     def test_callback_tap_runs_welcome_ask_prompt(self, tenant_a, mock_send, fake_redis, settings):
         """User taps «❓ Задать вопрос» — bot replies with the prompt text
-        and no keyboard (the FAQ skill takes the next turn)."""
+        and one «Меню» button (§72); the FAQ skill still takes the next turn."""
         settings.STRICT_TENANT_SCOPE = "strict"
 
         with tenant_scope(tenant_a), trace_id_scope(str(uuid4())):
@@ -494,8 +494,9 @@ class TestKeyboardPassThrough:
         sent = mock_send[0]
         # The ASK_PROMPT text is on the reply.
         assert "Спроси о чём угодно" in sent["text"]
-        # No keyboard on this turn.
-        assert sent["attachments"] is None
+        # §72: one callback button, «Меню», reaches the wire.
+        buttons = sent["attachments"][0]["payload"]["buttons"]
+        assert [(row[0]["text"], row[0]["type"]) for row in buttons] == [("Меню", "callback")]
 
     def test_callback_idempotency_keys_off_callback_id(
         self, tenant_a, mock_send, fake_redis, settings
