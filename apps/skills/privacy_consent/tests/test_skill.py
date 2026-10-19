@@ -270,7 +270,12 @@ class TestSkillHandle:
             result = PrivacyConsentSkill().handle(ctx)
 
         assert "ничего не удалила" in result.reply_text
-        assert "Мои данные" in result.reply_text  # where the confirmed flow lives
+        # where the confirmed flow lives — the profile's real labels (19.10)
+        assert (
+            "«Профиль» → «Согласия и приватность» → «Удалить аккаунт и личные данные»"
+            in result.reply_text
+        )
+        assert "Открой в приложении" in result.reply_text  # клиентский канон «ты»
         assert "удалены" not in result.reply_text
         assert result.meta["outcome"] == "redirected_to_confirmed_flow"
         # Conversation stays open — nothing terminal happened.

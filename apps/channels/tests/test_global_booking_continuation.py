@@ -752,14 +752,18 @@ class TestAStopCommandMidBooking:
     """
 
     @pytest.mark.parametrize("text", ["отмени запись на завтра", "удали запись на завтра"])
-    def test_a_stop_goes_to_the_concierge_and_drops_the_context(self, wired, salon, text) -> None:
+    def test_a_stop_says_nothing_to_cancel_and_drops_the_context(
+        self, wired, salon, mock_send, text
+    ) -> None:
+        """Впереди записей нет — «отменять нечего» (строка владельца 19.10)."""
         tenant, master, catalog = salon
         _tap_with_service(tenant, master, catalog["lymph"].id)
         assert load_booking_context(_global_conversation()) is not None
 
         GlobalMaxHandler()(_raw(_typed(text, "mm-stop")))
 
-        assert wired.concierge == [text]
+        assert mock_send[-1]["text"] == "У тебя нет активных записей — отменять нечего."
+        assert wired.concierge == []  # empty-assert-ok: ответ отмены — assert выше
         assert wired.booking == [f"cb:book:pick_master:{master.id}:{_LYMPH}"]
         assert load_booking_context(_global_conversation()) is None
 
@@ -770,7 +774,7 @@ class TestAStopCommandMidBooking:
         GlobalMaxHandler()(_raw(_typed("отмени запись на завтра", "mm-stop")))
         GlobalMaxHandler()(_raw(_typed("ту, что на завтра", "mm-which")))
 
-        assert wired.concierge == ["отмени запись на завтра", "ту, что на завтра"]
+        assert wired.concierge == ["ту, что на завтра"]
         assert wired.booking == [f"cb:book:pick_master:{master.id}:{_LYMPH}"]
 
     def test_with_a_visit_ahead_the_stop_shows_the_visits_and_drops_the_context(
