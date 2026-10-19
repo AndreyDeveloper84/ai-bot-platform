@@ -540,6 +540,32 @@ def _cabinet_closure(scan: _Scan) -> OperationResult:
     )
 
 
+def revocation_retention(eligibility: DeletionEligibility) -> OperationResult:
+    """Исход для отзыва согласия на хранение — пятая дверь, решение владельца 19.10 (б).
+
+    Отзыв согласия по 152-ФЗ нельзя «не выполнить», поэтому здесь нет
+    ``SETTLE_FIRST``/``REFUSED_IN_PART``: что на четырёх дверях удаления
+    остановило бы стирание, здесь становится основанием удержать законный
+    минимум, а не отказом. ``IMMEDIATE`` остаётся ``IMMEDIATE``.
+
+    Законный минимум каскад уже держит сам и для каждого: транзакционные
+    зеркала (записи, платежи — без ПДн), оболочку ``BotUser`` с
+    ``ayla_user_id`` и карточку мастера — ключ биллинга Ayla, где живёт долг.
+    Стирается остальное. Этот результат называет основания удержания
+    кодами, без сумм и без названий салонов.
+    """
+    erasure = eligibility.erasure
+    if erasure.outcome is Outcome.IMMEDIATE:
+        return erasure
+    reasons = [Reason.RETENTION_REQUIRED, *(r for r in erasure.reasons if r is not Reason.ELIGIBLE)]
+    return OperationResult(
+        outcome=Outcome.PARTIAL_WITH_RETENTION,
+        reasons=tuple(dict.fromkeys(reasons)),
+        next_actions=(Action.PROCEED, Action.EXPLAIN_RETAINED_DATA),
+        obligation_owner=erasure.obligation_owner,
+    )
+
+
 def deletion_eligibility(bot_user: BotUser) -> DeletionEligibility:
     """Оценить удаление человека по четырём операциям. Только чтение."""
     scan = _scan(bot_user)
@@ -575,4 +601,5 @@ __all__ = [
     "Topic",
     "blocks_personal_erasure",
     "deletion_eligibility",
+    "revocation_retention",
 ]

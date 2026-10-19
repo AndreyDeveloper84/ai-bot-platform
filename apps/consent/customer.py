@@ -511,7 +511,9 @@ def set_marketing(bot_user: "BotUser", *, granted: bool) -> None:
     )
 
 
-def revoke_data_storage(bot_user: "BotUser") -> "DeleteCascadeResult":
+def revoke_data_storage(
+    bot_user: "BotUser", *, retention: list[str] | None = None
+) -> "DeleteCascadeResult":
     """Отозвать согласие на хранение данных — и сделать это отзывом.
 
     Порядок шагов нагружен смыслом:
@@ -558,6 +560,10 @@ def revoke_data_storage(bot_user: "BotUser") -> "DeleteCascadeResult":
 
     Идемпотентно: повторный отзыв снимает 0 грантов, каскад повторно
     отрабатывает вхолостую, состояние то же.
+
+    ``retention`` (DRF-2919) — коды оснований удержания законного минимума
+    из :func:`~apps.identity.services.deletion_eligibility.revocation_retention`;
+    пишутся в audit-строку отзыва. Отзыв от них не зависит и не блокируется.
 
     Returns:
       Результат каскада: по шагу на строку, честно про неудачи.
@@ -623,6 +629,8 @@ def revoke_data_storage(bot_user: "BotUser") -> "DeleteCascadeResult":
             "actor": "customer",
             "shells": len(shells),
             "disclosure_version": DATA_STORAGE_REVOCATION_DISCLOSURE_VERSION,
+            # DRF-2919: основания удержания — коды, без сумм и салонов.
+            "retention": retention or [],
             # Тумблер подсказок аудируется всегда — отдельной строкой из
             # сеттера, здесь полем этой, чтобы «почему подсказки
             # выключены» не осталось без ответа. Гарантии «следа не может

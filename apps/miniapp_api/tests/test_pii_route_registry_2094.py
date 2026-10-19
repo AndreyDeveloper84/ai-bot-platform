@@ -235,10 +235,13 @@ CUSTOMER_ROUTES: dict[str, Entry] = {
         "proactive_hints.enabled",
         "revocation.status",
         "revocation.failed_steps",
+        "revocation.retention (outcome, reason codes, next actions, obligation owner)",
         via=V + "customer_data_storage_consent",
         note=(
             "the same consent document plus the outcome of the caller's own storage-consent "
-            "revocation (DRF-1950 three outcomes); step names, not data, in failed_steps"
+            "revocation (DRF-1950 three outcomes); step names, not data, in failed_steps. "
+            "retention (DRF-2919) names the grounds for the lawful minimum kept, as closed-"
+            "vocabulary codes from revocation_retention — no salon, booking, person or amount"
         ),
     ),
     # --- catalog (no person) -----------------------------------------------

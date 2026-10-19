@@ -401,6 +401,109 @@ class TestImmediateErasureDoor:
         assert cascade == []
 
 
+class TestStorageRevocationIsNeverBlocked:
+    """Пятая дверь — отзыв согласия на хранение (решение владельца 19.10, б).
+
+    Отзыв по 152-ФЗ нельзя «не выполнить»: ни 409, ни отказа. То, что на
+    дверях удаления остановило бы стирание, здесь — основание удержать
+    законный минимум. Каскад настоящий, Ayla подменена на границе.
+    """
+
+    class _Ayla:
+        def __init__(self):
+            self.deleted: list[str] = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_a):
+            return None
+
+        def delete_personal_data(self, *, ayla_user_id, external_user_id):
+            self.deleted.append(str(ayla_user_id))
+
+        def close(self):
+            return None
+
+    @pytest.fixture
+    def ayla(self):
+        fake = self._Ayla()
+        with patch(
+            "apps.identity.services.privacy.PersonalContextHttpClient", lambda *a, **k: fake
+        ):
+            yield fake
+
+    def _revoke(self, client: Client, uid: str):
+        from apps.consent import customer as customer_consents
+
+        return client.delete(
+            reverse("miniapp_api:customer_data_storage_consent"),
+            data=json.dumps(
+                {
+                    "confirmation": DELETE_CONFIRMATION_TOKEN,
+                    "disclosure_version": customer_consents.DATA_STORAGE_REVOCATION_DISCLOSURE_VERSION,
+                }
+            ),
+            content_type="application/json",
+            **_auth(uid),
+        )
+
+    def test_master_with_own_debt_revokes_and_the_lawful_minimum_stays(
+        self, client, customer_row, master_card, billing, ayla
+    ):
+        billing["status"] = BillingProxyResult(
+            status=ProxyStatus.OK,
+            payload={"subscription": {"status": "past_due"}, "fees": {"pending_total": "0.00"}},
+        )
+        visit = _booking_for(master_card)
+        BotUser.all_tenants.filter(channel_user_id=PERSON_UID).update(phone="+79990002919")
+
+        res = self._revoke(client, PERSON_UID)
+
+        assert res.status_code == 200, res.content
+        revocation = res.json()["revocation"]
+        assert revocation["retention"]["outcome"] == "PARTIAL_WITH_RETENTION"
+        assert "FINANCIAL_OBLIGATIONS" in revocation["retention"]["reasons"]
+        assert "ACTIVE_BOOKINGS" in revocation["retention"]["reasons"]
+        assert revocation["retention"]["next_actions"] == ["PROCEED", "EXPLAIN_RETAINED_DATA"]
+        # Остальное стёрто: ПДн на всех оболочках человека, Ayla вызвана.
+        assert ayla.deleted == [str(PERSON_AYLA_ID)]
+        for row in BotUser.all_tenants.filter(channel_user_id=PERSON_UID):
+            assert (row.phone, row.display_name) == ("", ""), row.tenant.slug
+        # Законный минимум на месте: ключ биллинга (там живёт долг), карточка
+        # с привязкой, запись в зеркале.
+        customer_row.refresh_from_db()
+        assert customer_row.ayla_user_id == PERSON_AYLA_ID
+        master_card.refresh_from_db()
+        assert master_card.ayla_user_id == PERSON_AYLA_ID
+        assert master_card.linked_bot_user_id is not None
+        assert RemoteBookingProxy.all_tenants.filter(pk=visit.pk).exists()
+
+    def test_plain_customer_is_erased_as_before(self, client, plain_customer, billing, ayla):
+        BotUser.all_tenants.filter(pk=plain_customer.pk).update(phone="+79990002920")
+
+        res = self._revoke(client, PLAIN_UID)
+
+        assert res.status_code == 200, res.content
+        retention = res.json()["revocation"]["retention"]
+        assert retention["outcome"] == "IMMEDIATE"
+        assert retention["reasons"] == ["ELIGIBLE"]
+        assert ayla.deleted == [str(PLAIN_AYLA_ID)]
+        plain_customer.refresh_from_db()
+        assert (plain_customer.phone, plain_customer.display_name) == ("", "")
+
+    def test_unverifiable_obligations_do_not_stop_the_revocation(
+        self, client, customer_row, master_card, billing, ayla
+    ):
+        billing["status"] = BillingProxyResult(status=ProxyStatus.UPSTREAM_ERROR)
+        res = self._revoke(client, PERSON_UID)
+        assert res.status_code == 200, res.content
+        retention = res.json()["revocation"]["retention"]
+        assert retention["outcome"] == "PARTIAL_WITH_RETENTION"
+        assert "VERIFICATION_REQUIRED" in retention["reasons"]
+        assert ayla.deleted == [str(PERSON_AYLA_ID)]
+
+
 class TestProfileSaysWhetherDeletionIsOffered:
     def _me(self, client: Client, uid: str) -> dict:
         res = client.get(reverse("miniapp_api:me"), **_auth(uid))

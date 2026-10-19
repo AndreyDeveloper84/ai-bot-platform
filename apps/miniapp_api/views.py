@@ -3505,7 +3505,16 @@ def customer_data_storage_consent(request: HttpRequest) -> HttpResponse:
             409,
         )
 
-    result = revoke_data_storage(bot_user)
+    # DRF-2919 п.2, пятая дверь (решение владельца 19.10, б): отзыв согласия
+    # не блокируется никогда. Оценка лишь называет, что удерживается по
+    # закону, — коды в ответ и в audit; каскад тот же.
+    from apps.identity.services.deletion_eligibility import (
+        deletion_eligibility,
+        revocation_retention,
+    )
+
+    retention = revocation_retention(deletion_eligibility(bot_user))
+    result = revoke_data_storage(bot_user, retention=[r.value for r in retention.reasons])
     document = _consents_document(bot_user)
 
     if document["data_storage"]["granted"]:
@@ -3533,6 +3542,7 @@ def customer_data_storage_consent(request: HttpRequest) -> HttpResponse:
         ),
         "failed_steps": result.failed_steps,
         "failed_details": {s.step: s.detail for s in result.steps if not s.ok and s.detail},
+        "retention": retention.as_dict(),
     }
     return JsonResponse(document, status=200)
 
