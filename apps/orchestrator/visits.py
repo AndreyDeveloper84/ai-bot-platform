@@ -44,6 +44,7 @@ from apps.orchestrator.discovery import (
     keyboard_envelope,
     show_salons_button,
 )
+from apps.orchestrator.next_steps import menu_button
 
 
 logger = logging.getLogger(__name__)
@@ -194,6 +195,13 @@ _MOVE_UNAVAILABLE_TEXT = (
 #: устройство наших очередей.
 _CANCEL_GONE_TEXT = "Этой записи уже нет — отменять нечего."
 
+#: «Отмени запись», а впереди ничего — утверждено владельцем 19.10 дословно.
+_CANCEL_NOTHING_TEXT = "У тебя нет активных записей — отменять нечего."
+
+#: «Отмени запись», а впереди несколько — утверждено владельцем 19.10
+#: дословно; записи называют кнопки под ним.
+_CANCEL_WHICH_TEXT = "У тебя несколько записей. Какую отменить?"
+
 #: Бэкенд отказал по состоянию записи (слишком поздно, визит идёт,
 #: запись уже закрыта). Что именно — знает салон, и звать его честнее,
 #: чем пересказывать чужое правило своими словами.
@@ -314,18 +322,43 @@ def route_visits_to_cancel(
     global_bot_user,
     trace_id: str | uuid.UUID | None = None,
 ) -> DiscoveryReply | None:
-    """«Отмени запись на завтра» → тот же список, если есть что отменять (DRF-2982).
+    """«Отмени запись на завтра» → путь к «Отменить» на карточке (DRF-2982).
 
-    Отмена — на карточке визита (§37 п.1: сначала запись, потом действие), и
-    список, который отвечает на «покажи мои записи», и есть путь к ней. Но
-    ответ этого списка, когда впереди ничего нет, — про прошлые визиты и
-    «посмотри наши салоны», на отмену он не отвечает. Поэтому без предстоящих
-    записей — ``None``: ход идёт дальше, как до этой правки, и нового текста
-    не нужно. Бэкенд недоступен — честное «не смогла получить записи».
+    Отмена — на карточке визита (§37 п.1: сначала запись, потом действие).
+    Тексты ниже — утверждённые владельцем 19.10 строки:
+
+    * впереди ничего — :data:`_CANCEL_NOTHING_TEXT` и «Меню» (§72). Список
+      «Мои записи» здесь не ответ: он про прошлые визиты и салоны;
+    * одна запись — тот же список, что на «покажи мои записи», с её
+      «Отменить»;
+    * несколько — :data:`_CANCEL_WHICH_TEXT` и по кнопке на запись, ведущей в
+      подтверждение отмены, которое называет услугу и время. Без прошлых
+      визитов и «Подробнее»: вопрос — какую отменить, не что посмотреть.
+
+    Бэкенд недоступен — честное «не смогла получить записи».
     """
     upcoming = list_upcoming(bot_user=global_bot_user, limit=DEFAULT_VISIT_LIMIT)
-    if upcoming.status != "backend_unavailable" and not upcoming.visits:
-        return None
+    if upcoming.status != "backend_unavailable":
+        if not upcoming.visits:
+            return DiscoveryReply(
+                text=_CANCEL_NOTHING_TEXT, action_data=keyboard_envelope([menu_button()])
+            )
+        if len(upcoming.visits) > 1:
+            return DiscoveryReply(
+                text=_CANCEL_WHICH_TEXT,
+                action_data=keyboard_envelope(
+                    [
+                        {
+                            "label": (
+                                f"{v.service_name or 'Запись'} — "
+                                f"{_format_when(v.start_at, v.salon_tz)}"
+                            ),
+                            "callback": f"{CALLBACK_VISIT_CANCEL_PREFIX}{v.appointment_id}",
+                        }
+                        for v in upcoming.visits
+                    ]
+                ),
+            )
     return route_visits(global_bot_user=global_bot_user, trace_id=trace_id, upcoming=upcoming)
 
 

@@ -402,7 +402,8 @@ def _route_cancel_to_visits(
 
     Консьерж отменять не умеет — у него нет такого глагола; отмена есть только
     на карточке визита (§37 п.1). ``None`` — ход идёт дальше, как до правки:
-    реплика не об отмене визита, предстоящих записей нет или чтение сломалось.
+    реплика не об отмене визита или чтение сломалось. Нечего отменять — ответ
+    «отменять нечего» (утверждено владельцем 19.10), а не ход дальше.
     """
     try:
         if not names_a_booking_cancel(text):
@@ -2405,9 +2406,9 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
     elif getattr(settings, "GLOBAL_BOT_ONBOARDING", False) and needs_onboarding(
         bot_user, event.text, conversation
     ):
-        # DRF-2982 — первое сообщение «отмени запись на завтра»: есть что
-        # отменять — список визитов, а не приветствие; нечего — приветствие,
-        # как раньше.
+        # DRF-2982 — первое сообщение «отмени запись на завтра» отвечается
+        # отменой, а не приветствием: есть что отменять — список визитов,
+        # нечего — «отменять нечего» (строка владельца 19.10).
         first_cancel = _route_cancel_to_visits(
             bot_user=bot_user,
             conversation=conversation,
@@ -2585,7 +2586,7 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
             # у записи есть «Отменить». Ниже команд памяти: «удали всё», «удали
             # что я веган» остаются командами памяти. Ниже вопроса памяти и
             # продолжения записи: на эти фразы оба отходят в сторону и снимают
-            # своё (DRF-2981). Без предстоящих записей — ход идёт дальше.
+            # своё (DRF-2981). Без предстоящих записей — «отменять нечего».
             cancel_reply: DiscoveryReply | None = None
             if ask_reply is None and booking_reply is None:
                 cancel_reply = _route_cancel_to_visits(

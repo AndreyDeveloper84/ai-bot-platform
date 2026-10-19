@@ -18,7 +18,7 @@ must_pass:
   # nothing has been deleted yet. A future regression that silently deleted
   # on a chat message would now fail here; under «удалены» it would pass.
   - response_contains_all:
-      - удалить данные
+      - удалить аккаунт и личные данные
       - ничего не удалила
 forbidden:
   - response_contains_any:
