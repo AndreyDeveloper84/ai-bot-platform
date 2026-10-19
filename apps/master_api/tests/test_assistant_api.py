@@ -436,3 +436,33 @@ class TestNoCustomerPii:
         assert "Данные инструмента my_day" in handed
         for banned in ("phone", "телефон", self.CUSTOMER_DIGITS):
             assert banned not in handed
+
+
+def test_service_selection_is_forwarded_as_hidden_assistant_hint(
+    client, bot_user, accepted_master, llm
+):
+    llm["script"].append(FakeResult(text="Выбрала услугу."))
+
+    resp = client.post(
+        ASK_URL,
+        data={
+            "text": "Спортивный массаж",
+            "select": {"service_id": "svc-42"},
+        },
+        content_type="application/json",
+        HTTP_AUTHORIZATION=init_data_header("12345"),
+    )
+
+    assert resp.status_code == 200, resp.content
+    assert len(llm["calls"]) == 1
+    handed = "\n".join(str(message.get("content") or "") for message in llm["calls"][0]["messages"])
+    assert "услуга выбрана — service_id=svc-42" in handed
+
+    with tenant_scope(bot_user.tenant):
+        thread = StaffAssistantThread.objects.get(bot_user=bot_user)
+        rows = list(StaffAssistantMessage.objects.filter(thread=thread).order_by("seq"))
+    assert any(
+        row.role == "tool" and "услуга выбрана — service_id=svc-42" in (row.content or "")
+        for row in rows
+    )
+    assert any(row.role == "user" and row.content == "Спортивный массаж" for row in rows)
