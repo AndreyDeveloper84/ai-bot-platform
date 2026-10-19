@@ -85,6 +85,8 @@ def _day_bounds(day: date_cls, tz: ZoneInfo) -> tuple[datetime, datetime]:
 
 def _visit_dict(row, tz: ZoneInfo) -> dict[str, Any]:
     return {
+        "appointment_id": row.id,
+        "appointment_version": row.appointment_version,
         "time": row.visit_at.astimezone(tz).strftime("%H:%M") if row.visit_at else "",
         "duration_min": row.duration_min,
         "service": row.service_name or "",
@@ -279,7 +281,7 @@ TOOL_SPECS: list[dict[str, Any]] = [
     {
         "name": "my_day",
         "description": (
-            "Записи мастера на конкретный день: время, услуга, имя клиента. "
+            "Записи мастера на конкретный день: технический id/версия записи, время, услуга, имя клиента. "
             "Используй для вопросов «что у меня сегодня / завтра / в четверг»."
         ),
         "parameters": {
