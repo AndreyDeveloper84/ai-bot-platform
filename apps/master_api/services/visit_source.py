@@ -183,6 +183,12 @@ def _to_rows(proxies: list[RemoteBookingProxy], tenant_id) -> list[VisitRow]:
     return rows
 
 
+def visit_row(proxy: RemoteBookingProxy) -> VisitRow:
+    """One mirror row shaped exactly like :func:`master_visits` rows (DRF-2945)."""
+
+    return _to_rows([proxy], proxy.tenant_id)[0]
+
+
 def master_visits(
     master,
     *,

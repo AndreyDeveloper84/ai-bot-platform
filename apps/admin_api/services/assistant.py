@@ -580,6 +580,10 @@ class AdminSubject:
     def action_specs(self) -> list[dict[str, Any]]:
         return list(ADMIN_ACTION_SPECS)
 
+    def followup_action_specs(self, tool_name: str) -> list[dict[str, Any]]:
+        # Админ предлагает действия только первым вызовом — как до DRF-2945.
+        return []
+
     def system_prompt(self, *, today: date, tz_label: str) -> str:
         from apps.master_api.services.assistant import _WEEKDAYS_RU, STAFF_ADDRESS_LINE
         from apps.persona.voice import SURFACE_SALON, assistant_identity

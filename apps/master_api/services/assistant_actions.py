@@ -46,6 +46,14 @@
 Создание записи (`create_booking`) сюда не добавлено: у мастерской
 поверхности нет ручки создания записи, и выдумывать её здесь значило бы
 проектировать, а не выставлять.
+
+### Действия на своей записи (DRF-2945)
+
+Перенос, отмена, «состоялся», «не пришёл» — тот же путь предложение →
+талон → подтверждение, а исполняет их ровно тот движок, что экран записи
+(``booking_actions.execute_master_booking_action``, DRF-2943): второго
+пишущего пути нет. Цель модель берёт из данных ``my_day``, версию — сервер
+из зеркала; талон фиксирует id, версию, действие и его аргументы.
 """
 
 from __future__ import annotations
@@ -293,7 +301,86 @@ ACTION_SPECS.append(
     }
 )
 
-ACTION_NAMES = frozenset(spec["name"] for spec in ACTION_SPECS)
+#: DRF-2945: действия мастера на своей записи — те же четыре, что на экране
+#: деталей (DRF-2943), и тот же движок (``booking_actions``). Имя для модели →
+#: действие канона.
+ACTION_RESCHEDULE_BOOKING = "reschedule_booking"
+ACTION_CANCEL_BOOKING = "cancel_booking"
+ACTION_COMPLETE_BOOKING = "complete_booking"
+ACTION_MARK_NO_SHOW = "mark_no_show"
+_BOOKING_ACTIONS: Final[dict[str, str]] = {
+    ACTION_RESCHEDULE_BOOKING: "reschedule",
+    ACTION_CANCEL_BOOKING: "cancel",
+    ACTION_COMPLETE_BOOKING: "complete",
+    ACTION_MARK_NO_SHOW: "no-show",
+}
+
+_APPOINTMENT_ID_PARAM: Final[dict[str, str]] = {
+    "type": "string",
+    "description": (
+        "appointment_id визита из данных my_day — скопируй как есть. Не придумывай "
+        "и не собирай его из слов мастера."
+    ),
+}
+
+
+def _booking_spec(name: str, description: str, extra: dict[str, Any], required: list[str]):
+    return {
+        "name": name,
+        "description": description,
+        "parameters": {
+            "type": "object",
+            "properties": {"appointment_id": _APPOINTMENT_ID_PARAM, **extra},
+            "required": ["appointment_id", *required],
+        },
+    }
+
+
+#: Предлагаются модели НЕ в первом вызове, а только после данных ``my_day``
+#: (см. ``MasterSubject.followup_action_specs``): id записи модель берёт из
+#: этих данных, а не угадывает. Версию записи модель не передаёт вовсе —
+#: её берёт сервер из своей строки зеркала.
+BOOKING_ACTION_SPECS: list[dict[str, Any]] = [
+    _booking_spec(
+        ACTION_RESCHEDULE_BOOKING,
+        "ПРЕДЛОЖИТЬ перенести визит на другое время. Ничего не выполняет: мастер "
+        "увидит, какую запись и куда переносим, и подтвердит отдельно.",
+        {
+            "new_start": {
+                "type": "string",
+                "description": "Новое начало, ISO 8601: ГГГГ-ММ-ДДTЧЧ:ММ.",
+            }
+        },
+        ["new_start"],
+    ),
+    _booking_spec(
+        ACTION_CANCEL_BOOKING,
+        "ПРЕДЛОЖИТЬ отменить визит. Ничего не выполняет: мастер подтвердит отдельно.",
+        {
+            "reason": {
+                "type": "string",
+                "description": "Причина отмены словами мастера, до 200 символов. Необязательно.",
+            }
+        },
+        [],
+    ),
+    _booking_spec(
+        ACTION_COMPLETE_BOOKING,
+        "ПРЕДЛОЖИТЬ отметить, что визит состоялся. Ничего не выполняет: мастер "
+        "подтвердит отдельно.",
+        {},
+        [],
+    ),
+    _booking_spec(
+        ACTION_MARK_NO_SHOW,
+        "ПРЕДЛОЖИТЬ отметить, что клиент не пришёл. Ничего не выполняет: мастер "
+        "подтвердит отдельно.",
+        {},
+        [],
+    ),
+]
+
+ACTION_NAMES = frozenset(spec["name"] for spec in [*ACTION_SPECS, *BOOKING_ACTION_SPECS])
 
 
 def is_action(name: str) -> bool:
@@ -431,7 +518,14 @@ def _block_time_details(start: datetime, end: datetime, tz) -> dict[str, Any]:
     return {"kind": "day_off", "title": "Изменить рабочий день", "date": day, "change": change}
 
 
-_CONFIRM_LABELS = {ACTION_BLOCK_TIME: "Отправить заявку", ACTION_PREPARE_BOOKING: "Подтвердить"}
+_CONFIRM_LABELS = {
+    ACTION_BLOCK_TIME: "Отправить заявку",
+    ACTION_PREPARE_BOOKING: "Подтвердить",
+    ACTION_RESCHEDULE_BOOKING: "Перенести",
+    ACTION_CANCEL_BOOKING: "Отменить запись",
+    ACTION_COMPLETE_BOOKING: "Отметить: состоялся",
+    ACTION_MARK_NO_SHOW: "Отметить: не пришёл",
+}
 
 
 def _sign(payload: dict[str, Any]) -> str:
@@ -443,6 +537,8 @@ def propose(name: str, arguments: dict[str, Any], *, master) -> ProposedAction:
 
     if name == ACTION_PREPARE_BOOKING:
         return _propose_booking(arguments or {}, master=master)
+    if name in _BOOKING_ACTIONS:
+        return _propose_booking_action(name, arguments or {}, master=master)
     if name != ACTION_BLOCK_TIME:
         raise ActionError(f"неизвестное действие {name!r}")
     normalised, summary = _validate_block_time(arguments or {}, master=master)
@@ -777,6 +873,175 @@ def _execute_booking(payload: dict[str, Any], *, master, actor, token: str = "")
     raise ActionError(result.detail or "не удалось создать запись", slug="action_rejected")
 
 
+# ─── действия мастера на своей записи (DRF-2945) ───────────────────────────
+
+#: Отказ, который тот же талон не пройдёт никогда (нет записи, действие
+#: закрыто). НЕ ``action_rejected``: тот повторяемый и оставил бы кнопку.
+ACTION_UNAVAILABLE_SLUG: Final = "action_unavailable"
+BOOKING_NOT_FOUND_TEXT: Final = "Не нашла такую запись в вашем расписании."
+BOOKING_VERSION_UNKNOWN_TEXT: Final = (
+    "Не вижу актуальную версию этой записи — откройте её и проверьте."
+)
+BOOKING_CHANGED_TEXT: Final = "Запись уже изменилась — откройте её и проверьте."
+BOOKING_UNAVAILABLE_TEXT: Final = "Это действие для этой записи сейчас недоступно."
+PENDING_TEXT: Final = "Проверяем результат"
+_BOOKING_DONE_TEXTS: Final[dict[str, str]] = {
+    ACTION_RESCHEDULE_BOOKING: "Готово. Запись перенесена.",
+    ACTION_CANCEL_BOOKING: "Готово. Запись отменена.",
+    ACTION_COMPLETE_BOOKING: "Готово. Визит отмечен как состоявшийся.",
+    ACTION_MARK_NO_SHOW: "Готово. Отмечено, что клиент не пришёл.",
+}
+
+
+def _open_booking(master, appointment_id: str) -> dict[str, Any]:
+    """Дверь в обычный экран записи — без действия, только посмотреть."""
+
+    from apps.master_api.services.assistant_cards import booking_detail_url
+
+    return {
+        "kind": "open",
+        "url": booking_detail_url(master, appointment_id),
+        "label": "Открыть запись",
+    }
+
+
+def _human_moment(value: datetime | None) -> str:
+    if value is None:
+        return ""
+    return f"{value.day} {_MONTHS_RU[value.month - 1]}, {value:%H:%M}"
+
+
+def _propose_booking_action(name: str, arguments: dict[str, Any], *, master) -> ProposedAction:
+    """Предложение по своей записи: цель и версия — из зеркала, не от модели.
+
+    ``appointment_id`` модель копирует из данных ``my_day``; чужой, выдуманный
+    и несуществующий id дают один и тот же отказ (``own_booking``), без
+    признания, что такая запись есть. ``expected_version`` модель не передаёт
+    вовсе: талон фиксирует версию той строки, из которой собрана сводка, —
+    человек подтверждает ровно ту запись, что поедет в исполнение.
+    """
+
+    from apps.master_api.services.bookings import own_booking
+    from apps.master_api.services.visit_source import visit_row
+
+    raw_id = text_argument(
+        arguments.get("appointment_id"), field="appointment_id", log_label="master_assistant"
+    )
+    try:
+        appointment_id = uuid.UUID(raw_id)
+    except ValueError:
+        raise ActionError(BOOKING_NOT_FOUND_TEXT, verbatim=True) from None
+    proxy = own_booking(master, appointment_id)
+    if proxy is None:
+        raise ActionError(BOOKING_NOT_FOUND_TEXT, verbatim=True)
+
+    action = _BOOKING_ACTIONS[name]
+    version = proxy.appointment_version
+    if version is None and action != "cancel":
+        # Без версии канон ответит version_unknown на любое из трёх — талон,
+        # который может только упасть, был бы нарисованным выходом. Отмене
+        # версия не обязательна (тот же канон).
+        raise ActionError(
+            BOOKING_VERSION_UNKNOWN_TEXT,
+            verbatim=True,
+            cards=[_open_booking(master, str(appointment_id))],
+        )
+
+    tz = salon_zone(getattr(master, "tenant", None))
+    row = visit_row(proxy)
+    when = row.visit_at.astimezone(tz) if row.visit_at else None
+    visit = ", ".join(p for p in (row.client_name, row.service_name, _human_moment(when)) if p)
+    args: dict[str, Any] = {"appointment_id": str(appointment_id), "expected_version": version}
+    if action == "reschedule":
+        new_start = _localise(_parse_dt(arguments.get("new_start"), field="new_start"), tz)
+        if new_start <= dj_timezone.now():
+            raise ActionError("Это время уже прошло. На какое время перенести?", verbatim=True)
+        args["new_start_datetime"] = new_start.isoformat()
+        summary = f"Перенести визит: {visit} → {_human_moment(new_start.astimezone(tz))}."
+    elif action == "cancel":
+        reason = text_argument(
+            arguments.get("reason"), field="reason", log_label="master_assistant"
+        )[:200]
+        if reason:
+            args["reason"] = reason
+        summary = f"Отменить визит: {visit}." + (f" Причина: {reason}." if reason else "")
+    elif action == "complete":
+        summary = f"Отметить, что визит состоялся: {visit}."
+    else:
+        summary = f"Отметить, что клиент не пришёл: {visit}."
+
+    payload = {
+        "action": name,
+        "args": args,
+        "master_id": str(master.id),
+        "tenant_id": str(master.tenant_id),
+    }
+    return ProposedAction(
+        name=name,
+        summary=f"{summary} Пока вы не подтвердите, ничего не меняется.",
+        confirm_label=_CONFIRM_LABELS[name],
+        token=_sign(payload),
+        expires_in_sec=ACTION_TOKEN_TTL_SECONDS,
+    )
+
+
+def _execute_booking_action(payload: dict[str, Any], *, master, actor) -> ExecutedAction:
+    """Исполнить подтверждённое действие тем же движком, что экран записи.
+
+    Одна попытка, аргументы только из талона. Успех — только при
+    ``committed`` канона. Нет ответа → «Проверяем результат»; запись успела
+    измениться → «Запись уже изменилась»: в обоих случаях ничего не
+    повторяется, ни здесь, ни на экране (карточка подтверждения снимается).
+    """
+
+    from apps.master_api.services.booking_actions import execute_master_booking_action
+
+    name = str(payload.get("action"))
+    args = payload.get("args") or {}
+    appointment_id = str(args.get("appointment_id") or "")
+    try:
+        target = uuid.UUID(appointment_id)
+    except ValueError:
+        raise ActionError("подтверждение не читается", slug="action_invalid") from None
+
+    result = execute_master_booking_action(
+        master=master,
+        bot_user=actor,
+        appointment_id=target,
+        action=_BOOKING_ACTIONS[name],
+        expected_version=args.get("expected_version"),
+        reason=args.get("reason"),
+        new_start_datetime=args.get("new_start_datetime"),
+    )
+    body = result.payload
+    door = _open_booking(master, appointment_id)
+    outcome = body.get("outcome")
+    if result.status_code == 200 and outcome == "committed":
+        return ExecutedAction(
+            name=name, text=_BOOKING_DONE_TEXTS[name], target_id=target, cards=[door]
+        )
+    if outcome == "pending":
+        return ExecutedAction(name=name, text=PENDING_TEXT, executed=False, cards=[door])
+    if outcome == "conflict":
+        logger.info(
+            "master_assistant.booking_action.conflict action=%s reason=%s",
+            name,
+            body.get("reason_code"),
+        )
+        return ExecutedAction(name=name, text=BOOKING_CHANGED_TEXT, executed=False, cards=[door])
+    if result.status_code == 404:
+        raise ActionError(BOOKING_NOT_FOUND_TEXT, slug=ACTION_UNAVAILABLE_SLUG)
+    if result.status_code == 403 or outcome == "blocked":
+        raise ActionError(BOOKING_UNAVAILABLE_TEXT, slug=ACTION_UNAVAILABLE_SLUG, cards=[door])
+    # 400 bad_request: талон собран так, что канон его не принимает.
+    logger.warning(
+        "master_assistant.booking_action.refused action=%s status=%s",
+        name,
+        result.status_code,
+    )
+    raise ActionError("подтверждение не читается", slug="action_invalid")
+
+
 def _decode(token: str, *, master) -> dict[str, Any]:
     try:
         raw = _signer().unsign(token, max_age=ACTION_TOKEN_TTL_SECONDS)
@@ -821,6 +1086,8 @@ def execute(token: str, *, master, actor) -> ExecutedAction:
     payload = _decode(token, master=master)
     if payload.get("action") == ACTION_PREPARE_BOOKING:
         return _execute_booking(payload, master=master, actor=actor, token=token)
+    if payload.get("action") in _BOOKING_ACTIONS:
+        return _execute_booking_action(payload, master=master, actor=actor)
     if payload.get("action") != ACTION_BLOCK_TIME:
         raise ActionError(f"неизвестное действие {payload.get('action')!r}")
 
@@ -876,9 +1143,15 @@ def execute(token: str, *, master, actor) -> ExecutedAction:
 
 __all__ = [
     "ACTION_BLOCK_TIME",
+    "ACTION_CANCEL_BOOKING",
+    "ACTION_COMPLETE_BOOKING",
+    "ACTION_MARK_NO_SHOW",
     "ACTION_PREPARE_BOOKING",
+    "ACTION_RESCHEDULE_BOOKING",
     "ACTION_NAMES",
     "ACTION_SPECS",
+    "ACTION_UNAVAILABLE_SLUG",
+    "BOOKING_ACTION_SPECS",
     "ACTION_TOKEN_TTL_SECONDS",
     "DONE_TEXT",
     "RETRIABLE_ACTION_SLUGS",
