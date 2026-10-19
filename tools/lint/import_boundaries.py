@@ -695,6 +695,12 @@ CATALOG_CROSS_TENANT_BASELINE: frozenset[BaselineKey] = frozenset(
         # would see one tenant and leave the links in the others. Runs from the
         # catalog's internal call, where no tenant ContextVar is set.
         "apps/identity/services/account_deletion.py",
+        # DRF-2919 п.2 — оценка удаления читает те же карточки того же
+        # человека, что исполнитель выше (``account_deletion.py``): по его
+        # BotUser ids / ``ayla_user_id``, и по салону, где он сам владелец, —
+        # другой персонал этого кабинета. Чтение, не discovery; `.objects`
+        # увидел бы один салон и пропустил обязательства в остальных.
+        "apps/identity/services/deletion_eligibility.py",
         # DRF-1061 — operator command listing and picking a master to invite.
         # Every query is filtered on the --tenant the operator named, and it
         # runs at a terminal with no request and therefore no tenant

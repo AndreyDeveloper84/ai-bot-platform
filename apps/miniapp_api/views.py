@@ -2687,7 +2687,7 @@ def me(request: HttpRequest) -> HttpResponse:
 
     if request.method == "GET":
         snap = get_profile(bot_user)
-        return JsonResponse(_profile_to_dict(snap))
+        return JsonResponse(_me_payload(bot_user, snap))
 
     try:
         body = json.loads(request.body or b"{}")
@@ -2699,7 +2699,7 @@ def me(request: HttpRequest) -> HttpResponse:
         snap = update_profile(bot_user, body)
     except ProfileUpdateError as exc:
         return _error("invalid_field", str(exc), 400)
-    return JsonResponse(_profile_to_dict(snap))
+    return JsonResponse(_me_payload(bot_user, snap))
 
 
 @csrf_exempt
@@ -2724,6 +2724,20 @@ def delete_me(request: HttpRequest) -> HttpResponse:
         return _error("malformed", "body is not valid JSON", 400)
     if not isinstance(body, dict):
         return _error("malformed", "body must be a JSON object", 400)
+    # DRF-2919 п.2 — та же оценка, что у заявки: стирать ли сейчас, решают
+    # неурегулированные обязательства, а не роль.
+    from apps.identity.services.deletion_eligibility import deletion_eligibility
+
+    eligibility = deletion_eligibility(bot_user)
+    if not eligibility.erasure_may_start:
+        return JsonResponse(
+            {
+                "error": "obligations_unsettled",
+                "detail": "personal data is not erased while obligations are unsettled",
+                "eligibility": eligibility.as_dict(),
+            },
+            status=409,
+        )
     confirmation = body.get("confirmation", "")
     try:
         soft_delete_user(bot_user, confirmation)
@@ -2793,8 +2807,19 @@ def personal_data_delete(request: HttpRequest) -> HttpResponse:
 
     Idempotent per contract: a repeat confirmed request returns the same 200.
     A failed or skipped mandatory step yields an honest 502 + failed_steps.
+
+    DRF-2919 п.2: каскад необратим и идёт сразу, без окна заявки, поэтому
+    перед ним — та же оценка, что у ``POST /me/deletion-request/``. Удаление
+    ПДн не ``IMMEDIATE``/``PARTIAL_WITH_RETENTION`` → 409 ``not_started``
+    (``obligations_unsettled`` / ``verification_required``) с ``eligibility``;
+    ничего не тронуто. Обычного клиента база политики не останавливает.
+    Конфликт идентичности оценкой не перехватывается: у каскада на него
+    своя fail-closed ветка (решение §3 — ни Ayla, ни память, 502
+    ``identity_conflict``), и её контракт здесь не меняется.
     """
-    from apps.identity.services.privacy import delete_personal_data
+    from apps.identity.services.deletion_eligibility import deletion_eligibility
+    from apps.identity.services.deletion_request import not_started_reason
+    from apps.identity.services.privacy import delete_personal_data, resolve_person_link
     from apps.identity.services.profile import DELETE_CONFIRMATION_TOKEN
 
     bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
@@ -2808,6 +2833,19 @@ def personal_data_delete(request: HttpRequest) -> HttpResponse:
             "confirmation_mismatch",
             f"body.confirmation must equal {DELETE_CONFIRMATION_TOKEN!r}",
             400,
+        )
+
+    conflict = resolve_person_link(bot_user, resolve_upstream=False).conflict
+    eligibility = deletion_eligibility(bot_user)
+    if not conflict and not eligibility.erasure_may_start:
+        return JsonResponse(
+            {
+                "status": "not_started",
+                "reason": not_started_reason(eligibility),
+                "retryable": False,
+                "eligibility": eligibility.as_dict(),
+            },
+            status=409,
         )
 
     result = delete_personal_data(bot_user, retry_source="personal_data_delete")
@@ -2855,9 +2893,13 @@ def deletion_request(request: HttpRequest) -> HttpResponse:
     Ответы ``POST``: 201 заявка заведена / 200 уже была открыта (тот же
     номер) — тело одно; 400 токен; 409 ``not_linked`` /
     ``identity_conflict`` (повтор не поможет — человек не связан с Ayla
-    или связан дважды); 502 ``upstream_unavailable`` (повтор поможет).
-    В каждом отказе ``status: "not_started"`` — единственное слово о
-    состоянии данных, и оно правдиво.
+    или связан дважды) / ``obligations_unsettled`` / ``verification_required``
+    (DRF-2919 п.2: удаление ПДн сейчас начаться не может — тело несёт
+    ``eligibility`` с причинами и следующими шагами); 502
+    ``upstream_unavailable`` (повтор поможет). В каждом отказе
+    ``status: "not_started"`` — единственное слово о состоянии данных, и
+    оно правдиво. Принятая заявка тоже несёт ``eligibility``: хранение
+    истории — часть ответа, а не сюрприз.
     """
     from apps.identity.services.deletion_request import (
         DeletionNotStarted,
@@ -2887,19 +2929,19 @@ def deletion_request(request: HttpRequest) -> HttpResponse:
     try:
         view = request_account_deletion(bot_user)
     except DeletionNotStarted as exc:
-        return JsonResponse(
-            {
-                "status": "not_started",
-                "reason": exc.reason,
-                "retryable": exc.retryable,
-                "detail": str(exc),
-            },
-            status=502 if exc.retryable else 409,
-        )
-    return JsonResponse(
-        {"status": "accepted", "request": view.as_dict()},
-        status=201 if view.created else 200,
-    )
+        refused: dict = {
+            "status": "not_started",
+            "reason": exc.reason,
+            "retryable": exc.retryable,
+            "detail": str(exc),
+        }
+        if exc.eligibility is not None:
+            refused["eligibility"] = exc.eligibility.as_dict()
+        return JsonResponse(refused, status=502 if exc.retryable else 409)
+    accepted: dict = {"status": "accepted", "request": view.as_dict()}
+    if view.eligibility is not None:
+        accepted["eligibility"] = view.eligibility.as_dict()
+    return JsonResponse(accepted, status=201 if view.created else 200)
 
 
 # ---------------------------------------------------------------------------
@@ -3463,7 +3505,16 @@ def customer_data_storage_consent(request: HttpRequest) -> HttpResponse:
             409,
         )
 
-    result = revoke_data_storage(bot_user)
+    # DRF-2919 п.2, пятая дверь (решение владельца 19.10, б): отзыв согласия
+    # не блокируется никогда. Оценка лишь называет, что удерживается по
+    # закону, — коды в ответ и в audit; каскад тот же.
+    from apps.identity.services.deletion_eligibility import (
+        deletion_eligibility,
+        revocation_retention,
+    )
+
+    retention = revocation_retention(deletion_eligibility(bot_user))
+    result = revoke_data_storage(bot_user, retention=[r.value for r in retention.reasons])
     document = _consents_document(bot_user)
 
     if document["data_storage"]["granted"]:
@@ -3491,6 +3542,7 @@ def customer_data_storage_consent(request: HttpRequest) -> HttpResponse:
         ),
         "failed_steps": result.failed_steps,
         "failed_details": {s.step: s.detail for s in result.steps if not s.ok and s.detail},
+        "retention": retention.as_dict(),
     }
     return JsonResponse(document, status=200)
 
@@ -3536,6 +3588,25 @@ def _regrant_data_storage(bot_user: BotUser, body: dict) -> HttpResponse:
         )
         return JsonResponse(document, status=502)
     return JsonResponse(document, status=200)
+
+
+def _me_payload(bot_user: BotUser, snap) -> dict:
+    """Тело ``/customer/me``: снимок профиля плюс признак про удаление (DRF-2919).
+
+    ``account_deletion_available`` — начнётся ли удаление ПДн, если человек
+    попросит сейчас (та же оценка, что у ручки заявки). ``False`` — есть
+    неурегулированные обязательства или их нечем проверить; экрану — не
+    предлагать действие, которое сервер отклонит. Право устанавливает не
+    признак, а сама ручка заявки.
+
+    Отсутствие поля читается как «как раньше»: закешированный бандл о нём
+    не знает и показывает кнопку, а сервер отвечает ``not_started``.
+    """
+    from apps.identity.services.deletion_eligibility import deletion_eligibility
+
+    payload = _profile_to_dict(snap)
+    payload["account_deletion_available"] = deletion_eligibility(bot_user).erasure_may_start
+    return payload
 
 
 def _profile_to_dict(snap) -> dict:
