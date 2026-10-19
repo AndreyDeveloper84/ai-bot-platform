@@ -25,7 +25,9 @@
 * p6 — «удали запись в дневнике питания» (бот сам так советует) не трогает
   ни питание, ни блюда;
 * p7 — «сотри мой номер» — сознательное отступление от узла задачи: телефон —
-  персональные данные, отпущенная реплика ушла бы модели без стирания;
+  персональные данные, отпущенная реплика ушла бы модели без стирания. С 19.10
+  ответ — строка владельца «Телефон — часть твоего аккаунта…» с путём удаления
+  в профиле, а не уточнение «что именно забыть»;
 * p8 — регулярки линейны на длинном входе.
 """
 
@@ -281,15 +283,41 @@ def test_p6_the_diary_advice_does_not_touch_food_memory(make_person) -> None:
     assert _rows(person) == 2
 
 
-@pytest.mark.parametrize("text", ["сотри мой номер", "забудь мой номер телефона"])
-def test_p7_a_phone_number_stays_a_clarification(make_person, text) -> None:
-    person = make_person(VEGAN)
+PHONE_TEXT = (
+    "Телефон — часть твоего аккаунта, отдельно его не стереть. Чтобы удалить все данные: "
+    "Профиль → Согласия и приватность → Удалить аккаунт и личные данные."
+)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "сотри мой номер",
+        "забудь мой номер телефона",
+        "удали мой телефон",
+        "Сотри, пожалуйста, мой номер.",
+        "забудь про мой телефон",
+    ],
+)
+@pytest.mark.parametrize("rows", [VEGAN, []], ids=["memory", "empty"])
+def test_p7_a_phone_number_is_answered_with_the_account_path(make_person, text, rows) -> None:
+    person = make_person(rows)
 
     result = _say(person, text)
 
     assert result is not None
-    assert result.text.startswith("Не совсем поняла, что именно забыть.")
-    assert _rows(person) == 1
+    assert result.text == PHONE_TEXT
+    assert result.erased is False
+    assert _rows(person) == len(rows)
+
+
+@pytest.mark.parametrize("text", ["забудь мой номер телефона и что я веган", "удали номер записи"])
+def test_p7_twin_a_phone_inside_a_longer_subject_is_not_the_phone_answer(make_person, text) -> None:
+    person = make_person(VEGAN)
+
+    result = _say(person, text)
+
+    assert result is None or result.text != PHONE_TEXT
 
 
 @pytest.mark.parametrize(

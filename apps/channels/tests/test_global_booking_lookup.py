@@ -480,6 +480,35 @@ class TestDetectorBoundaries:
 # --------------------------------------------------------------------------- #
 
 
+def _last_assistant(user_id: int = 222) -> Message:
+    last = (
+        Message.all_tenants.filter(conversation=_global_conversation(user_id), role="assistant")
+        .order_by("-created_at")
+        .first()
+    )
+    assert last is not None
+    return last
+
+
+def _buttons(message: Message) -> list[dict]:
+    """Кнопки канонического конверта, в каком бы виде ни лежала клавиатура."""
+    found: list[dict] = []
+
+    def walk(node) -> None:
+        if isinstance(node, dict):
+            if "label" in node and "callback" in node:
+                found.append(node)
+                return
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+
+    walk(message.action_data)
+    return found
+
+
 def _global_conversation(user_id: int = 222):
     from apps.conversations.services import resolve_active_global_conversation
     from apps.identity.services import resolve_or_create_global_bot_user
@@ -516,15 +545,56 @@ class TestCancelGoesToVisits:
         assert last is not None and last.action_type == "booking_cancel_lookup"
         assert "cb:visit:cancel:" in json.dumps(last.action_data, ensure_ascii=False)
 
-    def test_with_nothing_ahead_the_turn_goes_on_as_before(
+    def test_with_nothing_ahead_it_says_there_is_nothing_to_cancel(
         self, mock_send, fake_redis, spy_concierge, backend
     ):
-        """Ответ списка без предстоящих — про прошлые визиты и салоны, на отмену
-        он не отвечает; нового текста без слова владельца нет — ход дальше."""
+        """Строка владельца 19.10 и «Меню» (§72); не список про прошлые визиты."""
+        backend["visits"] = VisitsResult(status="ok", visits=(_visit(service="Массаж"),))
+
         _run_global("отмени запись на завтра", mid="c2")
 
-        spy_concierge.assert_called_once()
-        assert mock_send[-1]["text"] == "Какая услуга интересует?"
+        assert mock_send[-1]["text"] == "У тебя нет активных записей — отменять нечего."
+        spy_concierge.assert_not_called()
+        assert backend["subjects"] == ["222"]  # прошлые визиты не читались
+        last = _last_assistant()
+        assert last.action_type == "booking_cancel_lookup"
+        assert [b["label"] for b in _buttons(last)] == ["Меню"]
+
+    def test_with_several_ahead_it_asks_which_one(
+        self, mock_send, fake_redis, spy_concierge, backend
+    ):
+        """Строка владельца 19.10: по кнопке на ПРЕДСТОЯЩУЮ запись, каждая — в
+        подтверждение отмены; без прошлых визитов, «Подробнее» и «Перенести»."""
+        first = _visit(service="Маникюр", start="2026-09-01T12:00:00+00:00")
+        second = _visit(service="Педикюр", start="2026-09-03T09:30:00+00:00")
+        backend["upcoming"] = VisitsResult(status="ok", visits=(first, second))
+        backend["visits"] = VisitsResult(status="ok", visits=(_visit(service="Массаж"),))
+
+        _run_global("отмени запись", mid="c12")
+
+        assert mock_send[-1]["text"] == "У тебя несколько записей. Какую отменить?"
+        spy_concierge.assert_not_called()
+        buttons = _buttons(_last_assistant())
+        assert [b["callback"] for b in buttons] == [
+            f"cb:visit:cancel:{first.appointment_id}",
+            f"cb:visit:cancel:{second.appointment_id}",
+        ]
+        assert buttons[0]["label"].startswith("Маникюр — 1 сентября")
+        assert buttons[1]["label"].startswith("Педикюр — 3 сентября")
+        assert backend["subjects"] == ["222"]
+
+    def test_twin_several_ahead_on_show_my_records_is_still_the_full_list(
+        self, mock_send, fake_redis, spy_concierge, backend
+    ):
+        backend["upcoming"] = VisitsResult(
+            status="ok", visits=(_visit(service="Маникюр"), _visit(service="Педикюр"))
+        )
+
+        _run_global("покажи мои записи", mid="c13")
+
+        assert "Твои предстоящие записи:" in mock_send[-1]["text"]
+        labels = [b["label"] for b in _buttons(_last_assistant())]
+        assert "Подробнее: Маникюр" in labels and "Перенести: Педикюр" in labels
 
     def test_an_unreadable_backend_is_said_honestly(
         self, mock_send, fake_redis, spy_concierge, backend
@@ -649,13 +719,22 @@ class TestCancelGoesToVisits:
         assert "УЗ-кавитация" in mock_send[-1]["text"]
         assert "Привет! Я Ayla" not in mock_send[-1]["text"]
 
-    def test_twin_a_first_contact_cancel_with_nothing_ahead_still_gets_the_welcome(
+    def test_a_first_contact_cancel_with_nothing_ahead_says_so(
         self, mock_send, fake_redis, spy_concierge, backend, settings
     ):
-        """Нечего отменять — первое сообщение встречает приветствие, как раньше."""
+        """Нечего отменять — ответ на отмену, а не приветствие (строка 19.10)."""
         settings.GLOBAL_BOT_ONBOARDING = True
 
         _run_global("отмени запись на завтра", mid="c11", user_id=555, chat_id=555)
+
+        assert mock_send[-1]["text"] == "У тебя нет активных записей — отменять нечего."
+
+    def test_twin_a_first_contact_greeting_still_gets_the_welcome(
+        self, mock_send, fake_redis, spy_concierge, backend, settings
+    ):
+        settings.GLOBAL_BOT_ONBOARDING = True
+
+        _run_global("привет", mid="c14", user_id=556, chat_id=556)
 
         assert "Привет! Я Ayla" in mock_send[-1]["text"]
 
