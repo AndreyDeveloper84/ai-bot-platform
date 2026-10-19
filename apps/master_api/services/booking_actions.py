@@ -24,9 +24,7 @@ from apps.master_api.services.bookings import own_booking
 
 logger = logging.getLogger(__name__)
 
-MASTER_BOOKING_ACTIONS = frozenset(
-    {"acknowledge", "cancel", "complete", "no-show", "reschedule"}
-)
+MASTER_BOOKING_ACTIONS = frozenset({"acknowledge", "cancel", "complete", "no-show", "reschedule"})
 
 
 @dataclass(frozen=True)

@@ -95,6 +95,7 @@ def booking_detail_view(request: HttpRequest, appointment_id: uuid.UUID) -> Http
 
 # ─── POST bookings/<id>/action ───────────────────────────────────────────────
 
+
 @csrf_exempt
 @require_http_methods(["POST"])
 @require_master_init_data
