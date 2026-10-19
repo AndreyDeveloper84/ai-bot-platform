@@ -133,6 +133,14 @@ CUSTOMER_ROUTES: dict[str, Entry] = {
                 "and the consent key carries a date, not a document"
             ),
         ),
+        own(
+            "account_deletion_available",
+            via=V + "_me_payload",
+            note=(
+                "a boolean from the caller's own deletion eligibility (DRF-2919): whether erasure "
+                "of the caller's own data may start now; it names no salon, booking or amount"
+            ),
+        ),
         third_party(
             "favorites.master_name",
             via=V + "_profile_to_dict",
@@ -144,7 +152,9 @@ CUSTOMER_ROUTES: dict[str, Entry] = {
         ),
     ),
     "delete_me": none(
-        "acknowledgement only — {'deleted': true} after soft_delete_user; the confirmation "
+        "acknowledgement only — {'deleted': true} after soft_delete_user, or a refusal with the "
+        "caller's own eligibility as closed-vocabulary codes (DRF-2919: outcomes, reasons, next "
+        "actions, obligation owner — no salon, booking, person or amount); the confirmation "
         "token from the body is not echoed",
         via=V + "delete_me",
     ),
@@ -171,10 +181,13 @@ CUSTOMER_ROUTES: dict[str, Entry] = {
         "request.deadline_at",
         "request.completed_at",
         "request.is_open",
+        "eligibility (operation outcomes, reason codes, next actions, obligation owner)",
         via="apps.identity.services.deletion_request:DeletionRequestView.as_dict",
         note=(
             "the caller's own erasure request as Ayla records it; identifiers and dates of the "
-            "request itself, no fields of the person"
+            "request itself, no fields of the person. eligibility (DRF-2919) is the caller's own "
+            "assessment in closed-vocabulary codes from deletion_eligibility.as_dict — it names "
+            "no salon, booking, other person or amount"
         ),
     ),
     # --- consents ---------------------------------------------------------
