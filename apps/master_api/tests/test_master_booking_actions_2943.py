@@ -70,7 +70,7 @@ class StubActions:
 def stub_actions(monkeypatch):
     def install(stub: StubActions) -> StubActions:
         monkeypatch.setattr(
-            "apps.master_api.views_bookings.get_ayla_booking_client",
+            "apps.master_api.services.booking_actions.get_ayla_booking_client",
             lambda: stub,
         )
         return stub
