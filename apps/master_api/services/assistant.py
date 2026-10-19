@@ -151,6 +151,14 @@ def _system_prompt(master, *, today: date, tz_label: str) -> str:
 #: Скрытая строка нити с выбором из карточки (DRF-2153).
 SELECT_HINT_PREFIX = "Уточнение мастера:"
 
+#: DRF-2945: только там, где есть карточка подтверждения (Mini App). Действие
+#: на записи предлагается по данным my_day — id визита берётся оттуда.
+BOOKING_ACTIONS_PROMPT_LINE = (
+    "Если мастер просит перенести или отменить визит, отметить, что визит "
+    "состоялся или что клиент не пришёл, — сначала вызови my_day на день этого "
+    "визита. Действие предложишь по его данным: id визита бери только оттуда."
+)
+
 
 def _history_messages(history) -> list[dict[str, str]]:
     out: list[dict[str, str]] = []
@@ -229,6 +237,13 @@ class AssistantSubject(Protocol):
     @property
     def action_specs(self) -> list[dict[str, Any]]: ...
 
+    def followup_action_specs(self, tool_name: str) -> list[dict[str, Any]]:
+        """Действия, которые можно предложить ПО ДАННЫМ этого инструмента (DRF-2945).
+
+        Пусто — второй вызов только отвечает текстом, как до DRF-2945.
+        """
+        ...
+
     def system_prompt(self, *, today: date, tz_label: str) -> str: ...
 
     def run_tool(self, name: str, arguments: dict[str, Any]) -> Any:
@@ -281,8 +296,21 @@ class MasterSubject:
 
         return list(ACTION_SPECS) if self.allow_actions else []
 
+    def followup_action_specs(self, tool_name: str) -> list[dict[str, Any]]:
+        # Действия на записи — только по данным my_day: id визита модель
+        # копирует оттуда, а не угадывает (DRF-2945). Салонный бот
+        # (allow_actions=False) их не видит вовсе.
+        from apps.master_api.services.assistant_actions import BOOKING_ACTION_SPECS
+
+        if self.allow_actions and tool_name == "my_day":
+            return list(BOOKING_ACTION_SPECS)
+        return []
+
     def system_prompt(self, *, today: date, tz_label: str) -> str:
-        return _system_prompt(self.master, today=today, tz_label=tz_label)
+        prompt = _system_prompt(self.master, today=today, tz_label=tz_label)
+        if self.allow_actions:
+            prompt += "\n\n" + BOOKING_ACTIONS_PROMPT_LINE
+        return prompt
 
     def run_tool(self, name: str, arguments: dict[str, Any]) -> Any:
         from apps.master_api.services.assistant_tools import run_tool
@@ -404,8 +432,7 @@ def run_assistant(
     if not calls:
         return _done(reply, getattr(first, "text", "") or "")
 
-    call = calls[0]
-    if subject.is_action(call.name):
+    def _propose(call) -> AssistantReply:
         # DRF-1180 — пишущее действие не выполняется: собеседнику отдаётся
         # сводка с талоном, а само действие ждёт отдельного подтверждения.
         try:
@@ -423,6 +450,10 @@ def run_assistant(
         reply.text = subject.postprocess(proposal.summary)
         return reply
 
+    call = calls[0]
+    if subject.is_action(call.name):
+        return _propose(call)
+
     try:
         outcome = subject.run_tool(call.name, call.arguments or {})
     except ToolError as exc:
@@ -433,20 +464,35 @@ def run_assistant(
 
     reply.tool_name = outcome.name
     reply.tool_data = outcome.data if isinstance(outcome.data, dict) else None
+    # DRF-2945: по данным этого инструмента можно предложить действие (у
+    # мастера в Mini App после my_day — действия на записи). Второй вызов
+    # видит ТОЛЬКО эти спецификации: ни читающих инструментов, ни прочих
+    # действий; без них — ответ текстом, ровно как раньше.
+    followup = subject.followup_action_specs(outcome.name)
+    instruction = (
+        f"Ответь {subject.addressee} по этим данным. Ничего не добавляй от себя. "
+        "Если в данных stale=true — скажи, что расписание не удалось проверить и "
+        "это последние известные данные; day_off=true — в этот день выходной."
+    )
+    if followup:
+        instruction += (
+            " Если мастер просит действие с одним из этих визитов — вызови его, "
+            "appointment_id возьми из данных. Если неясно, какой визит, — спроси."
+        )
     messages.append(
         {
             "role": "user",
             "content": (
                 f"Данные инструмента {outcome.name}:\n"
-                f"{json.dumps(outcome.data, ensure_ascii=False)}\n\n"
-                f"Ответь {subject.addressee} по этим данным. Ничего не добавляй от себя. "
-                "Если в данных stale=true — скажи, что расписание не удалось проверить и "
-                "это последние известные данные; day_off=true — в этот день выходной."
+                f"{json.dumps(outcome.data, ensure_ascii=False)}\n\n{instruction}"
             ),
         }
     )
     try:
-        second = _complete(messages, tenant=subject.tenant)
+        if followup:
+            second = _complete(messages, tenant=subject.tenant, tools=followup)
+        else:
+            second = _complete(messages, tenant=subject.tenant)
     except Exception:  # noqa: BLE001
         logger.exception("master_assistant.second_call_failed %s", subject.log_label)
         return _done(reply, FAILED_TEXT)
@@ -455,6 +501,10 @@ def run_assistant(
     reply.tokens_out += getattr(second, "completion_tokens", 0) or 0
     reply.llm_cost_usd += _cost(second)
     reply.llm_model = getattr(second, "model", "") or reply.llm_model
+    offered_now = {spec["name"] for spec in followup}
+    second_calls = [c for c in (getattr(second, "tool_calls", None) or []) if c.name in offered_now]
+    if second_calls:
+        return _propose(second_calls[0])
     return _done(reply, getattr(second, "text", "") or "")
 
 
