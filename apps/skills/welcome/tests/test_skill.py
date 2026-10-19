@@ -199,27 +199,37 @@ class TestHandleStart:
         assert result.action_data["button_columns"] == 1
 
 
+def _assert_only_menu(result) -> None:
+    """The prompt carries exactly one button, «Меню» → ``cb:menu:help``."""
+    from apps.orchestrator.next_steps import MENU_LABEL
+    from apps.skills.menu.matching import CALLBACK_MENU_HELP
+
+    assert result.action_data is not None
+    assert result.action_data["buttons"] == [{"label": MENU_LABEL, "callback": CALLBACK_MENU_HELP}]
+
+
 class TestHandleCallback:
     def test_ask_callback_emits_prompt(self):
         result = WelcomeSkill().handle(_ctx("cb:welcome:ask"))
         assert result.reply_text == ASK_PROMPT
         assert result.meta["reply_kind"] == "welcome_ask_prompt"
-        # No keyboard — the FAQ skill picks up the user's question next turn.
-        assert result.action_data is None
+        # §72: the FAQ skill still picks up the question next turn, and «Меню»
+        # is the way out for whoever changed their mind.
+        _assert_only_menu(result)
 
     def test_food_callback_emits_food_prompt(self):
         result = WelcomeSkill().handle(_ctx("cb:welcome:food"))
         assert result.reply_text == FOOD_PROMPT
         assert result.meta["reply_kind"] == "welcome_food_prompt"
-        # No keyboard — user sends a photo next turn → food_scanner.
-        assert result.action_data is None
+        # §72: a photo next turn still goes to food_scanner; «Меню» is the way out.
+        _assert_only_menu(result)
 
     def test_water_callback_emits_water_prompt(self):
         result = WelcomeSkill().handle(_ctx("cb:welcome:water"))
         assert result.reply_text == WATER_PROMPT
         assert result.meta["reply_kind"] == "welcome_water_prompt"
-        # No keyboard — user types "стакан" next turn → water skill.
-        assert result.action_data is None
+        # §72: «стакан» next turn still goes to the water skill; «Меню» is the way out.
+        _assert_only_menu(result)
 
     def test_unknown_welcome_callback_falls_back_to_menu(self):
         """Defensive: an unknown ``cb:welcome:*`` (e.g. an open_app
