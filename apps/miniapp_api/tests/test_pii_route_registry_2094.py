@@ -170,8 +170,10 @@ CUSTOMER_ROUTES: dict[str, Entry] = {
         ),
     ),
     "personal_data_delete": none(
-        "status word only — 'deleted' / 'deletion_started' / an error slug; the erasure runs "
-        "server-side and nothing about the person is echoed",
+        "status word only — 'deleted' / 'deletion_started' / an error slug, or a not_started "
+        "refusal with the caller's own eligibility as closed-vocabulary codes (DRF-2919: "
+        "outcomes, reasons, next actions, obligation owner — no salon, booking, person or "
+        "amount); the erasure runs server-side and nothing about the person is echoed",
         via=V + "personal_data_delete",
     ),
     "deletion_request": own(

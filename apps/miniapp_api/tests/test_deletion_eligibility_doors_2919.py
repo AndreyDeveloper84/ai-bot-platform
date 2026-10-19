@@ -331,6 +331,76 @@ class TestLegacySoftDelete:
         assert customer_row.display_name == "Анна"
 
 
+class TestImmediateErasureDoor:
+    """``DELETE /me/personal-data/`` — каскад без окна заявки, необратим сразу."""
+
+    @pytest.fixture
+    def cascade(self):
+        from apps.identity.services.privacy import DeleteCascadeResult
+
+        calls: list[BotUser] = []
+
+        def _run(bot_user, **_k):
+            calls.append(bot_user)
+            return DeleteCascadeResult()
+
+        with patch("apps.identity.services.privacy.delete_personal_data", _run):
+            yield calls
+
+    def _erase(self, client: Client, uid: str):
+        return client.delete(
+            reverse("miniapp_api:personal_data_delete"),
+            data=json.dumps({"confirmation": DELETE_CONFIRMATION_TOKEN}),
+            content_type="application/json",
+            **_auth(uid),
+        )
+
+    def test_master_with_a_booking_is_not_started_and_nothing_runs(
+        self, client, plain_customer, customer_row, master_card, billing, cascade
+    ):
+        _booking_for(master_card)
+        assert self._erase(client, PLAIN_UID).status_code == 200
+        assert cascade == [plain_customer]
+
+        res = self._erase(client, PERSON_UID)
+
+        assert res.status_code == 409, res.content
+        body = res.json()
+        assert body["status"] == "not_started"
+        assert body["reason"] == OBLIGATIONS_UNSETTLED
+        assert body["retryable"] is False
+        assert _erasure(body)["reasons"] == ["ACTIVE_BOOKINGS"]
+        assert cascade == [plain_customer]
+
+    def test_own_debt_unverifiable_is_not_started(
+        self, client, customer_row, master_card, billing, cascade
+    ):
+        billing["status"] = BillingProxyResult(status=ProxyStatus.UPSTREAM_ERROR)
+        res = self._erase(client, PERSON_UID)
+        assert res.status_code == 409, res.content
+        assert res.json()["reason"] == VERIFICATION_REQUIRED
+        assert cascade == []
+
+    def test_the_same_master_without_obligations_is_erased(
+        self, client, customer_row, master_card, billing, cascade
+    ):
+        assert self._erase(client, PERSON_UID).status_code == 200
+        assert cascade == [customer_row]
+
+    def test_a_wrong_token_touches_nothing_before_the_assessment(
+        self, client, customer_row, master_card, billing, cascade
+    ):
+        _booking_for(master_card)
+        res = client.delete(
+            reverse("miniapp_api:personal_data_delete"),
+            data=json.dumps({"confirmation": "нет"}),
+            content_type="application/json",
+            **_auth(PERSON_UID),
+        )
+        assert res.status_code == 400
+        assert cascade == []
+
+
 class TestProfileSaysWhetherDeletionIsOffered:
     def _me(self, client: Client, uid: str) -> dict:
         res = client.get(reverse("miniapp_api:me"), **_auth(uid))

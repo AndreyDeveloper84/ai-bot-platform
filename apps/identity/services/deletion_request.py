@@ -132,6 +132,13 @@ def _from_wire(data: dict[str, Any], *, created: bool) -> DeletionRequestView:
         raise DeletionNotStarted(UPSTREAM_UNAVAILABLE, retryable=True) from exc
 
 
+def not_started_reason(eligibility: DeletionEligibility) -> str:
+    """Машинная причина отказа по оценке: проверить нечем или есть что урегулировать."""
+    if set(eligibility.erasure.reasons) == {Reason.VERIFICATION_REQUIRED}:
+        return VERIFICATION_REQUIRED
+    return OBLIGATIONS_UNSETTLED
+
+
 def request_account_deletion(bot_user: BotUser, *, client: Any = None) -> DeletionRequestView:
     """Завести заявку в каталоге и вернуть то, что показать человеку.
 
@@ -159,8 +166,7 @@ def request_account_deletion(bot_user: BotUser, *, client: Any = None) -> Deleti
     # не разрешает (см. докстринг модуля).
     eligibility = deletion_eligibility(bot_user)
     if not eligibility.erasure_may_start:
-        only_unverified = set(eligibility.erasure.reasons) == {Reason.VERIFICATION_REQUIRED}
-        reason = VERIFICATION_REQUIRED if only_unverified else OBLIGATIONS_UNSETTLED
+        reason = not_started_reason(eligibility)
         logger.info(
             "identity.deletion_request.not_started reason=%s bot_user=%s",
             reason,

@@ -2807,8 +2807,19 @@ def personal_data_delete(request: HttpRequest) -> HttpResponse:
 
     Idempotent per contract: a repeat confirmed request returns the same 200.
     A failed or skipped mandatory step yields an honest 502 + failed_steps.
+
+    DRF-2919 п.2: каскад необратим и идёт сразу, без окна заявки, поэтому
+    перед ним — та же оценка, что у ``POST /me/deletion-request/``. Удаление
+    ПДн не ``IMMEDIATE``/``PARTIAL_WITH_RETENTION`` → 409 ``not_started``
+    (``obligations_unsettled`` / ``verification_required``) с ``eligibility``;
+    ничего не тронуто. Обычного клиента база политики не останавливает.
+    Конфликт идентичности оценкой не перехватывается: у каскада на него
+    своя fail-closed ветка (решение §3 — ни Ayla, ни память, 502
+    ``identity_conflict``), и её контракт здесь не меняется.
     """
-    from apps.identity.services.privacy import delete_personal_data
+    from apps.identity.services.deletion_eligibility import deletion_eligibility
+    from apps.identity.services.deletion_request import not_started_reason
+    from apps.identity.services.privacy import delete_personal_data, resolve_person_link
     from apps.identity.services.profile import DELETE_CONFIRMATION_TOKEN
 
     bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
@@ -2822,6 +2833,19 @@ def personal_data_delete(request: HttpRequest) -> HttpResponse:
             "confirmation_mismatch",
             f"body.confirmation must equal {DELETE_CONFIRMATION_TOKEN!r}",
             400,
+        )
+
+    conflict = resolve_person_link(bot_user, resolve_upstream=False).conflict
+    eligibility = deletion_eligibility(bot_user)
+    if not conflict and not eligibility.erasure_may_start:
+        return JsonResponse(
+            {
+                "status": "not_started",
+                "reason": not_started_reason(eligibility),
+                "retryable": False,
+                "eligibility": eligibility.as_dict(),
+            },
+            status=409,
         )
 
     result = delete_personal_data(bot_user, retry_source="personal_data_delete")
