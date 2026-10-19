@@ -455,23 +455,14 @@ def test_service_selection_is_forwarded_as_hidden_assistant_hint(
 
     assert resp.status_code == 200, resp.content
     assert len(llm["calls"]) == 1
-    handed = "\n".join(
-        str(message.get("content") or "")
-        for message in llm["calls"][0]["messages"]
-    )
+    handed = "\n".join(str(message.get("content") or "") for message in llm["calls"][0]["messages"])
     assert "услуга выбрана — service_id=svc-42" in handed
 
     with tenant_scope(bot_user.tenant):
         thread = StaffAssistantThread.objects.get(bot_user=bot_user)
-        rows = list(
-            StaffAssistantMessage.objects.filter(thread=thread).order_by("seq")
-        )
+        rows = list(StaffAssistantMessage.objects.filter(thread=thread).order_by("seq"))
     assert any(
-        row.role == "tool"
-        and "услуга выбрана — service_id=svc-42" in (row.content or "")
+        row.role == "tool" and "услуга выбрана — service_id=svc-42" in (row.content or "")
         for row in rows
     )
-    assert any(
-        row.role == "user" and row.content == "Спортивный массаж"
-        for row in rows
-    )
+    assert any(row.role == "user" and row.content == "Спортивный массаж" for row in rows)
