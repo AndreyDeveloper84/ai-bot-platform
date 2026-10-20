@@ -358,6 +358,18 @@ export interface BookingVersion {
   start_datetime: string;
 }
 
+export interface AdminBookingDetail extends BookingVersion {
+  end_datetime: string;
+  duration_min: number;
+  service_id: string;
+  service_name: string;
+  client_first_name: string;
+  client_last_initial: string;
+  master_id: string;
+  master_name: string;
+  is_in_progress: boolean;
+}
+
 /**
  * GET /api/v1/admin/bookings/<id>/ — the canonical version.
  *
@@ -372,6 +384,20 @@ export const getBookingVersion = (
   init: { signal?: AbortSignal } = {},
 ): Promise<BookingVersion> =>
   request<BookingVersion>(
+    `/api/v1/admin/bookings/${encodeURIComponent(appointmentId)}/`,
+    { signal: init.signal },
+  );
+
+/**
+ * The same canonical GET, with the richer presentation contract required by
+ * Salon v2 Appointment Detail. Existing callers that only need optimistic
+ * concurrency keep the narrow BookingVersion type.
+ */
+export const getAdminBookingDetail = (
+  appointmentId: string,
+  init: { signal?: AbortSignal } = {},
+): Promise<AdminBookingDetail> =>
+  request<AdminBookingDetail>(
     `/api/v1/admin/bookings/${encodeURIComponent(appointmentId)}/`,
     { signal: init.signal },
   );

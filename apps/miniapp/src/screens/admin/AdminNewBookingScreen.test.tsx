@@ -6,6 +6,7 @@
  * 3. «Could not ask the schedule» never renders as «nothing free».
  */
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -166,6 +167,36 @@ describe("primary screen shape (§12)", () => {
   it("keeps «Создать запись» disabled until the draft is reviewable", () => {
     renderScreen();
     expect(screen.getByRole("button", { name: "Создать запись" })).toBeDisabled();
+  });
+});
+
+describe("Salon v2 frozen presentation — DRF-2934", () => {
+  it("shows explicit «Изменить» for a selected returning customer", async () => {
+    mockedSearch.mockResolvedValue([
+      { id: "c-1", name: "Мария", named: true, phone_masked: "+• ••67" },
+    ]);
+    renderScreen();
+
+    await userEvent.click(screen.getByLabelText(/Клиент/));
+    fireEvent.change(await screen.findByLabelText("Поиск клиента"), {
+      target: { value: "Мария" },
+    });
+    await userEvent.click(await screen.findByText(/Мария · /));
+
+    expect(await screen.findByText("Изменить")).toBeInTheDocument();
+    expect(screen.getByLabelText(/^Клиент: Мария · /)).toBeInTheDocument();
+  });
+
+  it("supports returning to the Salon Schedule surface", async () => {
+    render(
+      <MemoryRouter initialEntries={["/admin/booking/new?return=schedule"]}>
+        <AdminNewBookingScreen />
+      </MemoryRouter>,
+    );
+
+    expect(
+      await screen.findByRole("button", { name: "← Расписание" }),
+    ).toBeInTheDocument();
   });
 });
 
