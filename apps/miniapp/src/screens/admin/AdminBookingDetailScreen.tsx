@@ -16,6 +16,7 @@ import {
 } from "../../lib/admin-api";
 import { backTo } from "../../lib/screen-back";
 import { signalReady } from "../../lib/max-sdk";
+import { parseSalonWallClock } from "../../lib/format";
 
 type Phase =
   | { kind: "loading" }
@@ -35,12 +36,11 @@ function safeBack(state: unknown): string {
 }
 
 function wireDate(iso: string): string {
-  return iso.slice(0, 10);
+  return parseSalonWallClock(iso)?.ymd ?? iso;
 }
 
 function wireTime(iso: string): string {
-  const match = iso.match(/T(\d{2}:\d{2})/);
-  return match?.[1] ?? iso;
+  return parseSalonWallClock(iso)?.hm ?? iso;
 }
 
 function clientName(data: AdminBookingDetail): string {
@@ -220,8 +220,6 @@ function BookingDetail({
           <p className="booking-detail__state-title">Сейчас по расписанию</p>
         </section>
       ) : null}
-
-      {cancelled ? <p className="booking-detail__cancelled">Запись отменена</p> : null}
 
       {message ? <p role="alert">{message}</p> : null}
 
