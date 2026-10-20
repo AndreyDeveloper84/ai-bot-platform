@@ -175,10 +175,12 @@ function DraftRow({
   label,
   value,
   onOpen,
+  actionLabel,
 }: {
   label: string;
   value: string | null;
   onOpen: () => void;
+  actionLabel?: string;
 }) {
   return (
     <button
@@ -195,6 +197,9 @@ function DraftRow({
       >
         {value ?? "выбрать"}
       </span>
+      {value && actionLabel ? (
+        <span className="draft-row__action">{actionLabel}</span>
+      ) : null}
     </button>
   );
 }
@@ -574,6 +579,7 @@ export function NewBookingForm({
           label="Клиент"
           value={customerLabel}
           onOpen={() => setSheet("customer")}
+          actionLabel={!isMaster && customerLabel ? "Изменить" : undefined}
         />
         <DraftRow
           label="Услуга"
