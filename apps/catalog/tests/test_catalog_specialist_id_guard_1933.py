@@ -71,6 +71,8 @@ CONVERTED = {
     # before calling the specialist action endpoint. DRF-2945: the call moved
     # from views_bookings.py into the shared booking action service.
     ("apps/master_api/services/booking_actions.py", 1),
+    # DRF-2984 B2b: архив мастера в каталог — один вызов через колонку.
+    ("apps/catalog/services/archive_sync.py", 1),
 }
 
 PENDING_1933B: dict[tuple[str, str], int] = {}

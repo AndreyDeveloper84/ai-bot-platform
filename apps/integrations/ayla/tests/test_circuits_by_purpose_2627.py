@@ -253,4 +253,6 @@ class TestP6Census:
         assert booking == BOOKING_PATHS
         # До DRF-2627 на автомате записи — 44 пути; после — 13, чтений — 31.
         # DRF-2785: +1 запись — действия мастера на своей записи.
-        assert (len(booking), len(read), len(media)) == (14, 31, 1)
+        # DRF-2984 B2b: +1 чтение-автомат — архив мастера в каталог
+        # (set_specialist_archived; как пауза, не путь записи клиента).
+        assert (len(booking), len(read), len(media)) == (14, 32, 1)
