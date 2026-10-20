@@ -118,7 +118,7 @@ function BookingDetail({
     if (mode === "pending" || mode === "conflict") {
       setMode("idle");
     }
-  }, [data.id, data.version, data.start_datetime]);
+  }, [data.id, data.version, data.start_datetime, mode]);
 
   const cancelled = data.status === "cancelled" || data.status === "no_show";
   const actionable = !cancelled && data.status !== "completed";
