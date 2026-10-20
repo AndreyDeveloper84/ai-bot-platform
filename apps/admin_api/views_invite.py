@@ -132,6 +132,11 @@ from apps.events.services import emit
 from apps.events.vocabulary import MASTER_INVITED
 from apps.identity.models import BotUser
 from apps.master_api.auth import generate_invite_token
+from apps.tenancy.billing_gate import (
+    MasterAddRefused,
+    assert_can_add_master,
+    master_add_refusal_response,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -987,6 +992,13 @@ def master_invite_create(request: HttpRequest) -> HttpResponse:
             return response
 
         reused = _reusable_row(rows)
+
+    # DRF-2984 B2 — ранний отказ: сама строка ещё неактивна, но приглашать
+    # мастера, которого подписка не пустит на принятии, — обещать впустую.
+    try:
+        assert_can_add_master(tenant, master_id=reused.id if reused is not None else None)
+    except MasterAddRefused as exc:
+        return master_add_refusal_response(exc)
 
     now = timezone.now()
     expires_at = now + timedelta(days=INVITE_TTL_DAYS)

@@ -267,6 +267,8 @@ def _verify(request: HttpRequest) -> HttpResponse:
             "verified": outcome.verified,
             "skipped": outcome.skipped,
             "blocked": outcome.blocked,
+            # DRF-2984 B2 — не пустила подписка салона (заморозка / переход на «Салон»).
+            "billing_blocked": outcome.billing_blocked,
             "not_eligible": not_eligible,
             "still_hidden": still_hidden,
             "remaining": remaining,

@@ -23,7 +23,7 @@ from __future__ import annotations
 import datetime as dt
 from dataclasses import dataclass
 
-from django.db.models import Q
+from django.db.models import Case, F, Q, Value, When
 
 from apps.tenancy.models import SubscriptionStatus, Tenant
 
@@ -72,6 +72,12 @@ def apply_subscription_event(
     }
     if update.plan is not None:
         fields["plan"] = update.plan
+        # Тариф вступил в силу — ожидание той же смены снимается (B2: plan_changed).
+        reached = Q(pending_plan=update.plan)
+        fields["pending_plan"] = Case(When(reached, then=Value("")), default=F("pending_plan"))
+        fields["pending_plan_from"] = Case(
+            When(reached, then=Value(None)), default=F("pending_plan_from")
+        )
     if update.trial_ends_at is not None:
         fields["trial_ends_at"] = update.trial_ends_at
     if update.current_period_end is not None:
@@ -85,9 +91,29 @@ def apply_subscription_event(
     return updated == 1
 
 
+def apply_pending_plan(tenant_id: str, *, plan: str, effective_from: dt.date) -> bool:
+    """Записать подтверждённую смену тарифа, которая вступит в силу ``effective_from``.
+
+    ``plan`` не трогается: до начала периода человек платит по прежнему
+    тарифу, и экран не должен говорить иное. ``plan`` перепишет ``renewed``
+    первого периода после смены (:func:`apply_subscription_event` снимет и
+    ожидание). Из двух смен действует та, что вступает позже.
+    """
+
+    if plan not in MIRRORED_PLANS:
+        raise BillingMirrorError(f"тариф вне словаря: {plan!r}")
+    updated = (
+        Tenant.all_objects.filter(pk=tenant_id)
+        .filter(Q(pending_plan_from__isnull=True) | Q(pending_plan_from__lte=effective_from))
+        .update(pending_plan=plan, pending_plan_from=effective_from)
+    )
+    return updated == 1
+
+
 __all__ = [
     "MIRRORED_PLANS",
     "BillingMirrorError",
     "MirrorUpdate",
+    "apply_pending_plan",
     "apply_subscription_event",
 ]

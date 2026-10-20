@@ -139,6 +139,22 @@ class Tenant(models.Model):
         help_text="Mirror: last day of the paid period.",
         verbose_name="Оплачено до",
     )
+    # DRF-2984 B2 — подтверждённая смена тарифа (соло → салон, В-2), которая
+    # вступит в силу со следующего периода. До того plan прежний, а второго
+    # мастера уже можно заводить: каталог меняет вид тенанта сразу.
+    pending_plan = models.CharField(
+        max_length=32,
+        blank=True,
+        default="",
+        help_text="Mirror: confirmed tariff change waiting for pending_plan_from; empty — none.",
+        verbose_name="Тариф со следующего периода",
+    )
+    pending_plan_from = models.DateField(
+        null=True,
+        blank=True,
+        help_text="Mirror: the day pending_plan takes effect.",
+        verbose_name="Новый тариф с",
+    )
     timezone = models.CharField(
         max_length=64,
         default="Europe/Moscow",

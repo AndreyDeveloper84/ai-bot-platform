@@ -198,3 +198,58 @@ def test_m9_the_mirror_vocabulary_is_exactly_the_catalog_statuses_plus_none():
         "frozen",
         "canceled",
     ]
+
+
+# ── B2: подтверждённая смена тарифа ────────────────────────────────────────
+
+
+def _pending(tenant: Tenant) -> tuple:
+    t = Tenant.all_objects.get(pk=tenant.pk)
+    return (t.plan, t.pending_plan, t.pending_plan_from)
+
+
+def test_m10_plan_changed_is_pending_not_current(tenant):
+    """До нового периода человек платит по старому тарифу — plan прежний."""
+
+    _send(
+        "subscription.activated",
+        {"specialist_id": SPECIALIST_ID, "tariff": "solo", "period_end": "2026-11-19"},
+        tenant_id=str(tenant.pk),
+    )
+    _send(
+        "subscription.plan_changed",
+        {"tariff": "salon", "effective_from": "2026-11-20"},
+        tenant_id=str(tenant.pk),
+        at=T0 + dt.timedelta(hours=1),
+    )
+
+    assert _pending(tenant) == ("solo", "salon", dt.date(2026, 11, 20))
+
+
+def test_m11_the_first_renewal_on_the_new_tariff_makes_it_current(tenant):
+    _send(
+        "subscription.plan_changed",
+        {"tariff": "salon", "effective_from": "2026-11-20"},
+        tenant_id=str(tenant.pk),
+    )
+    _send(
+        "subscription.renewed",
+        {"tariff": "salon", "period_end": "2026-12-19"},
+        tenant_id=str(tenant.pk),
+        at=T0 + dt.timedelta(days=31),
+    )
+
+    assert _pending(tenant) == ("salon", "", None)
+
+
+def test_m12_a_renewal_without_tariff_keeps_the_pending_change(tenant):
+    """Старый производитель renewed без tariff — ожидание не снимается молча."""
+
+    _send(
+        "subscription.plan_changed",
+        {"tariff": "salon", "effective_from": "2026-11-20"},
+        tenant_id=str(tenant.pk),
+    )
+    _send("subscription.renewed", {"period_end": "2026-12-19"}, tenant_id=str(tenant.pk))
+
+    assert _pending(tenant) == ("free", "salon", dt.date(2026, 11, 20))

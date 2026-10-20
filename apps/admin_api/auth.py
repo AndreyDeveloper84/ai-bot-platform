@@ -61,6 +61,7 @@ from apps.identity.services.bot_user_resolver import (
 )
 from apps.identity.services.role_resolver import RoleContext, resolve_role
 from apps.miniapp_api.transport_refusal import GUARD_ATTR, verify_request_init_data
+from apps.tenancy.billing_gate import frozen_refusal
 from apps.tenancy.context import tenant_scope
 
 logger = logging.getLogger(__name__)
@@ -244,6 +245,12 @@ def _gate(
             allowed = True
         if not allowed:
             return _role_refusal(role_ctx, tenant_slug=bot_user.tenant.slug)
+
+        # DRF-2984 B2 — заморозка подписки. У админской поверхности открытых
+        # маршрутов нет: биллинг живёт в Mini App мастера (B3 решит экран салона).
+        frozen = frozen_refusal(request, bot_user.tenant)
+        if frozen is not None:
+            return frozen
 
         request.verified_init_data = verified  # type: ignore[attr-defined]
         request.bot_user = bot_user  # type: ignore[attr-defined]
