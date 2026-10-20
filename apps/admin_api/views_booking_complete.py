@@ -39,11 +39,14 @@ import logging
 from typing import Any
 
 from django.http import HttpRequest, HttpResponse, JsonResponse
+from django.utils import timezone as dj_timezone
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 
 from apps.admin_api.auth import require_booking_desk
+from apps.admin_api.services.salon_day import build_salon_day
 from apps.admin_api.services.visit_settle import own_booking as _own_booking
+from apps.tenancy.timezones import salon_iso, salon_zone
 from apps.identity.models import BotUser
 from apps.integrations.ayla.user_proxy import external_user_id_for
 
@@ -110,18 +113,65 @@ def booking_version(request: HttpRequest, appointment_id: str) -> HttpResponse:
 
     # DRF-2784: the read lives in the service — the salon bot's chat shows
     # the operator the same version before its «Да, состоялся».
+    proxy = _own_booking(tenant.id, appointment_id)
+    if proxy is None:
+        return _error("not_found", "booking not found", 404)
+
     record = read_version(tenant=tenant, bot_user=bot_user, appointment_id=appointment_id)
     if isinstance(record, VersionUnavailable):
         # No version means no action: the screen must not offer a button
         # it would have to aim blind.
         return _error(record.slug, record.detail, record.status, hint=record.hint)
 
+    # DRF-2935: detail presentation reuses the existing Salon Day
+    # projection for names. The local booking mirror intentionally stores
+    # no customer PII, and this keeps that boundary intact: first name +
+    # last initial only, exactly as /admin/day/.
+    tz = salon_zone(tenant)
+    day = build_salon_day(tenant, day=proxy.start_at.astimezone(tz).date())
+    visit = None
+    master_id = ""
+    master_name = ""
+    for master in day.masters:
+        visit = next((v for v in master.visits if v.id == str(appointment_id)), None)
+        if visit is not None:
+            master_id = master.master_id
+            master_name = master.name
+            break
+    if visit is None:
+        visit = next((v for v in day.orphan_visits if v.id == str(appointment_id)), None)
+
+    # Duration belongs to the mirrored booking and survives a reschedule.
+    duration_min = max(0, int((proxy.end_at - proxy.start_at).total_seconds() // 60))
+    start_at = record.start_datetime
+    end_at = proxy.end_at
+    try:
+        # get_appointment_version may return either an aware datetime or
+        # its ISO representation depending on the integration adapter.
+        if hasattr(start_at, "tzinfo"):
+            canonical_start = start_at
+        else:
+            canonical_start = datetime.fromisoformat(str(start_at).replace("Z", "+00:00"))
+        end_at = canonical_start + (proxy.end_at - proxy.start_at)
+        is_in_progress = canonical_start <= dj_timezone.now() < end_at
+    except (TypeError, ValueError):
+        is_in_progress = proxy.start_at <= dj_timezone.now() < proxy.end_at
+
     return JsonResponse(
         {
             "id": record.id,
             "version": record.version,
             "status": record.status,
-            "start_datetime": record.start_datetime,
+            "start_datetime": start_at,
+            "end_datetime": salon_iso(end_at, tz),
+            "duration_min": duration_min,
+            "service_id": visit.service_id if visit is not None else "",
+            "service_name": visit.service_name if visit is not None else "",
+            "client_first_name": visit.client_first_name if visit is not None else "",
+            "client_last_initial": visit.client_last_initial if visit is not None else "",
+            "master_id": master_id,
+            "master_name": master_name,
+            "is_in_progress": is_in_progress,
         }
     )
 
