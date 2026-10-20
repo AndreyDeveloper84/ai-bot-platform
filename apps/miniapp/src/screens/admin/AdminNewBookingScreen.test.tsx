@@ -116,6 +116,32 @@ describe("prefill from the admin assistant (DRF-2119)", () => {
     expect(mockedCreate).not.toHaveBeenCalled();
   });
 
+  it("treats Ayla client name as a search hint, not a selected new customer", async () => {
+    mockedSearch.mockResolvedValue([
+      { id: "c-1", name: "Анна П.", named: true },
+      { id: "c-2", name: "Анна С.", named: true },
+    ]);
+    renderWithQuery(
+      "date=2026-08-21&master_id=m-1&service_id=s-1&client_query=%D0%90%D0%BD%D0%BD%D0%B0",
+    );
+
+    await waitFor(() =>
+      expect(screen.getByLabelText(/^Мастер: Анна/)).toBeInTheDocument(),
+    );
+    expect(screen.getByLabelText(/^Клиент: выбрать/)).toBeInTheDocument();
+    expect(screen.getByRole("note")).toHaveTextContent(
+      "Ayla указала клиента «Анна» — выберите существующего или создайте нового.",
+    );
+
+    screen.getByLabelText(/^Клиент: выбрать/).click();
+    await waitFor(() => expect(mockedSearch).toHaveBeenCalledWith(
+      "Анна",
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    ));
+    expect(await screen.findByText("Анна П.")).toBeInTheDocument();
+    expect(screen.getByText("Анна С.")).toBeInTheDocument();
+  });
+
   it("ignores ids that are not in the loaded lists", async () => {
     renderWithQuery("master_id=m-other&service_id=s-other");
     await waitFor(() => expect(mockedMasters).toHaveBeenCalled());
