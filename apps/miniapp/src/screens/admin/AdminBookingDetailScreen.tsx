@@ -234,7 +234,7 @@ function BookingDetail({
       ) : mode === "cancel" ? (
         <DestructiveConfirmation
           title="Отменить запись?"
-          body="Запись клиента будет отменена."
+          body="Вы уверены, что хотите отменить запись клиента?"
           confirmLabel="Отменить запись"
           busy={mutating}
           onConfirm={() => void cancel()}
