@@ -65,6 +65,12 @@ ALLOWED_EVENT_NAMES: Final[frozenset[str]] = frozenset(
         "subscription.activated",
         "subscription.past_due",
         "billing.fee_charged",
+        # DRF-2984 — подписка платформы по тенанту (design §6.2). Не
+        # tenant-nullable: новая подписка всегда на тенанте каталога.
+        "subscription.trial_started",
+        "subscription.renewed",
+        "subscription.frozen",
+        "subscription.canceled",
         # DRF-2196 (а1, §64) — системный сигнал: без пользователя и тенанта.
         "system.module.health.degraded",
     }
