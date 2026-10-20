@@ -85,6 +85,7 @@ from apps.events.vocabulary import (
 )
 from apps.identity.models import BotUser
 from apps.notifications.proactive import consent_blocker
+from apps.tenancy.billing_gate import MasterAddRefused, assert_can_add_master
 
 logger = logging.getLogger(__name__)
 
@@ -1246,6 +1247,12 @@ def reactivate_master(
         master = CatalogMaster.all_tenants.select_for_update().get(pk=master.pk)
         if master.is_active and master.archived_at is None:
             raise DeactivationError("already_active", "master is already active")
+
+        # DRF-2984 B2 — возврат делает мастера активным в салоне.
+        try:
+            assert_can_add_master(master.tenant, master_id=master.id)
+        except MasterAddRefused as exc:
+            raise DeactivationError(exc.slug, exc.detail, 409) from exc
 
         master.is_active = True
         master.archived_at = None

@@ -625,6 +625,9 @@ class TenantAdmin(AylaAdminMedia, admin.ModelAdmin):
             # DRF-1597: число печатается всегда, когда оно ненулевое —
             # «верифицировано: 0» без него читается как сбой.
             message += f" Не подтверждено — ждут нажатия самого мастера: {outcome.blocked}."
+        if outcome.billing_blocked:
+            # DRF-2984 B2.
+            message += f" Не подтверждено — не пускает подписка салона: {outcome.billing_blocked}."
         self.message_user(request, message)
         return HttpResponseRedirect(request.path)
 

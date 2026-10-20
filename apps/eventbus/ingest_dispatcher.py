@@ -196,6 +196,7 @@ _KNOWN_NAMES: Final[frozenset[str]] = frozenset(
         "subscription.renewed",
         "subscription.frozen",
         "subscription.canceled",
+        "subscription.plan_changed",
         # DRF-2196 (а1, §64) — системный сигнал без пользователя.
         "system.module.health.degraded",
     }

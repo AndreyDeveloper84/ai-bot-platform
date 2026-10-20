@@ -10,7 +10,8 @@ tenant's subscription mirror (:mod:`apps.tenancy.billing_mirror`).
 |-------------------------------|-----------------------------------------------------|--------------|
 | ``subscription.trial_started`` | ``{tariff, trial_ends_at}``                        | trial        |
 | ``subscription.activated``     | ``{specialist_id, tariff, period_end}``            | active       |
-| ``subscription.renewed``       | ``{period_end}``                                   | active       |
+| ``subscription.renewed``       | ``{period_end}`` (+ ``tariff``, optional)          | active       |
+| ``subscription.plan_changed``  | ``{tariff, effective_from}``                       | pending plan |
 | ``subscription.past_due``      | ``{specialist_id, debt_amount, failed_attempts}``  | past_due     |
 | ``subscription.frozen``        | ``{reason}``                                       | frozen       |
 | ``subscription.canceled``      | ``{effective_at}``                                 | canceled     |
@@ -53,6 +54,7 @@ from apps.eventbus.ingest_tenancy import assert_envelope_tenant_authorized
 from apps.tenancy.billing_mirror import (
     BillingMirrorError,
     MirrorUpdate,
+    apply_pending_plan,
     apply_subscription_event,
 )
 from apps.tenancy.models import SubscriptionStatus
@@ -66,6 +68,7 @@ _REQUIRED_PAYLOAD_KEYS: dict[str, tuple[str, ...]] = {
     "subscription.trial_started": ("tariff", "trial_ends_at"),
     "subscription.activated": ("specialist_id", "tariff", "period_end"),
     "subscription.renewed": ("period_end",),
+    "subscription.plan_changed": ("tariff", "effective_from"),
     "subscription.past_due": ("specialist_id", "debt_amount", "failed_attempts"),
     "subscription.frozen": ("reason",),
     "subscription.canceled": ("effective_at",),
@@ -91,8 +94,9 @@ _MIRROR: dict[str, Callable[[dict], MirrorUpdate]] = {
     "subscription.activated": lambda d: MirrorUpdate(
         SubscriptionStatus.ACTIVE, plan=d["tariff"], current_period_end=_date(d, "period_end")
     ),
+    # tariff — с B2 (ayla-2c): первый renewed после смены тарифа переписывает plan.
     "subscription.renewed": lambda d: MirrorUpdate(
-        SubscriptionStatus.ACTIVE, current_period_end=_date(d, "period_end")
+        SubscriptionStatus.ACTIVE, plan=d.get("tariff"), current_period_end=_date(d, "period_end")
     ),
     "subscription.past_due": lambda d: MirrorUpdate(SubscriptionStatus.PAST_DUE),
     "subscription.frozen": lambda d: MirrorUpdate(SubscriptionStatus.FROZEN),
@@ -133,7 +137,27 @@ def _handle(envelope: IngestEnvelope, *, slug: str) -> None:
 
     mirrored = "n/a"
     to_mirror = _MIRROR.get(envelope.event_name)
-    if to_mirror is not None:
+    if envelope.event_name == "subscription.plan_changed":
+        if envelope.tenant_id is None:
+            mirrored = "no_tenant"
+        else:
+            try:
+                written = apply_pending_plan(
+                    envelope.tenant_id,
+                    plan=envelope.data["tariff"],
+                    effective_from=_date(envelope.data, "effective_from"),
+                )
+            except BillingMirrorError as exc:
+                logger.warning(
+                    "eventbus.consumer.billing.%s.invalid_payload event_id=%s tenant_id=%s error=%s",
+                    slug,
+                    envelope.event_id,
+                    envelope.tenant_id,
+                    exc,
+                )
+                return
+            mirrored = "written" if written else "skipped"
+    elif to_mirror is not None:
         if envelope.tenant_id is None:
             mirrored = "no_tenant"
         else:
@@ -182,6 +206,12 @@ def handle_subscription_renewed(envelope: IngestEnvelope) -> None:
     _handle(envelope, slug="subscription_renewed")
 
 
+def handle_subscription_plan_changed(envelope: IngestEnvelope) -> None:
+    """``subscription.plan_changed`` v1 (DRF-2984 B2)."""
+    assert_envelope_tenant_authorized(envelope)
+    _handle(envelope, slug="subscription_plan_changed")
+
+
 def handle_subscription_past_due(envelope: IngestEnvelope) -> None:
     """``subscription.past_due`` v1 (C4)."""
     assert_envelope_tenant_authorized(envelope)
@@ -218,6 +248,7 @@ def register_billing_handlers() -> None:
         ("subscription.trial_started", handle_subscription_trial_started),
         ("subscription.activated", handle_subscription_activated),
         ("subscription.renewed", handle_subscription_renewed),
+        ("subscription.plan_changed", handle_subscription_plan_changed),
         ("subscription.past_due", handle_subscription_past_due),
         ("subscription.frozen", handle_subscription_frozen),
         ("subscription.canceled", handle_subscription_canceled),

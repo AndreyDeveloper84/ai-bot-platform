@@ -87,6 +87,7 @@ from apps.identity.services.identity_card import WHOAMI_COMMAND, build_card, ren
 from apps.identity.services.role_resolver import resolve_role
 from apps.identity.services.staff_invites import (
     InviteError,
+    MasterAddBlocked,
     MasterAlreadyLinked,
     PersonAlreadyMaster,
     InviteMasterMissing,
@@ -312,6 +313,15 @@ PERSON_ALREADY_MASTER = (
     "Ваш аккаунт уже привязан к другой карточке мастера. Новый код здесь "
     "не поможет — сначала нужно снять прежнюю привязку. Напишите об этом "
     "администратору салона."
+)
+
+# DRF-2984 B2. Код верный, но подписка салона не пускает ещё одного мастера
+# (заморожена, отменена или соло ещё не перешёл на «Салон»). Код при этом
+# не погашен — сработает, когда салон это уладит. Текст для мастера, а не
+# для владельца: что делать с подпиской, решает салон. Не утверждён владельцем.
+MASTER_ADD_BLOCKED = (
+    "Код верный, но салон сейчас не может подключить нового мастера. "
+    "Напишите администратору салона — код останется действительным."
 )
 
 OWNER_TAKEN = (
@@ -2230,6 +2240,9 @@ def _redeem_and_greet(event: CanonicalEvent, code: str, entry) -> None:
         return
     except PersonAlreadyMaster:
         _reply(event, PERSON_ALREADY_MASTER)
+        return
+    except MasterAddBlocked:
+        _reply(event, MASTER_ADD_BLOCKED)
         return
     except InviteError as exc:  # future slugs — never leak an exception text
         logger.warning("channels.max.salon.redeem_failed slug=%s", getattr(exc, "slug", "?"))

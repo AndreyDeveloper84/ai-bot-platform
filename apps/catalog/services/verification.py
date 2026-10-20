@@ -95,6 +95,7 @@ from django.utils import timezone
 
 from apps.audit.services import write_audit
 from apps.catalog.models import CatalogMaster
+from apps.tenancy.billing_gate import MasterAddVerdict, master_add_verdict
 
 #: Текст следа в журнале. Один шаблон на оба экрана.
 #:
@@ -127,10 +128,14 @@ class VerificationOutcome:
     verified: int
     skipped: int
     blocked: int = 0
+    #: DRF-2984 B2 — не подтверждены, потому что подписка салона не пускает
+    #: ещё одного активного мастера. Отдельно от ``blocked``: там ждут мастера,
+    #: здесь — оплату или переход на «Салон».
+    billing_blocked: int = 0
 
     @property
     def total(self) -> int:
-        return self.verified + self.skipped + self.blocked
+        return self.verified + self.skipped + self.blocked + self.billing_blocked
 
 
 def has_live_invite(master: CatalogMaster) -> bool:
@@ -209,6 +214,7 @@ def _verify(
     verified = 0
     skipped = 0
     blocked = 0
+    billing_blocked = 0
     for master in masters:
         if master.invite_status == CatalogMaster.InviteStatus.ACCEPTED:
             skipped += 1
@@ -216,12 +222,18 @@ def _verify(
         if has_live_invite(master):
             blocked += 1
             continue
+        # DRF-2984 B2 — принятие делает мастера активным в салоне.
+        if master_add_verdict(master.tenant, master_id=master.id) is not MasterAddVerdict.ALLOWED:
+            billing_blocked += 1
+            continue
         old = master.get_invite_status_display()
         master.invite_status = CatalogMaster.InviteStatus.ACCEPTED
         master.save(update_fields=["invite_status"])
         journal(master, JOURNAL_MESSAGE.format(old=old))
         verified += 1
-    return VerificationOutcome(verified=verified, skipped=skipped, blocked=blocked)
+    return VerificationOutcome(
+        verified=verified, skipped=skipped, blocked=blocked, billing_blocked=billing_blocked
+    )
 
 
 def verify_masters(masters: Iterable[CatalogMaster], *, user) -> VerificationOutcome:  # type: ignore[no-untyped-def]
