@@ -9,17 +9,17 @@ import { useScreenBack } from "../../hooks/useScreenBack";
 import {
   cancelSalonBooking,
   getBookingSlots,
-  getBookingVersion,
+  getAdminBookingDetail,
   rescheduleSalonBooking,
   type BookingSlot,
-  type BookingVersion,
+  type AdminBookingDetail,
 } from "../../lib/admin-api";
 import { backTo } from "../../lib/screen-back";
 import { signalReady } from "../../lib/max-sdk";
 
 type Phase =
   | { kind: "loading" }
-  | { kind: "ready"; data: BookingVersion }
+  | { kind: "ready"; data: AdminBookingDetail }
   | { kind: "error"; err: unknown };
 
 type Mode = "idle" | "cancel" | "reschedule" | "pending" | "conflict";
@@ -43,7 +43,7 @@ function wireTime(iso: string): string {
   return match?.[1] ?? iso;
 }
 
-function clientName(data: BookingVersion): string {
+function clientName(data: AdminBookingDetail): string {
   const first = data.client_first_name.trim();
   const initial = data.client_last_initial.trim();
   return [first || "Клиент", initial].filter(Boolean).join(" ");
@@ -60,7 +60,7 @@ export function AdminBookingDetailScreen() {
   const load = useCallback(async () => {
     setBusy(true);
     try {
-      const data = await getBookingVersion(id);
+      const data = await getAdminBookingDetail(id);
       setPhase({ kind: "ready", data });
     } catch (err) {
       setPhase({ kind: "error", err });
@@ -101,7 +101,7 @@ function BookingDetail({
   data,
   onReadback,
 }: {
-  data: BookingVersion;
+  data: AdminBookingDetail;
   onReadback: () => Promise<void>;
 }) {
   const [mode, setMode] = useState<Mode>("idle");
