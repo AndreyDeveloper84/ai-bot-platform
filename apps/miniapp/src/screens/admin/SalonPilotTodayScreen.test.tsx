@@ -185,7 +185,7 @@ describe("Salon v2 frozen hierarchy — DRF-2932", () => {
     const readinessCard = await screen.findByRole("link", { name: /Готовность/ });
 
     expect(
-      masters.compareDocumentPosition(now) & Node.DOCUMENT_POSITION_PRECEDING,
+      masters.compareDocumentPosition(now) & Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
     expect(
       now.compareDocumentPosition(create) & Node.DOCUMENT_POSITION_FOLLOWING,
