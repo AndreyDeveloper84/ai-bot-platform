@@ -323,6 +323,40 @@ export function SalonPilotTodayScreen({ me }: { me: MeResponse }) {
 
       {!loading && !err && day ? (
         <>
+          {masters.length > 0 ? (
+            <section
+              className="salon-today__section"
+              aria-labelledby="salon-today-masters"
+            >
+              <h2 className="salon-today__heading" id="salon-today-masters">
+                Мастера сегодня
+              </h2>
+              {/* Не «работают N мастеров»: рабочих часов и смен в ответе
+                  нет, и утверждать выход мастера на смену нечем. Сказано
+                  ровно то, что известно, — кто есть в команде. */}
+              <p className="salon-today__section-note">
+                {`В команде: ${masters.length}`}
+              </p>
+              <ul className="salon-today__masters">
+                {masters.map((master) => (
+                  <li className="salon-today__master" key={master.masterId}>
+                    <span className="salon-today__avatar" aria-hidden="true">
+                      {masterInitial(master.name)}
+                    </span>
+                    <span className="salon-today__master-body">
+                      <span className="salon-today__master-name">
+                        {master.name}
+                      </span>
+                      <span className="salon-today__master-count">
+                        {visitCountLabel(master.visitCount)}
+                      </span>
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </section>
+          ) : null}
+
           {/* Пусто на экране бывает по двум разным причинам, и молчать
               нельзя ни в одной. День без записей — это одно; день, где
               всё уже прошло, — совсем другое, и к вечеру салон живёт
@@ -397,40 +431,6 @@ export function SalonPilotTodayScreen({ me }: { me: MeResponse }) {
                     : `Показать ещё ${visitCountLabel(hiddenNextCount).toLowerCase()}`}
                 </button>
               ) : null}
-            </section>
-          ) : null}
-
-          {masters.length > 0 ? (
-            <section
-              className="salon-today__section"
-              aria-labelledby="salon-today-masters"
-            >
-              <h2 className="salon-today__heading" id="salon-today-masters">
-                Мастера сегодня
-              </h2>
-              {/* Не «работают N мастеров»: рабочих часов и смен в ответе
-                  нет, и утверждать выход мастера на смену нечем. Сказано
-                  ровно то, что известно, — кто есть в команде. */}
-              <p className="salon-today__section-note">
-                {`В команде: ${masters.length}`}
-              </p>
-              <ul className="salon-today__masters">
-                {masters.map((master) => (
-                  <li className="salon-today__master" key={master.masterId}>
-                    <span className="salon-today__avatar" aria-hidden="true">
-                      {masterInitial(master.name)}
-                    </span>
-                    <span className="salon-today__master-body">
-                      <span className="salon-today__master-name">
-                        {master.name}
-                      </span>
-                      <span className="salon-today__master-count">
-                        {visitCountLabel(master.visitCount)}
-                      </span>
-                    </span>
-                  </li>
-                ))}
-              </ul>
             </section>
           ) : null}
 
