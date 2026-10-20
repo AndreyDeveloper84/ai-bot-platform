@@ -56,6 +56,11 @@ const RETURN_TARGETS: Readonly<Record<string, ReturnTarget>> = {
     back: "← Сегодня",
     open: "Открыть «Сегодня»",
   },
+  schedule: {
+    path: "/admin/schedule",
+    back: "← Расписание",
+    open: "Открыть расписание",
+  },
 };
 
 /** Возврат по умолчанию — тот, что был до появления пилота. */
