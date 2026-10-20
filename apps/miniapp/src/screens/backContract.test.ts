@@ -283,6 +283,7 @@ function adminScreensWithoutTabBar(): string[] {
 const EXPECTED_ADMIN_SCREENS = [
   "AddPersonAccessCodeSection",
   "AddPersonNewMasterSection",
+  "AdminBookingDetailScreen",
   "AdminDeactivationFlowScreen",
   "AdminHandoffQueueScreen",
   "AdminInternalChatThreadScreen",

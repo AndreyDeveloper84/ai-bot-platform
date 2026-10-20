@@ -84,6 +84,7 @@ import { AdminDeactivationFlowScreen } from "./screens/admin/AdminDeactivationFl
 import { AdminInternalChatListScreen } from "./screens/admin/AdminInternalChatListScreen";
 import { AdminInternalChatThreadScreen } from "./screens/admin/AdminInternalChatThreadScreen";
 import { AdminMasterDetailScreen } from "./screens/admin/AdminMasterDetailScreen";
+import { AdminBookingDetailScreen } from "./screens/admin/AdminBookingDetailScreen";
 import { AdminNewBookingScreen } from "./screens/admin/AdminNewBookingScreen";
 import { AdminPeopleScreen } from "./screens/admin/AdminPeopleScreen";
 import { AdminInvitesScreen } from "./screens/admin/AdminInvitesScreen";
@@ -365,6 +366,7 @@ function adminRouteElements(me: MeResponse): React.ReactNode {
           администратора мост снят (DRF-2115), адрес живёт по прямой ссылке. */}
       <Route path="/admin/day" element={<AdminSalonDayScreen me={me} />} />
       <Route path="/admin/booking/new" element={<AdminNewBookingScreen />} />
+      <Route path="/admin/bookings/:id" element={<AdminBookingDetailScreen />} />
       <Route path="/admin/team" element={<AdminTeamScreen me={me} />} />
       {/*
         DRF-1505 — «Добавить человека»: один экран, три адреса.
