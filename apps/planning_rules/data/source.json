@@ -2,7 +2,7 @@
   "repository": "AndreyDeveloper84/ayla-knowledge",
   "path": "03 AI System/Contracts/planning-rules-registry.yaml",
   "ref": "main",
-  "sha256": "7cebfa0370d95337cb2d7299b45f35826a72dda4d2bd0b198c4b4041630ed47a",
-  "synced_at": "2026-09-08",
-  "note": "источник истины — ayla-knowledge@main (D-1); ref на main с 08.09.2026 (ayla-knowledge#20 слит)"
+  "sha256": "007da11487970864172d95b6e7c903fc3fd961665a39648e0feb8254ab29ae5d",
+  "synced_at": "2026-09-21",
+  "note": "источник истины — ayla-knowledge@main (D-1). 2026-09-21: реестр 1.0 (PLAN_CADENCE, AYLA-DEC-0093) — вендорено с ветки ayla-knowledge#24 (canon/drf2261-stage-c-contracts @ 80a45703) до её слияния; после слияния #24 sha256 совпадёт с main."
 }

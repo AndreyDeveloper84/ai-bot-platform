@@ -2,7 +2,7 @@
 
 Составлено главным окном 08.09.2026 после ответа владельца на **D-1**. Окно строит **носитель и путь в рантайм** для планировочных правил — то, чего не существует ни в каком виде.
 
-**Читать первым:** `docs/OPEN_DECISIONS.md` §70 (решение и замер), `docs/specs/PLANNING_CONSTRAINTS_CONTRACT_v1.0.md` §5.2 и §9, `docs/WINDOW_PATH_REGISTRY.md` (границы путей), `docs/BRIEF_TRACKS_COMMON.md`.
+**Читать первым:** `docs/OPEN_DECISIONS.md` §70 (решение и замер), `docs/specs/PLANNING_CONSTRAINTS_CONTRACT_v1.1.md` §3.1, §5.2 и §9 (v1.0 — история), `docs/WINDOW_PATH_REGISTRY.md` (границы путей), `docs/BRIEF_TRACKS_COMMON.md`.
 
 ---
 
