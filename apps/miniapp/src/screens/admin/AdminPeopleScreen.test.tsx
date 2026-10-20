@@ -44,6 +44,7 @@ vi.mock("../../lib/admin-api", async (importOriginal) => {
     revokeStaffAccess: vi.fn(),
     changeStaffRole: vi.fn(),
     restoreStaffAccess: vi.fn(),
+    linkReceptionistDesk: vi.fn(),
   };
 });
 
@@ -51,6 +52,7 @@ import { ApiError } from "../../lib/api";
 import {
   changeStaffRole,
   getStaffRoster,
+  linkReceptionistDesk,
   restoreStaffAccess,
   revokeStaffAccess,
   type MeResponse,
@@ -66,6 +68,7 @@ const mockedRoster = vi.mocked(getStaffRoster);
 const mockedRevoke = vi.mocked(revokeStaffAccess);
 const mockedChangeRole = vi.mocked(changeStaffRole);
 const mockedRestore = vi.mocked(restoreStaffAccess);
+const mockedLinkDesk = vi.mocked(linkReceptionistDesk);
 
 const OWNER_ME: MeResponse = {
   user: { id: "u-1", name: "Карина", phone_masked: "+• ••• ••• ••12" },
@@ -1088,4 +1091,140 @@ describe("DRF-2274 — «Вернуть доступ» only where there is somet
       expect(queryRestoreButton(name)).not.toBeInTheDocument();
     }
   });
+});
+
+// --- DRF-2833 (B3) — «Открыть стойку записи» ------------------------------
+
+const OLYA_DESK: StaffRosterPerson = {
+  id: "bot:u-9",
+  bot_user_id: "u-9",
+  master_id: null,
+  name: "Оля",
+  has_account: true,
+  is_active: true,
+  restorable_roles: [],
+  roles: [grant("receptionist", "active", "access_code", daysAgo(10))],
+};
+
+const queryDeskButton = (name: string) =>
+  screen.queryByRole("button", { name: `Открыть стойку записи: ${name}` });
+
+async function openDeskSheet(person: StaffRosterPerson = OLYA_DESK) {
+  mockedRoster.mockResolvedValue(rosterOf(person));
+  renderScreen();
+  await waitFor(() => {
+    expect(queryDeskButton(person.name)).toBeInTheDocument();
+  });
+  fireEvent.click(queryDeskButton(person.name) as HTMLElement);
+}
+
+describe("DRF-2833 — the desk sheet", () => {
+  beforeEach(() => {
+    mockedLinkDesk.mockResolvedValue({ linked: true, created: true });
+  });
+
+  it("names the person and what opens, and sends nothing until confirmed", async () => {
+    await openDeskSheet();
+
+    expect(screen.getByRole("dialog")).toHaveAccessibleName(
+      "Открыть стойку записи: Оля",
+    );
+    expect(
+      screen.getByText(/Графики, роли и настройки останутся закрыты\./),
+    ).toBeInTheDocument();
+    expect(mockedLinkDesk).not.toHaveBeenCalled();
+  });
+
+  it("sends the person by bot_user_id and says the desk is open", async () => {
+    await openDeskSheet();
+
+    fireEvent.click(screen.getByRole("button", { name: "Открыть стойку" }));
+
+    expect(await screen.findByText("Стойка записи открыта.")).toBeInTheDocument();
+    expect(mockedLinkDesk.mock.calls.at(0)?.[0]).toEqual({ bot_user_id: "u-9" });
+    fireEvent.click(screen.getByRole("button", { name: "Готово" }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("says calmly when the desk was already open", async () => {
+    mockedLinkDesk.mockResolvedValue({ linked: true, created: false });
+    await openDeskSheet();
+
+    fireEvent.click(screen.getByRole("button", { name: "Открыть стойку" }));
+
+    expect(
+      await screen.findByText("Стойка записи уже была открыта."),
+    ).toBeInTheDocument();
+  });
+
+  it("says the catalog's refusal with its hint, and keeps the sheet", async () => {
+    mockedLinkDesk.mockRejectedValue(
+      new ApiError(409, "catalog_admin_link_refused", "assigner_not_admin", {
+        hint: "администратору салона нужна связь с каталогом — сначала оператор связывает администратора с Ayla, затем повторить",
+      }),
+    );
+    await openDeskSheet();
+
+    fireEvent.click(screen.getByRole("button", { name: "Открыть стойку" }));
+
+    expect(await screen.findByText("Стойка не открыта.")).toBeInTheDocument();
+    expect(
+      screen.getByText(/^Каталог не открыл стойку записи: администратору салона нужна связь с каталогом/),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+  });
+
+  it("says a lost receptionist role in words", async () => {
+    mockedLinkDesk.mockRejectedValue(
+      new ApiError(409, "not_a_receptionist", "no role"),
+    );
+    await openDeskSheet();
+
+    fireEvent.click(screen.getByRole("button", { name: "Открыть стойку" }));
+
+    expect(
+      await screen.findByText(
+        "У этого человека больше нет роли ресепшена — обновите список.",
+      ),
+    ).toBeInTheDocument();
+  });
+});
+
+describe("DRF-2833 — «Открыть стойку записи» only where the server would accept", () => {
+  it("is offered on a live receptionist — the guards below are not always on", async () => {
+    mockedRoster.mockResolvedValue(rosterOf(OLYA_DESK));
+    renderScreen();
+
+    await waitFor(() => {
+      expect(queryDeskButton("Оля")).toBeInTheDocument();
+    });
+  });
+
+  it("never on an admin, a revoked receptionist or yourself", async () => {
+    mockedRoster.mockResolvedValue(
+      rosterOf(
+        LENA_ADMIN,
+        {
+          ...OLYA_DESK,
+          id: "bot:u-10",
+          bot_user_id: "u-10",
+          name: "Ушла",
+          roles: [grant("receptionist", "revoked", "access_code", daysAgo(30))],
+        },
+        { ...OLYA_DESK, id: "bot:u-1", bot_user_id: "u-1", name: "Сама" },
+        OLYA_DESK,
+      ),
+    );
+    renderScreen();
+
+    await waitFor(() => {
+      expect(queryDeskButton("Оля")).toBeInTheDocument();
+    });
+    for (const name of ["Лена", "Ушла", "Сама"]) {
+      expect(queryDeskButton(name)).not.toBeInTheDocument();
+    }
+  });
+  // An admin viewer never reaches the rows at all — the whole screen is
+  // owner-only (see «who may look»), so a per-button admin case here
+  // could not fail.
 });

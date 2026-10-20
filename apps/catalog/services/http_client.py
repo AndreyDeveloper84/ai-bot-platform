@@ -432,8 +432,9 @@ class CatalogAdminLinkRefused(CatalogError):
     секрет пуст или не наш), ``rate_limited`` (429), либо ``details.reason``
     каталога (``tenant_not_found`` / ``tenant_inactive`` /
     ``identity_already_bound`` / ``identity_not_proxy`` /
-    ``idempotency_key_reused`` / ``bind_refused`` / ``readback_failed``).
-    Ничего не создано ни там, ни здесь.
+    ``idempotency_key_reused`` / ``bind_refused`` / ``readback_failed``;
+    DRF-2833 — ``assigner_not_admin``, 403 с причиной: 403 без причины —
+    по-прежнему ``credential_refused``). Ничего не создано ни там, ни здесь.
     """
 
     def __init__(self, message: str, *, reason: str, status_code: int) -> None:
@@ -1081,6 +1082,19 @@ class CatalogHttpClient:
                 f"Ayla salon-admins: transport failure on {url}: {exc.__class__.__name__}"
             ) from exc
 
+        if response.status_code == 403:
+            # DRF-2833: каталог отвечает 403 и на своё ``assigner_not_admin``
+            # (назначающий ресепшна — не admin салона) — с причиной в
+            # ``details``. Без этой ветки отказ звался бы «секрет не принят»,
+            # и оператор сверял бы токен, который в порядке.
+            details = _json_or_empty(response).get("error", {}).get("details", {}) or {}
+            reason = str(details.get("reason") or "")
+            if reason:
+                raise CatalogAdminLinkRefused(
+                    f"Ayla salon-admins: refused with HTTP 403 reason={reason}",
+                    reason=reason,
+                    status_code=403,
+                )
         if response.status_code in (401, 403):
             raise CatalogAdminLinkRefused(
                 f"Ayla salon-admins: credential refused with HTTP {response.status_code}",
