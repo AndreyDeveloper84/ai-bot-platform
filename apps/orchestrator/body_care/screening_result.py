@@ -30,10 +30,13 @@
   программы, а не решение.
 
 Чего ядро НЕ делает (ждёт решений, не выдумывается): какие вопросы
-обязательны (D-7), что значит ответ — таблица LIM §12 (D-5), пороги (D-4),
-порядок строгости статусов и словарь ``required_actions`` (D-5),
-соответствие статусов ``SafetyState`` (D-5). Всё это — работа политики;
-``required_actions`` до утверждения словаря — открытые строки.
+обязательны (D-7), что значит ответ — таблица LIM §12 (D-5), пороги (D-4).
+Всё это — работа политики.
+
+``required_actions`` — только члены закрытого реестра
+:mod:`~apps.orchestrator.body_care.required_actions` (кандидатский, BOT-4b).
+Порядок строгости и соединение итога с рекомендацией и ходом —
+:mod:`~apps.orchestrator.body_care.screening_routing` (D-5, два слоя).
 """
 
 from __future__ import annotations
@@ -46,7 +49,17 @@ from typing import Any, Protocol
 
 from apps.orchestrator.body_care.answer_reuse import RecheckResult, reuse_verdict
 from apps.orchestrator.body_care.reason_codes import REGISTRY_VERSION, ReasonCode
-from apps.orchestrator.body_care.screening_answer import ScreeningAnswer, ScreeningAnswerValue
+from apps.orchestrator.body_care.required_actions import (
+    REQUIRED_ACTION_REGISTRY_VERSION,
+    RequiredAction,
+    RequiredActionError,
+    normalize_actions,
+)
+from apps.orchestrator.body_care.screening_answer import (
+    ScreeningAnswer,
+    ScreeningAnswerValue,
+    refuse_wording_version,
+)
 
 
 class ScreeningStatus(StrEnum):
@@ -88,6 +101,11 @@ class RequiredQuestion:
     question_code: str
     scope: Mapping[str, str]
 
+    def __post_init__(self) -> None:
+        # Область вопроса сверяется с областью ответа по хэшу (BOT-2): версия
+        # формулировки здесь заставила бы переспрашивать после правки текста.
+        refuse_wording_version(self.scope, ScreeningResultError)
+
 
 @dataclass(frozen=True)
 class AnswerRef:
@@ -127,7 +145,7 @@ class ScreeningPolicy(Protocol):
 
     def actions_for(
         self, status: ScreeningStatus, codes: frozenset[ReasonCode]
-    ) -> Iterable[str]: ...
+    ) -> Iterable[RequiredAction]: ...
 
 
 @dataclass(frozen=True)
@@ -136,7 +154,7 @@ class ScreeningResult:
 
     screening_status: ScreeningStatus
     reason_codes: tuple[ReasonCode, ...]
-    required_actions: tuple[str, ...]
+    required_actions: tuple[RequiredAction, ...]
     source_answers: tuple[AnswerRef, ...]
     versions: Mapping[str, str]
     evaluated_at: datetime
@@ -158,6 +176,11 @@ class ScreeningResult:
         if self.evaluated_at.tzinfo is None or self.evaluated_at.utcoffset() is None:
             raise ScreeningResultError("evaluated_at — с часовым поясом")
         object.__setattr__(self, "reason_codes", tuple(sorted(set(self.reason_codes))))
+        try:
+            actions = normalize_actions(self.required_actions)
+        except RequiredActionError as exc:
+            raise ScreeningResultError(str(exc)) from exc
+        object.__setattr__(self, "required_actions", actions)
         object.__setattr__(self, "versions", dict(self.versions))
 
     def as_record(self) -> dict[str, Any]:
@@ -167,7 +190,8 @@ class ScreeningResult:
             "screening_status": self.screening_status.value,
             "reason_codes": [c.value for c in self.reason_codes],
             "reason_code_registry_version": REGISTRY_VERSION,
-            "required_actions": list(self.required_actions),
+            "required_actions": [a.value for a in self.required_actions],
+            "required_action_registry_version": REQUIRED_ACTION_REGISTRY_VERSION,
             "source_answers": [
                 {
                     "answer_id": r.answer_id,
