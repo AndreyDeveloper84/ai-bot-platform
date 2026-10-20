@@ -149,10 +149,12 @@ function VisitRow({
   row,
   timeZone,
   variant,
+  onOpen,
 }: {
   row: DayRow;
   timeZone: string;
   variant: "now" | "next";
+  onOpen: (id: string) => void;
 }) {
   const { visit, masterName } = row;
   const time =
@@ -166,6 +168,13 @@ function VisitRow({
           ? "salon-today__visit salon-today__visit--now"
           : "salon-today__visit"
       }
+      role="button"
+      tabIndex={0}
+      onClick={() => onOpen(visit.id)}
+      onKeyDown={(event) => {
+        if (event.key === "Enter" || event.key === " ") onOpen(visit.id);
+      }}
+      aria-label={`Открыть запись: ${clientLabel(visit)}, ${time}`}
     >
       <span className="salon-today__visit-time">
         <span className="salon-today__visit-clock">{time}</span>
@@ -365,6 +374,7 @@ export function SalonPilotTodayScreen({ me }: { me: MeResponse }) {
                     row={row}
                     timeZone={day.timezone}
                     variant="now"
+                    onOpen={(id) => navigate(`/admin/bookings/${encodeURIComponent(id)}`, { state: { from: "/admin/today" } })}
                   />
                 ))}
               </ul>
@@ -386,6 +396,7 @@ export function SalonPilotTodayScreen({ me }: { me: MeResponse }) {
                     row={row}
                     timeZone={day.timezone}
                     variant="next"
+                    onOpen={(id) => navigate(`/admin/bookings/${encodeURIComponent(id)}`, { state: { from: "/admin/today" } })}
                   />
                 ))}
               </ul>
