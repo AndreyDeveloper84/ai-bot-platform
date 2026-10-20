@@ -356,15 +356,6 @@ export interface BookingVersion {
   version: number;
   status: string;
   start_datetime: string;
-  end_datetime: string;
-  duration_min: number;
-  service_id: string;
-  service_name: string;
-  client_first_name: string;
-  client_last_initial: string;
-  master_id: string;
-  master_name: string;
-  is_in_progress: boolean;
 }
 
 export interface AdminBookingDetail extends BookingVersion {
