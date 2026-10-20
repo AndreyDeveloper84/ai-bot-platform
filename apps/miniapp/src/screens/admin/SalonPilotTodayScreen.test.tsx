@@ -172,6 +172,42 @@ beforeEach(() => {
   mockedReadiness.mockResolvedValue(readiness());
 });
 
+describe("Salon v2 frozen hierarchy — DRF-2932", () => {
+  it("keeps operational core above actions and DRF-2955 utility layer", async () => {
+    mockedDay.mockResolvedValue(busyDay());
+    mockedReadiness.mockResolvedValue(readiness({ ready: false, problems: [PROBLEM] }));
+    renderToday();
+
+    const masters = await screen.findByRole("heading", { name: "Мастера сегодня" });
+    const now = screen.getByRole("region", { name: /Сейчас по расписанию/ });
+    const create = screen.getByRole("button", { name: "+ Новая запись" });
+    const schedule = screen.getByRole("button", { name: "Расписание" });
+    const readinessCard = await screen.findByRole("link", { name: /Готовность/ });
+
+    expect(
+      masters.compareDocumentPosition(now) & Node.DOCUMENT_POSITION_PRECEDING,
+    ).toBeTruthy();
+    expect(
+      now.compareDocumentPosition(create) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(
+      create.compareDocumentPosition(schedule) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(
+      schedule.compareDocumentPosition(readinessCard) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
+  it("uses temporal copy, not a visit lifecycle claim", async () => {
+    mockedDay.mockResolvedValue(busyDay());
+    renderToday();
+
+    expect(await screen.findByText("Сейчас по расписанию")).toBeInTheDocument();
+    expect(screen.queryByText(/^Сейчас$/)).toBeNull();
+    expect(screen.queryByText(/визит идёт|идёт визит/i)).toBeNull();
+  });
+});
+
 describe("что построено с макета", () => {
   it("«Сейчас» показывает идущую запись с интервалом, клиентом и мастером", async () => {
     mockedDay.mockResolvedValue(busyDay());
@@ -221,7 +257,7 @@ describe("что построено с макета", () => {
     // Присутствие рядом с отсутствием: блок мастеров на месте, а блоков
     // записей нет, потому что записей нет.
     expect(screen.getByText("Мастера сегодня")).toBeInTheDocument();
-    expect(screen.queryByText("Сейчас")).toBeNull();
+    expect(screen.queryByText("Сейчас по расписанию")).toBeNull();
     expect(screen.queryByText("Дальше")).toBeNull();
   });
 
@@ -370,7 +406,7 @@ describe("чего экран не рисует, потому что бэкен�
     renderToday();
 
     // Экран построен целиком...
-    expect(await screen.findByText("Сейчас")).toBeInTheDocument();
+    expect(await screen.findByText("Сейчас по расписанию")).toBeInTheDocument();
     expect(screen.getByText("Мастера сегодня")).toBeInTheDocument();
     // ...и обоих backend-blocked блоков в нём нет. Блок «Требует внимания»
     // с макета — лента событий; строка сводки «N ситуаций требуют внимания»
@@ -514,7 +550,7 @@ describe("карточка «Готовность» и строка сводки
     mockedReadiness.mockRejectedValue(new ApiError(403, "forbidden", "x"));
     renderToday();
 
-    await screen.findByText("Сейчас");
+    await screen.findByText("Сейчас по расписанию");
     await waitFor(() => expect(mockedReadiness).toHaveBeenCalled());
     expect(screen.queryByRole("link", { name: /Готовность/ })).toBeNull();
   });
@@ -524,7 +560,7 @@ describe("карточка «Готовность» и строка сводки
     mockedReadiness.mockResolvedValue(readiness({ ready: false, problems: [PROBLEM] }));
     renderToday(RECEPTION);
 
-    await screen.findByText("Сейчас");
+    await screen.findByText("Сейчас по расписанию");
     expect(screen.queryByRole("link", { name: /Готовность/ })).toBeNull();
     expect(mockedReadiness).not.toHaveBeenCalled();
   });
