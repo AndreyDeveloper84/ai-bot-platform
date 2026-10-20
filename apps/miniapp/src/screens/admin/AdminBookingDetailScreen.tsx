@@ -9,17 +9,18 @@ import { useScreenBack } from "../../hooks/useScreenBack";
 import {
   cancelSalonBooking,
   getBookingSlots,
-  getBookingVersion,
+  getAdminBookingDetail,
   rescheduleSalonBooking,
   type BookingSlot,
-  type BookingVersion,
+  type AdminBookingDetail,
 } from "../../lib/admin-api";
 import { backTo } from "../../lib/screen-back";
 import { signalReady } from "../../lib/max-sdk";
+import { parseSalonWallClock } from "../../lib/format";
 
 type Phase =
   | { kind: "loading" }
-  | { kind: "ready"; data: BookingVersion }
+  | { kind: "ready"; data: AdminBookingDetail }
   | { kind: "error"; err: unknown };
 
 type Mode = "idle" | "cancel" | "reschedule" | "pending" | "conflict";
@@ -35,15 +36,14 @@ function safeBack(state: unknown): string {
 }
 
 function wireDate(iso: string): string {
-  return iso.slice(0, 10);
+  return parseSalonWallClock(iso)?.ymd ?? iso;
 }
 
 function wireTime(iso: string): string {
-  const match = iso.match(/T(\d{2}:\d{2})/);
-  return match?.[1] ?? iso;
+  return parseSalonWallClock(iso)?.hm ?? iso;
 }
 
-function clientName(data: BookingVersion): string {
+function clientName(data: AdminBookingDetail): string {
   const first = data.client_first_name.trim();
   const initial = data.client_last_initial.trim();
   return [first || "Клиент", initial].filter(Boolean).join(" ");
@@ -60,7 +60,7 @@ export function AdminBookingDetailScreen() {
   const load = useCallback(async () => {
     setBusy(true);
     try {
-      const data = await getBookingVersion(id);
+      const data = await getAdminBookingDetail(id);
       setPhase({ kind: "ready", data });
     } catch (err) {
       setPhase({ kind: "error", err });
@@ -101,7 +101,7 @@ function BookingDetail({
   data,
   onReadback,
 }: {
-  data: BookingVersion;
+  data: AdminBookingDetail;
   onReadback: () => Promise<void>;
 }) {
   const [mode, setMode] = useState<Mode>("idle");
@@ -212,7 +212,6 @@ function BookingDetail({
           title={`${wireTime(data.start_datetime)}–${wireTime(data.end_datetime)}`}
           sub={data.duration_min > 0 ? `${data.duration_min} мин` : undefined}
         />
-        <Fact title={data.status} />
       </ul>
 
       {data.is_in_progress && !cancelled ? (
@@ -220,8 +219,6 @@ function BookingDetail({
           <p className="booking-detail__state-title">Сейчас по расписанию</p>
         </section>
       ) : null}
-
-      {cancelled ? <p className="booking-detail__cancelled">Запись отменена</p> : null}
 
       {message ? <p role="alert">{message}</p> : null}
 
@@ -237,7 +234,7 @@ function BookingDetail({
       ) : mode === "cancel" ? (
         <DestructiveConfirmation
           title="Отменить запись?"
-          body="Запись клиента будет отменена."
+          body="Вы уверены, что хотите отменить запись клиента?"
           confirmLabel="Отменить запись"
           busy={mutating}
           onConfirm={() => void cancel()}

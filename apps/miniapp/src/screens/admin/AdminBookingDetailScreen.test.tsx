@@ -6,7 +6,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   cancelSalonBooking,
   getBookingSlots,
-  getBookingVersion,
+  getAdminBookingDetail,
   rescheduleSalonBooking,
 } from "../../lib/admin-api";
 import { AdminBookingDetailScreen } from "./AdminBookingDetailScreen";
@@ -15,14 +15,14 @@ vi.mock("../../lib/admin-api", async () => {
   const actual = await vi.importActual<typeof import("../../lib/admin-api")>("../../lib/admin-api");
   return {
     ...actual,
-    getBookingVersion: vi.fn(),
+    getAdminBookingDetail: vi.fn(),
     getBookingSlots: vi.fn(),
     cancelSalonBooking: vi.fn(),
     rescheduleSalonBooking: vi.fn(),
   };
 });
 
-const mockedDetail = vi.mocked(getBookingVersion);
+const mockedDetail = vi.mocked(getAdminBookingDetail);
 const mockedSlots = vi.mocked(getBookingSlots);
 const mockedCancel = vi.mocked(cancelSalonBooking);
 const mockedReschedule = vi.mocked(rescheduleSalonBooking);
