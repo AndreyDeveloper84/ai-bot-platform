@@ -143,6 +143,36 @@ describe("primary screen shape (§12)", () => {
   });
 });
 
+describe("Salon v2 frozen presentation — DRF-2934", () => {
+  it("shows explicit «Изменить» for a selected returning customer", async () => {
+    mockedSearch.mockResolvedValue([
+      { id: "c-1", name: "Мария", named: true, phone_masked: "+• ••67" },
+    ]);
+    renderScreen();
+
+    screen.getByLabelText(/Клиент/).click();
+    fireEvent.change(await screen.findByLabelText("Поиск клиента"), {
+      target: { value: "Мария" },
+    });
+    (await screen.findByText(/Мария · /)).click();
+
+    expect(screen.getByText("Изменить")).toBeInTheDocument();
+    expect(screen.getByLabelText(/^Клиент: Мария · /)).toBeInTheDocument();
+  });
+
+  it("supports returning to the Salon Schedule surface", async () => {
+    render(
+      <MemoryRouter initialEntries={["/admin/booking/new?return=schedule"]}>
+        <AdminNewBookingScreen />
+      </MemoryRouter>,
+    );
+
+    expect(
+      await screen.findByRole("button", { name: "← Расписание" }),
+    ).toBeInTheDocument();
+  });
+});
+
 describe("availability is not asked before it can mean anything (§12, §17)", () => {
   it("refuses to query slots without service and master", async () => {
     renderScreen();
