@@ -6,6 +6,7 @@
  * 3. «Could not ask the schedule» never renders as «nothing free».
  */
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
