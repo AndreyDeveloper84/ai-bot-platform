@@ -212,7 +212,6 @@ function BookingDetail({
           title={`${wireTime(data.start_datetime)}–${wireTime(data.end_datetime)}`}
           sub={data.duration_min > 0 ? `${data.duration_min} мин` : undefined}
         />
-        <Fact title={data.status} />
       </ul>
 
       {data.is_in_progress && !cancelled ? (
