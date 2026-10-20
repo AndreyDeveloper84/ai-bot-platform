@@ -383,8 +383,14 @@ def _propose_booking(arguments: dict[str, Any], *, tenant: Any) -> AdminProposal
         query["service_id"] = str(service.id)
     if client_id:
         query["client_id"] = client_id
+        if client_name:
+            query["client_name"] = client_name
     else:
-        query["client_name"] = client_name
+        # A name alone is ambiguous: it may be an existing customer or a
+        # genuinely new one. Do not silently turn it into a new customer.
+        # The shared booking form receives only a search hint and requires
+        # the administrator to choose explicitly.
+        query["client_query"] = client_name
     who = client_name or "клиент"
     what = f"{service.name}, " if service is not None else ""
     day = f"{local.day} {_MONTHS_RU[local.month - 1]}"
