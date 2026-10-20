@@ -315,26 +315,6 @@ export function SalonPilotTodayScreen({ me }: { me: MeResponse }) {
 
   return (
     <SalonPilotFrame me={me} title="Сегодня" subtitle={subtitle}>
-      {canCreateBooking(me) ? (
-        <button
-          type="button"
-          className="salon-today__cta"
-          /* `?return=today` — чтобы экран создания вернул сюда, а не на
-             мост. Без параметра его возврат ведёт на `/admin/day`, и
-             главное действие пилота стало бы дверью в один конец: с
-             пятивкладочной поверхности назад в пилот не ведёт ничего.
-             Ровно та ловушка, от которой предостерегает
-             `SalonPilotFrame`. */
-          onClick={() => navigate("/admin/booking/new?return=today")}
-        >
-          + Новая запись
-        </button>
-      ) : null}
-
-      {/* DRF-2115 — «Диалоги — N ждут ответа» и «График — N заявок»;
-          DRF-2117 — «Готовность — N проблем» (ручка #1878). */}
-      <SalonTodayCards readiness={readiness} />
-
       <p className="salon-pilot__note" role="status">
         {statusLine}
       </p>
@@ -364,7 +344,7 @@ export function SalonPilotTodayScreen({ me }: { me: MeResponse }) {
               aria-labelledby="salon-today-now"
             >
               <h2 className="salon-today__heading" id="salon-today-now">
-                Сейчас
+                Сейчас по расписанию
                 <span className="salon-today__count">{nowRows.length}</span>
               </h2>
               <ul className="salon-today__list">
@@ -453,6 +433,30 @@ export function SalonPilotTodayScreen({ me }: { me: MeResponse }) {
               </ul>
             </section>
           ) : null}
+
+          <div className="screen__actions">
+            {canCreateBooking(me) ? (
+              <button
+                type="button"
+                className="btn-primary"
+                onClick={() => navigate("/admin/booking/new?return=today")}
+              >
+                + Новая запись
+              </button>
+            ) : null}
+            <button
+              type="button"
+              className="btn-secondary"
+              onClick={() => navigate("/admin/schedule")}
+            >
+              Расписание
+            </button>
+          </div>
+
+          {/* DRF-2955: transition-layer only. These working utility entries
+              move to management/operations later; until that destination is
+              verified they stay below the frozen Today core, never above it. */}
+          <SalonTodayCards readiness={readiness} />
         </>
       ) : null}
     </SalonPilotFrame>
