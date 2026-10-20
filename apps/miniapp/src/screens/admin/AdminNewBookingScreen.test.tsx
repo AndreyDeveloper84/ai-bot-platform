@@ -150,13 +150,13 @@ describe("Salon v2 frozen presentation — DRF-2934", () => {
     ]);
     renderScreen();
 
-    screen.getByLabelText(/Клиент/).click();
+    await userEvent.click(screen.getByLabelText(/Клиент/));
     fireEvent.change(await screen.findByLabelText("Поиск клиента"), {
       target: { value: "Мария" },
     });
-    (await screen.findByText(/Мария · /)).click();
+    await userEvent.click(await screen.findByText(/Мария · /));
 
-    expect(screen.getByText("Изменить")).toBeInTheDocument();
+    expect(await screen.findByText("Изменить")).toBeInTheDocument();
     expect(screen.getByLabelText(/^Клиент: Мария · /)).toBeInTheDocument();
   });
 
