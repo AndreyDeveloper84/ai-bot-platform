@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import uuid
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
 from django.test import Client
@@ -230,6 +231,43 @@ class TestTheRead:
 
         assert data["version"] == 7
         assert data["status"] == "confirmed"
+
+    def test_detail_reuses_salon_day_projection_without_phone(
+        self, client: Client, tenant: Tenant, owner_bot_user, stubs, monkeypatch
+    ) -> None:
+        proxy = _proxy(tenant)
+        stubs(booking=_StubBooking(record=_Version(version=7, status="confirmed")))
+        visit = SimpleNamespace(
+            id=str(proxy.appointment_id),
+            service_id="svc-1",
+            service_name="Массаж",
+            client_first_name="Анна",
+            client_last_initial="П.",
+        )
+        day = SimpleNamespace(
+            masters=[
+                SimpleNamespace(
+                    master_id="master-1",
+                    name="Мария",
+                    visits=[visit],
+                )
+            ],
+            orphan_visits=[],
+        )
+        monkeypatch.setattr(
+            "apps.admin_api.views_booking_complete.build_salon_day",
+            lambda *args, **kwargs: day,
+        )
+
+        data = _get(client, proxy).json()
+
+        assert data["version"] == 7
+        assert data["service_name"] == "Массаж"
+        assert data["client_first_name"] == "Анна"
+        assert data["client_last_initial"] == "П."
+        assert data["master_id"] == "master-1"
+        assert data["master_name"] == "Мария"
+        assert "phone" not in data
 
     def test_the_actor_is_the_calling_admin(
         self, client: Client, tenant: Tenant, owner_bot_user, admin_bot_user, stubs

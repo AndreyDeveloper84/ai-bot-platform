@@ -149,10 +149,12 @@ function VisitRow({
   row,
   timeZone,
   variant,
+  onOpen,
 }: {
   row: DayRow;
   timeZone: string;
   variant: "now" | "next";
+  onOpen: (id: string) => void;
 }) {
   const { visit, masterName } = row;
   const time =
@@ -166,6 +168,13 @@ function VisitRow({
           ? "salon-today__visit salon-today__visit--now"
           : "salon-today__visit"
       }
+      role="button"
+      tabIndex={0}
+      onClick={() => onOpen(visit.id)}
+      onKeyDown={(event) => {
+        if (event.key === "Enter" || event.key === " ") onOpen(visit.id);
+      }}
+      aria-label={`Открыть запись: ${clientLabel(visit)}, ${time}`}
     >
       <span className="salon-today__visit-time">
         <span className="salon-today__visit-clock">{time}</span>
@@ -306,26 +315,6 @@ export function SalonPilotTodayScreen({ me }: { me: MeResponse }) {
 
   return (
     <SalonPilotFrame me={me} title="Сегодня" subtitle={subtitle}>
-      {canCreateBooking(me) ? (
-        <button
-          type="button"
-          className="salon-today__cta"
-          /* `?return=today` — чтобы экран создания вернул сюда, а не на
-             мост. Без параметра его возврат ведёт на `/admin/day`, и
-             главное действие пилота стало бы дверью в один конец: с
-             пятивкладочной поверхности назад в пилот не ведёт ничего.
-             Ровно та ловушка, от которой предостерегает
-             `SalonPilotFrame`. */
-          onClick={() => navigate("/admin/booking/new?return=today")}
-        >
-          + Новая запись
-        </button>
-      ) : null}
-
-      {/* DRF-2115 — «Диалоги — N ждут ответа» и «График — N заявок»;
-          DRF-2117 — «Готовность — N проблем» (ручка #1878). */}
-      <SalonTodayCards readiness={readiness} />
-
       <p className="salon-pilot__note" role="status">
         {statusLine}
       </p>
@@ -334,81 +323,6 @@ export function SalonPilotTodayScreen({ me }: { me: MeResponse }) {
 
       {!loading && !err && day ? (
         <>
-          {/* Пусто на экране бывает по двум разным причинам, и молчать
-              нельзя ни в одной. День без записей — это одно; день, где
-              всё уже прошло, — совсем другое, и к вечеру салон живёт
-              именно в нём. Отличать их по `summary.total` можно честно:
-              он считает записи дня целиком, включая закрытые. */}
-          {nowRows.length === 0 && nextRows.length === 0 ? (
-            <div className="callout">
-              <p style={{ margin: 0 }}>
-                {day.summary.total === 0
-                  ? "Записей на сегодня нет."
-                  : "Записи на сегодня закончились — впереди ничего не осталось."}
-              </p>
-            </div>
-          ) : null}
-
-          {nowRows.length > 0 ? (
-            <section
-              className="salon-today__section"
-              aria-labelledby="salon-today-now"
-            >
-              <h2 className="salon-today__heading" id="salon-today-now">
-                Сейчас
-                <span className="salon-today__count">{nowRows.length}</span>
-              </h2>
-              <ul className="salon-today__list">
-                {nowRows.map((row) => (
-                  <VisitRow
-                    key={row.visit.id}
-                    row={row}
-                    timeZone={day.timezone}
-                    variant="now"
-                  />
-                ))}
-              </ul>
-            </section>
-          ) : null}
-
-          {nextRows.length > 0 ? (
-            <section
-              className="salon-today__section"
-              aria-labelledby="salon-today-next"
-            >
-              <h2 className="salon-today__heading" id="salon-today-next">
-                Дальше
-              </h2>
-              <ul className="salon-today__list">
-                {visibleNext.map((row) => (
-                  <VisitRow
-                    key={row.visit.id}
-                    row={row}
-                    timeZone={day.timezone}
-                    variant="next"
-                  />
-                ))}
-              </ul>
-              {/* Переключатель, а не одноразовая кнопка. Кнопка, которая
-                  исчезает под пальцем, роняет фокус в `<body>`: тот, кто
-                  ходит с клавиатуры или читалкой, теряет место, и никто
-                  не объявляет, что строк стало больше. И развернуть было
-                  можно, а свернуть — уже нет. */}
-              {nextRows.length > NEXT_PREVIEW_LIMIT ? (
-                <button
-                  type="button"
-                  className="salon-today__more"
-                  aria-expanded={showAllNext}
-                  onClick={() => setShowAllNext((on) => !on)}
-                >
-                  {showAllNext
-                    ? "Свернуть"
-                    : `Показать ещё ${visitCountLabel(hiddenNextCount).toLowerCase()}`}
-                </button>
-              ) : null}
-            </section>
-          ) : null}
-
           {masters.length > 0 ? (
             <section
               className="salon-today__section"
@@ -442,6 +356,107 @@ export function SalonPilotTodayScreen({ me }: { me: MeResponse }) {
               </ul>
             </section>
           ) : null}
+
+          {/* Пусто на экране бывает по двум разным причинам, и молчать
+              нельзя ни в одной. День без записей — это одно; день, где
+              всё уже прошло, — совсем другое, и к вечеру салон живёт
+              именно в нём. Отличать их по `summary.total` можно честно:
+              он считает записи дня целиком, включая закрытые. */}
+          {nowRows.length === 0 && nextRows.length === 0 ? (
+            <div className="callout">
+              <p style={{ margin: 0 }}>
+                {day.summary.total === 0
+                  ? "Записей на сегодня нет."
+                  : "Записи на сегодня закончились — впереди ничего не осталось."}
+              </p>
+            </div>
+          ) : null}
+
+          {nowRows.length > 0 ? (
+            <section
+              className="salon-today__section"
+              aria-labelledby="salon-today-now"
+            >
+              <h2 className="salon-today__heading" id="salon-today-now">
+                Сейчас по расписанию
+                <span className="salon-today__count">{nowRows.length}</span>
+              </h2>
+              <ul className="salon-today__list">
+                {nowRows.map((row) => (
+                  <VisitRow
+                    key={row.visit.id}
+                    row={row}
+                    timeZone={day.timezone}
+                    variant="now"
+                    onOpen={(id) => navigate(`/admin/bookings/${encodeURIComponent(id)}`, { state: { from: "/admin/today" } })}
+                  />
+                ))}
+              </ul>
+            </section>
+          ) : null}
+
+          {nextRows.length > 0 ? (
+            <section
+              className="salon-today__section"
+              aria-labelledby="salon-today-next"
+            >
+              <h2 className="salon-today__heading" id="salon-today-next">
+                Дальше
+              </h2>
+              <ul className="salon-today__list">
+                {visibleNext.map((row) => (
+                  <VisitRow
+                    key={row.visit.id}
+                    row={row}
+                    timeZone={day.timezone}
+                    variant="next"
+                    onOpen={(id) => navigate(`/admin/bookings/${encodeURIComponent(id)}`, { state: { from: "/admin/today" } })}
+                  />
+                ))}
+              </ul>
+              {/* Переключатель, а не одноразовая кнопка. Кнопка, которая
+                  исчезает под пальцем, роняет фокус в `<body>`: тот, кто
+                  ходит с клавиатуры или читалкой, теряет место, и никто
+                  не объявляет, что строк стало больше. И развернуть было
+                  можно, а свернуть — уже нет. */}
+              {nextRows.length > NEXT_PREVIEW_LIMIT ? (
+                <button
+                  type="button"
+                  className="salon-today__more"
+                  aria-expanded={showAllNext}
+                  onClick={() => setShowAllNext((on) => !on)}
+                >
+                  {showAllNext
+                    ? "Свернуть"
+                    : `Показать ещё ${visitCountLabel(hiddenNextCount).toLowerCase()}`}
+                </button>
+              ) : null}
+            </section>
+          ) : null}
+
+          <div className="screen__actions">
+            {canCreateBooking(me) ? (
+              <button
+                type="button"
+                className="btn-primary"
+                onClick={() => navigate("/admin/booking/new?return=today")}
+              >
+                + Новая запись
+              </button>
+            ) : null}
+            <button
+              type="button"
+              className="btn-secondary"
+              onClick={() => navigate("/admin/schedule")}
+            >
+              Расписание
+            </button>
+          </div>
+
+          {/* DRF-2955: transition-layer only. These working utility entries
+              move to management/operations later; until that destination is
+              verified they stay below the frozen Today core, never above it. */}
+          <SalonTodayCards readiness={readiness} />
         </>
       ) : null}
     </SalonPilotFrame>

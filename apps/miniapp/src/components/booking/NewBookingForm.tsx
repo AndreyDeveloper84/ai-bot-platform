@@ -175,10 +175,12 @@ function DraftRow({
   label,
   value,
   onOpen,
+  actionLabel,
 }: {
   label: string;
   value: string | null;
   onOpen: () => void;
+  actionLabel?: string;
 }) {
   return (
     <button
@@ -195,6 +197,9 @@ function DraftRow({
       >
         {value ?? "выбрать"}
       </span>
+      {value && actionLabel ? (
+        <span className="draft-row__action">{actionLabel}</span>
+      ) : null}
     </button>
   );
 }
@@ -266,7 +271,9 @@ export function NewBookingForm({
 
   // Customer search (§13). `searchState` is deliberately four-valued —
   // «found nothing» and «could not look» must never collapse into one.
-  const [query, setQuery] = useState("");
+  const [query, setQuery] = useState(() =>
+    isMaster ? "" : (searchParams.get("client_query") ?? "").trim(),
+  );
   const [results, setResults] = useState<FormCustomerRow[]>([]);
   const [customerMode, setCustomerMode] = useState<"search" | "new">("search");
   const [serviceQuery, setServiceQuery] = useState("");
@@ -342,6 +349,7 @@ export function NewBookingForm({
     const masterId = searchParams.get("master_id") ?? "";
     const serviceId = searchParams.get("service_id") ?? "";
     const clientName = (searchParams.get("client_name") ?? "").trim();
+    const clientQuery = (searchParams.get("client_query") ?? "").trim();
     const clientId = (searchParams.get("client_id") ?? "").trim();
     const startAt = searchParams.get("start_at") ?? "";
 
@@ -376,11 +384,16 @@ export function NewBookingForm({
     }
     // wall-clock-ok: время, предложенное ассистентом сотруднику, — провод master_api, не визит клиента
     const wishTime = /T(\d{2}:\d{2})/.exec(startAt)?.[1];
-    if (wishTime) {
-      setPrefillHint(
-        `Ayla предложила ${wishTime} — выберите время из доступных.`,
+    const hints: string[] = [];
+    if (clientQuery) {
+      hints.push(
+        `Ayla указала клиента «${clientQuery}» — выберите существующего или создайте нового.`,
       );
     }
+    if (wishTime) {
+      hints.push(`Ayla предложила ${wishTime} — выберите время из доступных.`);
+    }
+    if (hints.length > 0) setPrefillHint(hints.join(" "));
   }, [masters, services, searchParams, dispatch, isMaster]);
 
   // Мастер: из «Расписания» тап по свободному окну приводит с
@@ -574,6 +587,7 @@ export function NewBookingForm({
           label="Клиент"
           value={customerLabel}
           onOpen={() => setSheet("customer")}
+          actionLabel={!isMaster && customerLabel ? "Изменить" : undefined}
         />
         <DraftRow
           label="Услуга"
