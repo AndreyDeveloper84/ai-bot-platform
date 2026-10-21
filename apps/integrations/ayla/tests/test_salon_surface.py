@@ -178,15 +178,15 @@ class TestRegistryShape:
 
         opened = {(r.method, r.name) for r in routes_by_access(SalonRouteAccess.PERSON_TOKEN)}
         assert opened == {
+            ("PUT", "tenants-master-schedule"),
+            ("PATCH", "tenants-master-schedule"),
             ("POST", "tenants-master-time-off"),
             ("DELETE", "tenants-master-time-off-detail"),
             ("PUT", "tenants-master-schedule-exceptions"),
             ("DELETE", "tenants-master-schedule-exception-detail"),
         }
-        weekly = capability("tenants-master-schedule", "PUT")
         closures = capability("tenants-closures", "POST")
-        assert weekly is not None and closures is not None
-        assert weekly.access is SalonRouteAccess.SERVICE_READ_ONLY
+        assert closures is not None
         assert closures.access is SalonRouteAccess.SERVICE_READ_ONLY
 
 
@@ -441,6 +441,21 @@ class TestWireShape:
 EXCEPTION_DATE = "2026-08-25"
 
 PERSON_CALLS: dict[str, Any] = {
+    "replace_weekly_schedule": lambda c: c.replace_weekly_schedule(
+        person_token=PERSON_TOKEN,
+        tenant_slug=TENANT,
+        specialist_id="SPECIALIST-ARG",
+        schedule=[
+            {"day_of_week": day, "is_working_day": False}
+            for day in range(7)
+        ],
+    ),
+    "update_weekly_schedule": lambda c: c.update_weekly_schedule(
+        person_token=PERSON_TOKEN,
+        tenant_slug=TENANT,
+        specialist_id="SPECIALIST-ARG",
+        schedule=[{"day_of_week": 0, "is_working_day": False}],
+    ),
     "create_time_off": lambda c: c.create_time_off(
         person_token=PERSON_TOKEN,
         tenant_slug=TENANT,
