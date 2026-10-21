@@ -1708,6 +1708,32 @@ class AylaBookingHTTPClient:
         )
         return self._ok(resp, success=(200,))
 
+    def set_specialist_archived(
+        self,
+        *,
+        specialist_id: str,
+        external_user_id: str,
+        archived: bool,
+    ) -> dict[str, Any]:
+        """``PATCH internal/specialists/{id}/archive/`` — мастер выведен из работы / возвращён.
+
+        DRF-2984 B2b. Каталог ставит ``SpecialistProfile.is_available``:
+        архивный профиль выходит из пула — не продаётся и не входит в счёт
+        подписки. Пауза мастера (``accepting_bookings``) не трогается.
+        ``external_user_id`` — АДМИН салона, который нажал (активный TUR
+        admin тенанта этого мастера), а не сам мастер; чужой салон → 404.
+        """
+        if not isinstance(archived, bool):
+            raise ValueError(f"archived must be a bool, got {archived!r}")
+        resp = self._request(
+            "PATCH",
+            f"specialists/{specialist_id}/archive/",
+            json_body={"archived": archived},
+            external_user_id=external_user_id,
+            purpose="read",
+        )
+        return self._ok(resp, success=(200,))
+
     def get_specialist_reviews(
         self,
         *,
