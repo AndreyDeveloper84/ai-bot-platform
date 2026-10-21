@@ -4,9 +4,10 @@
  * Нижняя панель салонной админки — ровно три: Сегодня | Расписание | Ayla.
  * Всё остальное — «Управление салоном» (Команда, Услуги), «Чаты с мастерами»
  * и «Настройки» — открывается из аватара справа вверху. Состав — по роли и
- * только из этого набора: финансовых, юридических и владельческих пунктов
- * здесь нет (даже серых) — их сегодня нет как экранов, и сторож в тесте
- * держит набор закрытым.
+ * только из этого набора; сторож в тесте держит набор закрытым. Юридических
+ * и прочих владельческих пунктов здесь нет (даже серых) — их нет как экранов.
+ * Единственный финансовый — «Подписка» (DRF-2988): экран есть, и при
+ * заморозке это единственный открытый раздел — отсюда салон платит.
  *
  * «Профиль» — только когда у человека есть мастерский профиль
  * (`is_master` → `/master/profile`): экрана профиля администратора не
@@ -26,6 +27,7 @@ export type AvatarSheetItemKey =
   | "customers"
   | "reviews"
   | "salon"
+  | "billing"
   | "settings";
 
 export interface AvatarSheetItem {
@@ -51,6 +53,8 @@ export const AVATAR_SHEET_COPY = {
   reviews: "Отзывы",
   /** Соло с владельческой ролью — вход в салонную админку (DRF-1149). */
   salon: "Управление салоном",
+  /** DRF-2988: подписка салона — открыта и при заморозке. */
+  billing: "Подписка",
   settings: "Настройки",
   close: "Закрыть",
 } as const;
@@ -70,6 +74,7 @@ export function avatarSheetItemsFor(me: AvatarSheetRoleFlags): AvatarSheetItem[]
     { key: "team", label: AVATAR_SHEET_COPY.team, to: "/admin/team", group: "manage" },
     { key: "services", label: AVATAR_SHEET_COPY.services, to: "/admin/services", group: "manage" },
     { key: "staffChats", label: AVATAR_SHEET_COPY.staffChats, to: "/admin/internal-chat" },
+    { key: "billing", label: AVATAR_SHEET_COPY.billing, to: "/admin/billing" },
     { key: "settings", label: AVATAR_SHEET_COPY.settings, to: "/admin/settings" },
   );
   return items;

@@ -17,6 +17,7 @@
 
 import { applyIdentityHeaders } from "./auth-headers";
 import { ApiError, logApiDetail } from "./api";
+import { billingSignalFor, emitSalonBillingSignal } from "./salon-billing-signal";
 
 interface ErrorBody {
   error: string;
@@ -65,6 +66,9 @@ async function requestWithResponse<T>(
       /* non-JSON 5xx */
     }
     logApiDetail(res.status, parsed.error, parsed.detail);
+    // DRF-2988: заморозка и «нужен тариф Салон» уводят на экран, где их снимают.
+    const signal = billingSignalFor(res.status, parsed.error, parsed.details);
+    if (signal) emitSalonBillingSignal(signal);
     throw new ApiError(res.status, parsed.error, parsed.detail, parsed.details);
   }
   if (res.status === 204) {
@@ -2368,4 +2372,76 @@ export const confirmAdminAylaAction = (token: string): Promise<AdminAylaConfirmR
   request("/api/v1/admin/assistant/confirm", {
     method: "POST",
     body: JSON.stringify({ token }),
+  });
+
+// --- /api/v1/admin/billing/* — подписка салона (DRF-2988, PR-B3) ---------
+//
+// Каталог — канон подписки; бот отдаёт его ответ в `data` как есть. Ручки
+// открыты и при заморозке: отсюда владелец платит. Отказы — ApiError со
+// `code` = слаг бота (`billing_disabled`, `billing_charges_disabled`,
+// `billing_subject_not_admin`, `owner_only`, `price_mismatch`, …).
+
+export type SalonSubscriptionStatus = "trial" | "active" | "past_due" | "frozen" | "canceled";
+
+export interface SalonSubscription {
+  status: SalonSubscriptionStatus | string;
+  tariff: "solo" | "salon" | string;
+  trial_ends_at: string | null;
+  current_period_end: string | null;
+  frozen_at: string | null;
+  frozen_reason: string | null;
+  cancel_effective_at: string | null;
+  pending_tariff: string | null;
+  pending_tariff_from: string | null;
+  card: { last4: string; brand: string } | null;
+  masters_count: number;
+  /** Деньги строкой: «150.00» — доплата за мастеров сверх трёх. */
+  extra_masters_amount: string;
+  /** Деньги строкой: итог за период. */
+  price_preview: string;
+}
+
+export interface SalonBillingStatus {
+  tenant_id: string;
+  /** `null` — подписка ещё не открыта (каталог открывает её на первой публикации). */
+  subscription: SalonSubscription | null;
+}
+
+export interface SalonPayDebtResult {
+  payment_id: string;
+  invoice_id: string;
+  confirmation_url: string | null;
+  amount: string;
+  status: string;
+  subscription_status: string;
+}
+
+const billing = <T>(path: string, init: RequestInit): Promise<T> =>
+  request<{ data: T }>(`/api/v1/admin/billing/${path}`, init).then((r) => r.data);
+
+export const getSalonBillingStatus = (): Promise<SalonBillingStatus> =>
+  billing("status/", { method: "GET" });
+
+export const setupSalonCard = (returnUrl: string): Promise<{ confirmation_url: string }> =>
+  billing("card-setup/", { method: "POST", body: JSON.stringify({ return_url: returnUrl }) });
+
+export const paySalonDebt = (returnUrl: string): Promise<SalonPayDebtResult> =>
+  billing("pay-debt/", { method: "POST", body: JSON.stringify({ return_url: returnUrl }) });
+
+export const cancelSalonSubscription = (
+  idempotencyKey: string,
+): Promise<{ status: string; effective_at: string }> =>
+  billing("cancel/", {
+    method: "POST",
+    body: JSON.stringify({ idempotency_key: idempotencyKey }),
+  });
+
+/** Переход «Соло» → «Салон» (В-2): цену, которую увидел владелец, сверяет каталог. */
+export const convertToSalon = (
+  confirmedPrice: string,
+  idempotencyKey: string,
+): Promise<{ tariff: string; effective_from: string }> =>
+  billing("convert-to-salon/", {
+    method: "POST",
+    body: JSON.stringify({ confirmed_price: confirmedPrice, idempotency_key: idempotencyKey }),
   });

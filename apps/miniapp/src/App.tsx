@@ -94,6 +94,9 @@ import { AdminSalonDayScreen } from "./screens/admin/AdminSalonDayScreen";
 import { AdminSectionDeniedScreen } from "./screens/admin/AdminSectionDeniedScreen";
 import { AdminServicesMatrixScreen } from "./screens/admin/AdminServicesMatrixScreen";
 import { AdminSettingsPlaceholderScreen } from "./screens/admin/AdminSettingsPlaceholderScreen";
+import { SalonBillingScreen } from "./screens/admin/SalonBillingScreen";
+import { SalonPlanChangeScreen } from "./screens/admin/SalonPlanChangeScreen";
+import { SalonBillingRedirect } from "./components/SalonBillingRedirect";
 import { AdminTeamScreen } from "./screens/admin/AdminTeamScreen";
 import { SalonPilotAylaScreen } from "./screens/admin/SalonPilotAylaScreen";
 import { SalonPilotScheduleScreen } from "./screens/admin/SalonPilotScheduleScreen";
@@ -516,6 +519,13 @@ function adminRouteElements(me: MeResponse): React.ReactNode {
           )
         }
       />
+      {/*
+        DRF-2988 — подписка салона. Без проверки роли на фронте: сервер
+        отказывает ресепшн 403, и экран называет, к кому идти. При заморозке
+        сюда уводит любая админская дверь (SalonBillingRedirect).
+      */}
+      <Route path="/admin/billing" element={<SalonBillingScreen me={me} />} />
+      <Route path="/admin/billing/salon" element={<SalonPlanChangeScreen me={me} />} />
     </>
   );
 }
@@ -1668,6 +1678,8 @@ function AppShell() {
 
   return (
     <BootReloadContext.Provider value={reloadMe}>
+      {/* DRF-2988: заморозка и «нужен тариф Салон» — на экран, где их снимают. */}
+      <SalonBillingRedirect />
       {body}
     </BootReloadContext.Provider>
   );
