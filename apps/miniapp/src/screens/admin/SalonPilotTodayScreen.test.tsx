@@ -181,7 +181,9 @@ describe("Salon v2 frozen hierarchy — DRF-2932", () => {
     const masters = await screen.findByRole("heading", { name: "Мастера сегодня" });
     const now = screen.getByRole("region", { name: /Сейчас по расписанию/ });
     const create = screen.getByRole("button", { name: "+ Новая запись" });
-    const schedule = screen.getByRole("button", { name: "Расписание" });
+    const actions = create.closest(".screen__actions");
+    expect(actions).not.toBeNull();
+    const schedule = within(actions as HTMLElement).getByRole("button", { name: "Расписание" });
     const readinessCard = await screen.findByRole("link", { name: /Готовность/ });
 
     expect(
