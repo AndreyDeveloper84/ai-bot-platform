@@ -54,7 +54,14 @@ class BillingAuthError(BillingProxyError):
 
 
 class BillingNotFoundError(BillingProxyError):
-    """404 — specialist unknown or outside tenant scope (C2/C3)."""
+    """404 — specialist unknown or outside tenant scope (C2/C3).
+
+    ``code`` — ``error.code`` каталога (``SUBSCRIPTION_NOT_FOUND`` и т.п.).
+    """
+
+    def __init__(self, message: str, *, code: str = "") -> None:
+        super().__init__(message)
+        self.code = code
 
 
 class BillingClientError(BillingProxyError):
@@ -87,6 +94,14 @@ class BillingTransportError(BillingProxyError):
 
 class BillingConfigError(BillingTransportError):
     """Config gap (missing token, invalid base URL) — never retried."""
+
+
+class BillingNotSentError(BillingTransportError):
+    """Соединение не установлено — запрос до каталога точно не дошёл.
+
+    Единственный сбой, после которого денежный POST (``pay-debt``) можно
+    повторить, не рискуя вторым списанием.
+    """
 
 
 class BillingChargesDisabledError(BillingTransportError):
@@ -175,6 +190,7 @@ class AylaBillingClient:
         return self._post(
             f"internal/billing/specialists/{specialist_id}/pay-debt/",
             json_body={"return_url": return_url},
+            charge=True,
         )
 
     # ------------------------------------------------------------------
@@ -220,6 +236,7 @@ class AylaBillingClient:
         return self._post(
             f"internal/billing/tenants/{tenant_id}/pay-debt/",
             json_body={"return_url": return_url},
+            charge=True,
         )
 
     def tenant_cancel(
@@ -259,13 +276,26 @@ class AylaBillingClient:
         return self._with_retry("GET", path)
 
     def _post(
-        self, path: str, *, json_body: dict[str, Any], external_user_id: str = ""
+        self,
+        path: str,
+        *,
+        json_body: dict[str, Any],
+        external_user_id: str = "",
+        charge: bool = False,
     ) -> dict[str, Any]:
         # Upstream is idempotent per day (billing.charges.start_card_setup),
         # so the retry policy matches the GETs. Ручки тенанта (C3) идемпотентны
         # по состоянию (одна подписка на тенант, select_for_update).
+        #
+        # ``charge`` — списание (pay-debt): ключа идемпотентности у него нет,
+        # и повтор после потерянного ответа создал бы второй платёж. Повторяем
+        # только то, что точно не ушло (:class:`BillingNotSentError`).
         return self._with_retry(
-            "POST", path, json_body=json_body, external_user_id=external_user_id
+            "POST",
+            path,
+            json_body=json_body,
+            external_user_id=external_user_id,
+            charge=charge,
         )
 
     def _with_retry(
@@ -275,6 +305,7 @@ class AylaBillingClient:
         *,
         json_body: dict[str, Any] | None = None,
         external_user_id: str = "",
+        charge: bool = False,
     ) -> dict[str, Any]:
         last_exc: Exception | None = None
         for attempt in range(self._retries):
@@ -285,6 +316,8 @@ class AylaBillingClient:
             except (BillingConfigError, BillingChargesDisabledError):
                 raise
             except BillingTransportError as exc:
+                if charge and not isinstance(exc, BillingNotSentError):
+                    raise
                 last_exc = exc
                 if attempt == self._retries - 1:
                     break
@@ -332,6 +365,8 @@ class AylaBillingClient:
                 headers=headers,
                 timeout=self._timeout,
             )
+        except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
+            raise BillingNotSentError(f"not sent: {exc.__class__.__name__} on {path}") from exc
         except httpx.HTTPError as exc:
             raise BillingTransportError(f"network: {exc.__class__.__name__} on {path}") from exc
 
@@ -340,7 +375,9 @@ class AylaBillingClient:
         if response.status_code == 404:
             if _err_code(response) == "BILLING_DISABLED":
                 raise BillingDisabledError(f"BILLING_DISABLED: {path}")
-            raise BillingNotFoundError(f"NOT_FOUND code={_err_code(response)!r}: {path}")
+            raise BillingNotFoundError(
+                f"NOT_FOUND code={_err_code(response)!r}: {path}", code=_err_code(response)
+            )
         if response.status_code == 409:
             raise BillingConflictError(
                 f"Ayla billing 409: code={_err_code(response)!r} on {path}",

@@ -17,6 +17,7 @@ from apps.admin_api.tests.conftest import init_data_header
 from apps.integrations.ayla.billing_client import (
     BillingChargesDisabledError,
     BillingConflictError,
+    BillingDisabledError,
     BillingNotFoundError,
 )
 from apps.tenancy.billing_gate import SALON_PRICE
@@ -153,6 +154,21 @@ def test_r2_reception_reads_and_pays_nothing(
 
 
 @pytest.mark.parametrize(
+    ("fixture", "who"), [("master_only_bot_user", "5004"), ("customer_bot_user", "5005")]
+)
+def test_r2b_a_master_or_customer_reaches_no_billing_door(
+    billing_on, catalog, client: Client, request, fixture, who
+):
+    request.getfixturevalue(fixture)
+
+    status = _get(client, "/api/v1/admin/billing/status/", who)
+    pay = _post(client, "/api/v1/admin/billing/pay-debt/", {}, who)
+
+    assert (status.status_code, pay.status_code) == (403, 403)
+    assert catalog.calls == []  # empty-assert-ok: r1 доказывает, что вызов у владельца/админа есть
+
+
+@pytest.mark.parametrize(
     "url", ["/api/v1/admin/billing/cancel/", "/api/v1/admin/billing/convert-to-salon/"]
 )
 def test_r3_cancel_and_plan_change_are_the_owners_alone(
@@ -191,10 +207,28 @@ def test_c1_second_factor_carries_the_caller_not_the_salon(
 
 def test_c2_flag_off_never_reaches_the_catalog(catalog, client: Client, owner_bot_user):
     resp = _get(client, "/api/v1/admin/billing/status/")
+    # Флаг — раньше разбора тела: кривое тело при выключенном биллинге — тоже 404.
+    broken = client.post(
+        "/api/v1/admin/billing/card-setup/",
+        data="{not json",
+        content_type="application/json",
+        HTTP_AUTHORIZATION=init_data_header(OWNER),
+    )
 
-    assert resp.status_code == 404
-    assert resp.json()["error"] == "billing_disabled"
+    assert (resp.status_code, broken.status_code) == (404, 404)
+    assert resp.json()["error"] == broken.json()["error"] == "billing_disabled"
     assert catalog.calls == []  # empty-assert-ok: z1 доказывает вызов при включённом флаге
+
+
+@pytest.mark.parametrize(
+    "url", ["/api/v1/admin/billing/card-setup/", "/api/v1/admin/billing/pay-debt/"]
+)
+def test_c5_a_return_url_must_be_https(billing_on, catalog, client: Client, owner_bot_user, url):
+    resp = _post(client, url, {"return_url": "http://evil.test/back"})
+
+    assert resp.status_code == 400
+    assert "https" in resp.json()["detail"]
+    assert catalog.calls == []  # empty-assert-ok: z1/r1 — с https вызов доходит
 
 
 @pytest.mark.parametrize(
@@ -236,6 +270,18 @@ def test_c4_convert_without_a_confirmed_price_is_refused_here(
             "billing_subject_not_admin",
         ),
         (BillingNotFoundError("x"), "/api/v1/admin/billing/status/", 404, "billing_not_found"),
+        (
+            BillingNotFoundError("x", code="SUBSCRIPTION_NOT_FOUND"),
+            "/api/v1/admin/billing/cancel/",
+            404,
+            "billing_not_found",
+        ),
+        (
+            BillingDisabledError("x"),
+            "/api/v1/admin/billing/card-setup/",
+            404,
+            "billing_disabled",
+        ),
         (
             BillingChargesDisabledError("x"),
             "/api/v1/admin/billing/pay-debt/",

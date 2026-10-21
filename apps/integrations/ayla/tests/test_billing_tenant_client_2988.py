@@ -100,14 +100,53 @@ def test_k3_billing_disabled_is_named_and_still_a_not_found():
 def test_k4_charges_disabled_is_not_retried_but_a_plain_503_is():
     client, seen = _client(lambda _r: _error(503, "BILLING_CHARGES_DISABLED"))
     with pytest.raises(BillingChargesDisabledError):
-        client.tenant_pay_debt(tenant_id=TENANT)
+        client.tenant_card_setup(
+            tenant_id=TENANT, external_user_id=SUBJECT, return_url="https://a/"
+        )
     assert len(seen) == 1
 
     client, seen = _client(lambda _r: _error(503, "SERVICE_UNAVAILABLE"))
     with pytest.raises(BillingTransportError) as caught:
-        client.tenant_pay_debt(tenant_id=TENANT)
+        client.tenant_card_setup(
+            tenant_id=TENANT, external_user_id=SUBJECT, return_url="https://a/"
+        )
     # Точный тип: не подкласс «списания выключены», а обычный сбой — его повторяют.
     assert type(caught.value) is BillingTransportError
+    assert len(seen) == 3
+
+
+def _bad_gateway(_r: httpx.Request) -> httpx.Response:
+    return _error(502, "BAD_GATEWAY")
+
+
+def _lost_answer(r: httpx.Request) -> httpx.Response:
+    raise httpx.ReadTimeout("lost answer", request=r)
+
+
+@pytest.mark.parametrize("fail", [_bad_gateway, _lost_answer], ids=["502", "read-timeout"])
+def test_k6_a_debt_charge_is_never_resent_once_it_may_have_left(fail):
+    """Ответ потерян — платёж мог создаться: повтор списал бы второй раз."""
+
+    client, seen = _client(fail)
+
+    with pytest.raises(BillingTransportError):
+        client.tenant_pay_debt(tenant_id=TENANT)
+    assert len(seen) == 1
+
+    client, seen = _client(fail)
+    with pytest.raises(BillingTransportError):
+        client.pay_debt(specialist_id="spec-1")
+    assert len(seen) == 1
+
+
+def test_k7_a_debt_charge_that_never_left_is_retried():
+    def refuse(r: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("refused", request=r)
+
+    client, seen = _client(refuse)
+
+    with pytest.raises(BillingTransportError):
+        client.tenant_pay_debt(tenant_id=TENANT)
     assert len(seen) == 3
 
 

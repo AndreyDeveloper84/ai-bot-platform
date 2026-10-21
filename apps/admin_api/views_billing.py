@@ -32,6 +32,7 @@ import json
 import logging
 import uuid
 from collections.abc import Callable
+from functools import wraps
 from typing import Any
 
 from django.http import HttpRequest, HttpResponse, JsonResponse
@@ -95,6 +96,29 @@ def _string_field(body: dict[str, Any], name: str) -> tuple[str, JsonResponse | 
     return str(value or "").strip(), None
 
 
+def _https_url(name: str, value: str) -> JsonResponse | None:
+    # Адрес возврата из платёжной формы: только https (каталог требует того же).
+    if value and not value.startswith("https://"):
+        return _error("validation_error", f"{name} must be an https URL", 400)
+    return None
+
+
+def _billing_on(view: Callable[..., HttpResponse]) -> Callable[..., HttpResponse]:
+    """``BILLING_ENABLED`` бота выключен — 404 до разбора тела и без каталога."""
+
+    @wraps(view)
+    def wrapper(request: HttpRequest, *args: Any, **kwargs: Any) -> HttpResponse:
+        if not billing_enabled():
+            return _error("billing_disabled", "billing is not enabled", 404)
+        return view(request, *args, **kwargs)
+
+    return wrapper
+
+
+#: 404 каталога, которые значат «нет подписки», а не «вы не admin» (C3).
+_MISSING_SUBSCRIPTION_CODES = frozenset({"SUBSCRIPTION_NOT_FOUND"})
+
+
 def _owner_only(request: HttpRequest) -> JsonResponse | None:
     if request.role_context.is_owner:  # type: ignore[attr-defined]
         return None
@@ -110,16 +134,14 @@ def _call(
 ) -> JsonResponse:
     """Позвать каталог и перевести его ответ в отказ этой поверхности."""
 
-    if not billing_enabled():
-        return _error("billing_disabled", "billing is not enabled", 404)
     tenant = request.tenant  # type: ignore[attr-defined]
     try:
         with _billing_client() as client:
             data = fn(client)
     except BillingDisabledError:
         return _error("billing_disabled", "billing is not enabled in the catalog", 404)
-    except BillingNotFoundError:
-        if second_factor:
+    except BillingNotFoundError as exc:
+        if second_factor and exc.code not in _MISSING_SUBSCRIPTION_CODES:
             # Каталог прячет «вы не admin этого тенанта» за 404 (C3).
             return _error(
                 "billing_subject_not_admin",
@@ -137,7 +159,14 @@ def _call(
         )
     except BillingChargesDisabledError:
         return _error("billing_charges_disabled", "charges are not enabled yet", 503)
-    except BillingClientError:
+    except BillingClientError as exc:
+        # 4xx каталога — чаще всего расхождение контракта самого бота: в журнал.
+        logger.warning(
+            "admin_api.billing.rejected action=%s tenant=%s error=%s",
+            action,
+            tenant.pk,
+            str(exc)[:200],
+        )
         return _error("validation_error", "request rejected by billing upstream", 400)
     except BillingProxyError as exc:
         logger.warning(
@@ -153,6 +182,7 @@ def _call(
 
 @require_http_methods(["GET"])
 @require_admin_role
+@_billing_on
 def billing_status(request: HttpRequest) -> HttpResponse:
     """Подписка салона из каталога — ``{tenant_id, subscription|null}`` verbatim."""
 
@@ -163,6 +193,7 @@ def billing_status(request: HttpRequest) -> HttpResponse:
 @csrf_exempt
 @require_http_methods(["POST"])
 @require_admin_role
+@_billing_on
 def billing_card_setup(request: HttpRequest) -> HttpResponse:
     """Привязать карту салона. Body: ``{return_url, consent_version?}`` → ``{confirmation_url}``."""
 
@@ -178,6 +209,9 @@ def billing_card_setup(request: HttpRequest) -> HttpResponse:
         return refusal
     if not return_url:
         return _error("validation_error", "return_url is required", 400)
+    refusal = _https_url("return_url", return_url)
+    if refusal is not None:
+        return refusal
 
     tenant_id = str(request.tenant.pk)  # type: ignore[attr-defined]
     subject = external_user_id_for(request.bot_user)  # type: ignore[attr-defined]
@@ -197,6 +231,7 @@ def billing_card_setup(request: HttpRequest) -> HttpResponse:
 @csrf_exempt
 @require_http_methods(["POST"])
 @require_admin_role
+@_billing_on
 def billing_pay_debt(request: HttpRequest) -> HttpResponse:
     """Оплатить долг салона. Body: ``{return_url?}`` — нужен, если карты нет."""
 
@@ -205,6 +240,9 @@ def billing_pay_debt(request: HttpRequest) -> HttpResponse:
         return refusal
     assert body is not None
     return_url, refusal = _string_field(body, "return_url")
+    if refusal is not None:
+        return refusal
+    refusal = _https_url("return_url", return_url)
     if refusal is not None:
         return refusal
 
@@ -219,6 +257,7 @@ def billing_pay_debt(request: HttpRequest) -> HttpResponse:
 @csrf_exempt
 @require_http_methods(["POST"])
 @require_admin_role
+@_billing_on
 def billing_cancel(request: HttpRequest) -> HttpResponse:
     """Отменить подписку салона (только владелец). → ``{status, effective_at}``."""
 
@@ -249,6 +288,7 @@ def billing_cancel(request: HttpRequest) -> HttpResponse:
 @csrf_exempt
 @require_http_methods(["POST"])
 @require_admin_role
+@_billing_on
 def billing_convert_to_salon(request: HttpRequest) -> HttpResponse:
     """Перейти с «Соло» на «Салон» (В-2, только владелец).
 
