@@ -54,6 +54,7 @@ from apps.identity.services.bot_user_resolver import (
 )
 from apps.miniapp_api.transport_refusal import GUARD_ATTR, verify_request_init_data
 from apps.miniapp_api.dev_bypass import try_dev_bypass
+from apps.tenancy.billing_gate import frozen_refusal
 from apps.tenancy.context import tenant_scope
 
 logger = logging.getLogger(__name__)
@@ -406,6 +407,12 @@ def require_master_init_data(
                 "master account is inactive, archived or has not completed onboarding",
                 403,
             )
+
+        # DRF-2984 B2 — заморозка подписки закрывает приложение, кроме
+        # биллинга, профиля и входа (OPEN_WHEN_FROZEN). Флаг выключен — молчит.
+        frozen = frozen_refusal(request, bot_user.tenant)
+        if frozen is not None:
+            return frozen
 
         request.verified_init_data = verified  # type: ignore[attr-defined]
         request.bot_user = bot_user  # type: ignore[attr-defined]

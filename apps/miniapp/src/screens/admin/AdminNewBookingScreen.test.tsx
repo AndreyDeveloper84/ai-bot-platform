@@ -6,6 +6,7 @@
  * 3. «Could not ask the schedule» never renders as «nothing free».
  */
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -116,6 +117,32 @@ describe("prefill from the admin assistant (DRF-2119)", () => {
     expect(mockedCreate).not.toHaveBeenCalled();
   });
 
+  it("treats Ayla client name as a search hint, not a selected new customer", async () => {
+    mockedSearch.mockResolvedValue([
+      { id: "c-1", name: "Анна П.", named: true },
+      { id: "c-2", name: "Анна С.", named: true },
+    ]);
+    renderWithQuery(
+      "date=2026-08-21&master_id=m-1&service_id=s-1&client_query=%D0%90%D0%BD%D0%BD%D0%B0",
+    );
+
+    await waitFor(() =>
+      expect(screen.getByLabelText(/^Мастер: Анна/)).toBeInTheDocument(),
+    );
+    expect(screen.getByLabelText(/^Клиент: выбрать/)).toBeInTheDocument();
+    expect(screen.getByRole("note")).toHaveTextContent(
+      "Ayla указала клиента «Анна» — выберите существующего или создайте нового.",
+    );
+
+    screen.getByLabelText(/^Клиент: выбрать/).click();
+    await waitFor(() => expect(mockedSearch).toHaveBeenCalledWith(
+      "Анна",
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    ));
+    expect(await screen.findByText("Анна П.")).toBeInTheDocument();
+    expect(screen.getByText("Анна С.")).toBeInTheDocument();
+  });
+
   it("ignores ids that are not in the loaded lists", async () => {
     renderWithQuery("master_id=m-other&service_id=s-other");
     await waitFor(() => expect(mockedMasters).toHaveBeenCalled());
@@ -140,6 +167,36 @@ describe("primary screen shape (§12)", () => {
   it("keeps «Создать запись» disabled until the draft is reviewable", () => {
     renderScreen();
     expect(screen.getByRole("button", { name: "Создать запись" })).toBeDisabled();
+  });
+});
+
+describe("Salon v2 frozen presentation — DRF-2934", () => {
+  it("shows explicit «Изменить» for a selected returning customer", async () => {
+    mockedSearch.mockResolvedValue([
+      { id: "c-1", name: "Мария", named: true, phone_masked: "+• ••67" },
+    ]);
+    renderScreen();
+
+    await userEvent.click(screen.getByLabelText(/Клиент/));
+    fireEvent.change(await screen.findByLabelText("Поиск клиента"), {
+      target: { value: "Мария" },
+    });
+    await userEvent.click(await screen.findByText(/Мария · /));
+
+    expect(await screen.findByText("Изменить")).toBeInTheDocument();
+    expect(screen.getByLabelText(/^Клиент: Мария · /)).toBeInTheDocument();
+  });
+
+  it("supports returning to the Salon Schedule surface", async () => {
+    render(
+      <MemoryRouter initialEntries={["/admin/booking/new?return=schedule"]}>
+        <AdminNewBookingScreen />
+      </MemoryRouter>,
+    );
+
+    expect(
+      await screen.findByRole("button", { name: "← Расписание" }),
+    ).toBeInTheDocument();
   });
 });
 

@@ -39,6 +39,17 @@ class _ActiveTenantManager(models.Manager):
         return super().get_queryset().filter(is_active=True)
 
 
+class SubscriptionStatus(models.TextChoices):
+    """Статусы подписки каталога (DRF-2984), зеркало. ``none`` — событий ещё не было."""
+
+    NONE = "none", "Нет подписки"
+    TRIAL = "trial", "Пробный период"
+    ACTIVE = "active", "Активна"
+    PAST_DUE = "past_due", "Долг"
+    FROZEN = "frozen", "Заморожена"
+    CANCELED = "canceled", "Отменена"
+
+
 class Tenant(models.Model):
     """A logical isolation boundary for platform data (ADR-0001).
 
@@ -93,9 +104,56 @@ class Tenant(models.Model):
     plan = models.CharField(
         max_length=32,
         default="free",
-        help_text="Billing plan tier. Free during Phase 0; Sprint 9+ "
-        "billing module will gate features by this value.",
+        help_text="Mirror of the catalog tariff (solo / salon). Written ONLY by "
+        "apps.tenancy.billing_mirror from catalog billing events (DRF-2984); "
+        "'free' until the first event. The catalog owns the tariff and the price.",
         verbose_name="Тариф",
+    )
+    # DRF-2984 — зеркало подписки каталога (ADR-0009 правило 1: бот зеркалит,
+    # не владеет). Канон — billing/ каталога; пишет только billing_mirror по
+    # событиям subscription.*. Заморозка — статус frozen, НЕ is_active=False:
+    # иначе скоупинг закрыл бы и экран оплаты.
+    subscription_status = models.CharField(
+        max_length=16,
+        choices=SubscriptionStatus.choices,
+        default=SubscriptionStatus.NONE,
+        help_text="Mirror of the catalog subscription status. 'none' — no billing event seen yet.",
+        verbose_name="Статус подписки",
+    )
+    subscription_status_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="occurred_at of the event the mirror was written from; an "
+        "older event never overwrites a newer one.",
+        verbose_name="Статус подписки на момент",
+    )
+    trial_ends_at = models.DateField(
+        null=True,
+        blank=True,
+        help_text="Mirror: last day of the free trial.",
+        verbose_name="Пробный период до",
+    )
+    current_period_end = models.DateField(
+        null=True,
+        blank=True,
+        help_text="Mirror: last day of the paid period.",
+        verbose_name="Оплачено до",
+    )
+    # DRF-2984 B2 — подтверждённая смена тарифа (соло → салон, В-2), которая
+    # вступит в силу со следующего периода. До того plan прежний, а второго
+    # мастера уже можно заводить: каталог меняет вид тенанта сразу.
+    pending_plan = models.CharField(
+        max_length=32,
+        blank=True,
+        default="",
+        help_text="Mirror: confirmed tariff change waiting for pending_plan_from; empty — none.",
+        verbose_name="Тариф со следующего периода",
+    )
+    pending_plan_from = models.DateField(
+        null=True,
+        blank=True,
+        help_text="Mirror: the day pending_plan takes effect.",
+        verbose_name="Новый тариф с",
     )
     timezone = models.CharField(
         max_length=64,

@@ -2012,6 +2012,23 @@ PLAN_ENGINE_ENABLED = os.environ.get("PLAN_ENGINE_ENABLED", "false").lower() in 
     "1",
 )
 
+# DRF-2984 (PR-B2) — гейты подписки платформы на стороне бота: заморозка
+# закрывает Mini App персонала (кроме биллинга, профиля и входа), добавление
+# мастера проверяется по зеркалу подписки (apps.tenancy.billing_gate).
+# Выключено (умолчание) — поведение как до биллинга: зеркало пишется, гейты
+# молчат. Тот же ключ, что в каталоге; реальные списания каталог держит
+# отдельным BILLING_CHARGES_ENABLED, у бота такого нет.
+BILLING_ENABLED = os.environ.get("BILLING_ENABLED", "false").lower() in _TRUTHY
+
+# DRF-2984 (PR-B2b) — архив и возврат мастера из Mini App салона сообщаются
+# каталогу (PATCH internal/specialists/{id}/archive/): архивный профиль выходит
+# из пула каталога — не продаётся по ссылке и фиду, не входит в счёт подписки.
+# Отдельно от BILLING_ENABLED: меняет выдачу каталога, включает владелец
+# (главное окно 21.10). Выключено — каталог об архиве не знает, как до B2b.
+CATALOG_ARCHIVE_SYNC_ENABLED = (
+    os.environ.get("CATALOG_ARCHIVE_SYNC_ENABLED", "false").lower() in _TRUTHY
+)
+
 # DRF-1301 — the same two switches in front of the post-visit follow-up
 # («как прошёл вчерашний визит?»), for the same reason and in the same
 # order. See apps/bookings/followups.py for the consent gate they guard.

@@ -71,6 +71,7 @@ from apps.booking.services.transitions import (
 )
 from apps.catalog.master_state import is_available
 from apps.catalog.models import CatalogMaster, MasterService
+from apps.catalog.services.archive_sync import sync_master_archived_on_commit
 from apps.catalog.specialist_ref import specialist_keys
 from apps.channels.max.addressing import MaxAddress
 from apps.channels.max.outbound import MaxAPIError, send_message
@@ -85,6 +86,7 @@ from apps.events.vocabulary import (
 )
 from apps.identity.models import BotUser
 from apps.notifications.proactive import consent_blocker
+from apps.tenancy.billing_gate import MasterAddRefused, assert_can_add_master
 
 logger = logging.getLogger(__name__)
 
@@ -1095,6 +1097,8 @@ def execute_deactivation(
         master.archived_at = now
         master.archive_reason = reason or ""
         master.save(update_fields=["is_active", "archived_at", "archive_reason"])
+        # DRF-2984 B2b — каталог узнаёт об архиве после коммита (за своим тумблером).
+        sync_master_archived_on_commit(master, archived=True, actor=actor)
 
         # Terminal audit + emit.
         terminal_payload = {
@@ -1247,10 +1251,18 @@ def reactivate_master(
         if master.is_active and master.archived_at is None:
             raise DeactivationError("already_active", "master is already active")
 
+        # DRF-2984 B2 — возврат делает мастера активным в салоне.
+        try:
+            assert_can_add_master(master.tenant, master_id=master.id)
+        except MasterAddRefused as exc:
+            raise DeactivationError(exc.slug, exc.detail, 409) from exc
+
         master.is_active = True
         master.archived_at = None
         master.archive_reason = ""
         master.save(update_fields=["is_active", "archived_at", "archive_reason"])
+        # DRF-2984 B2b — и о возврате.
+        sync_master_archived_on_commit(master, archived=False, actor=actor)
 
         payload = {
             "master_id": str(master.id),
