@@ -315,26 +315,6 @@ export function SalonPilotTodayScreen({ me }: { me: MeResponse }) {
 
   return (
     <SalonPilotFrame me={me} title="Сегодня" subtitle={subtitle}>
-      {canCreateBooking(me) ? (
-        <button
-          type="button"
-          className="salon-today__cta"
-          /* `?return=today` — чтобы экран создания вернул сюда, а не на
-             мост. Без параметра его возврат ведёт на `/admin/day`, и
-             главное действие пилота стало бы дверью в один конец: с
-             пятивкладочной поверхности назад в пилот не ведёт ничего.
-             Ровно та ловушка, от которой предостерегает
-             `SalonPilotFrame`. */
-          onClick={() => navigate("/admin/booking/new?return=today")}
-        >
-          + Новая запись
-        </button>
-      ) : null}
-
-      {/* DRF-2115 — «Диалоги — N ждут ответа» и «График — N заявок»;
-          DRF-2117 — «Готовность — N проблем» (ручка #1878). */}
-      <SalonTodayCards readiness={readiness} />
-
       <p className="salon-pilot__note" role="status">
         {statusLine}
       </p>
@@ -343,6 +323,40 @@ export function SalonPilotTodayScreen({ me }: { me: MeResponse }) {
 
       {!loading && !err && day ? (
         <>
+          {masters.length > 0 ? (
+            <section
+              className="salon-today__section"
+              aria-labelledby="salon-today-masters"
+            >
+              <h2 className="salon-today__heading" id="salon-today-masters">
+                Мастера сегодня
+              </h2>
+              {/* Не «работают N мастеров»: рабочих часов и смен в ответе
+                  нет, и утверждать выход мастера на смену нечем. Сказано
+                  ровно то, что известно, — кто есть в команде. */}
+              <p className="salon-today__section-note">
+                {`В команде: ${masters.length}`}
+              </p>
+              <ul className="salon-today__masters">
+                {masters.map((master) => (
+                  <li className="salon-today__master" key={master.masterId}>
+                    <span className="salon-today__avatar" aria-hidden="true">
+                      {masterInitial(master.name)}
+                    </span>
+                    <span className="salon-today__master-body">
+                      <span className="salon-today__master-name">
+                        {master.name}
+                      </span>
+                      <span className="salon-today__master-count">
+                        {visitCountLabel(master.visitCount)}
+                      </span>
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </section>
+          ) : null}
+
           {/* Пусто на экране бывает по двум разным причинам, и молчать
               нельзя ни в одной. День без записей — это одно; день, где
               всё уже прошло, — совсем другое, и к вечеру салон живёт
@@ -364,7 +378,7 @@ export function SalonPilotTodayScreen({ me }: { me: MeResponse }) {
               aria-labelledby="salon-today-now"
             >
               <h2 className="salon-today__heading" id="salon-today-now">
-                Сейчас
+                Сейчас по расписанию
                 <span className="salon-today__count">{nowRows.length}</span>
               </h2>
               <ul className="salon-today__list">
@@ -420,39 +434,29 @@ export function SalonPilotTodayScreen({ me }: { me: MeResponse }) {
             </section>
           ) : null}
 
-          {masters.length > 0 ? (
-            <section
-              className="salon-today__section"
-              aria-labelledby="salon-today-masters"
+          <div className="screen__actions">
+            {canCreateBooking(me) ? (
+              <button
+                type="button"
+                className="btn-primary"
+                onClick={() => navigate("/admin/booking/new?return=today")}
+              >
+                + Новая запись
+              </button>
+            ) : null}
+            <button
+              type="button"
+              className="btn-secondary"
+              onClick={() => navigate("/admin/schedule")}
             >
-              <h2 className="salon-today__heading" id="salon-today-masters">
-                Мастера сегодня
-              </h2>
-              {/* Не «работают N мастеров»: рабочих часов и смен в ответе
-                  нет, и утверждать выход мастера на смену нечем. Сказано
-                  ровно то, что известно, — кто есть в команде. */}
-              <p className="salon-today__section-note">
-                {`В команде: ${masters.length}`}
-              </p>
-              <ul className="salon-today__masters">
-                {masters.map((master) => (
-                  <li className="salon-today__master" key={master.masterId}>
-                    <span className="salon-today__avatar" aria-hidden="true">
-                      {masterInitial(master.name)}
-                    </span>
-                    <span className="salon-today__master-body">
-                      <span className="salon-today__master-name">
-                        {master.name}
-                      </span>
-                      <span className="salon-today__master-count">
-                        {visitCountLabel(master.visitCount)}
-                      </span>
-                    </span>
-                  </li>
-                ))}
-              </ul>
-            </section>
-          ) : null}
+              Расписание
+            </button>
+          </div>
+
+          {/* DRF-2955: transition-layer only. These working utility entries
+              move to management/operations later; until that destination is
+              verified they stay below the frozen Today core, never above it. */}
+          <SalonTodayCards readiness={readiness} />
         </>
       ) : null}
     </SalonPilotFrame>
