@@ -55,8 +55,18 @@ OPEN_WHEN_FROZEN: Final[frozenset[tuple[str, str]]] = frozenset(
         ("master_api", "profile_card"),
         ("master_api", "profile_portfolio"),
         ("master_api", "profile_portfolio_item"),
+        # DRF-2988 B3 — владелец салона часто не мастер: платит отсюда.
+        ("admin_api", "billing_status"),
+        ("admin_api", "billing_card_setup"),
+        ("admin_api", "billing_pay_debt"),
+        ("admin_api", "billing_cancel"),
+        ("admin_api", "billing_convert_to_salon"),
     }
 )
+
+#: Цена «Салона», которую подтверждает соло при втором мастере (В-2). Канон
+#: цены — каталог: он сверяет подтверждённую и отвечает ``PRICE_MISMATCH``.
+SALON_PRICE: Final = "990.00"
 
 
 def billing_enabled() -> bool:
@@ -143,9 +153,16 @@ def assert_can_add_master(tenant: Tenant, *, master_id: Any = None) -> None:
 
 
 def master_add_refusal_response(exc: MasterAddRefused) -> JsonResponse:
-    """409 для HTTP-дверей: ``{"error", "detail"}`` — форма ответов admin/master API."""
+    """409 для HTTP-дверей: ``{"error", "detail"}`` — форма ответов admin/master API.
 
-    return JsonResponse({"error": exc.slug, "detail": exc.detail}, status=409)
+    ``plan_change_required`` несёт ``details.salon_price`` — экран перехода
+    показывает её и шлёт обратно в ``billing/convert-to-salon/`` (DRF-2988).
+    """
+
+    body: dict[str, Any] = {"error": exc.slug, "detail": exc.detail}
+    if exc.verdict is MasterAddVerdict.NEEDS_PLAN_CHANGE:
+        body["details"] = {"salon_price": SALON_PRICE}
+    return JsonResponse(body, status=409)
 
 
 def is_closed(tenant: Tenant) -> bool:
@@ -173,6 +190,7 @@ def frozen_refusal(request: HttpRequest, tenant: Tenant) -> JsonResponse | None:
 __all__ = [
     "CLOSED_STATUSES",
     "OPEN_WHEN_FROZEN",
+    "SALON_PRICE",
     "MasterAddRefused",
     "MasterAddVerdict",
     "assert_can_add_master",
