@@ -73,7 +73,9 @@ class _Policy:
         return ScreeningStatus(self.status)
 
     def actions_for(self, status, codes):
-        return ("ACTION_FROM_POLICY",)
+        from apps.orchestrator.body_care.required_actions import RequiredAction
+
+        return (RequiredAction.CONTINUE_OR_MONITOR_PER_PROTOCOL,)
 
 
 def _evaluate(answers, policy):
@@ -197,7 +199,8 @@ def test_e8_the_record_carries_refs_and_six_versions_not_answers():
         "routing_version": "r-test",
         "claim_policy_version": "c-test",
     }
-    assert record["required_actions"] == ["ACTION_FROM_POLICY"]
+    assert record["required_actions"] == ["CONTINUE_OR_MONITOR_PER_PROTOCOL"]
+    assert record["required_action_registry_version"] == "0.1.0-candidate"
     flat = repr(record)
     # Ответ (его значение) в записи не лежит: только ссылка и хэш контекста.
     assert answer.answer_context_hash in flat  # присутствие: ссылка есть

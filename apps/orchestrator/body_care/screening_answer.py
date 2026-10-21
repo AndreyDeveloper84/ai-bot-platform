@@ -56,6 +56,24 @@ class ScreeningAnswerError(ValueError):
     """Нарушен инвариант ``ScreeningAnswer``. Программная ошибка, не ответ человека."""
 
 
+#: D-7 В-1 (подтверждено 06.10): у вопроса две версии. Смысловая входит в
+#: контекст ответа — её смена даёт новый хэш и ``REASK_REQUIRED`` (T4).
+QUESTION_SEMANTICS_VERSION_KEY = "question_semantics_version"
+#: Версия формулировки в контекст НЕ входит: редакторская правка текста не
+#: вызывает перепрохождения. Ключ с этим именем в области запрещён.
+QUESTION_WORDING_VERSION_KEY = "question_wording_version"
+
+
+def refuse_wording_version(scope: Mapping[str, str], error: type[ValueError]) -> None:
+    """Версия формулировки в области ответа сделала бы правку текста перепрохождением."""
+
+    if QUESTION_WORDING_VERSION_KEY in scope:
+        raise error(
+            f"{QUESTION_WORDING_VERSION_KEY} не входит в контекст ответа (D-7 В-1): "
+            f"смысл — {QUESTION_SEMANTICS_VERSION_KEY}"
+        )
+
+
 def context_hash(question_code: str, scope: Mapping[str, str]) -> str:
     """sha256 канонического JSON вопроса и области ответа (§8 ``answer_context_hash``).
 
@@ -105,6 +123,7 @@ class ScreeningAnswer:
         for key, value in scope.items():
             if not isinstance(key, str) or not key or not isinstance(value, str):
                 raise ScreeningAnswerError(f"answer_scope: строковые ключ и значение, не {key!r}")
+        refuse_wording_version(scope, ScreeningAnswerError)
         if not _aware(self.answered_at) or not _aware(self.expires_at):
             raise ScreeningAnswerError("моменты — с часовым поясом")
         if self.answer is ScreeningAnswerValue.NOT_ASKED:
@@ -142,8 +161,11 @@ class ScreeningAnswer:
 
 
 __all__ = [
+    "QUESTION_SEMANTICS_VERSION_KEY",
+    "QUESTION_WORDING_VERSION_KEY",
     "ScreeningAnswer",
     "ScreeningAnswerError",
     "ScreeningAnswerValue",
     "context_hash",
+    "refuse_wording_version",
 ]
