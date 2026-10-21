@@ -187,8 +187,9 @@ describe("Salon v2 frozen hierarchy — DRF-2932", () => {
     const nav = screen.getByRole("navigation", { name: "Основная навигация" });
     const scheduleButtons = screen.getAllByRole("button", { name: "Расписание" });
     expect(scheduleButtons.filter((b) => nav.contains(b))).toHaveLength(1);
-    const schedule = scheduleButtons.filter((b) => !nav.contains(b));
-    expect(schedule).toHaveLength(1);
+    const actions = scheduleButtons.filter((b) => !nav.contains(b));
+    expect(actions).toHaveLength(1);
+    const schedule = actions[0]!;
     const readinessCard = await screen.findByRole("link", { name: /Готовность/ });
 
     expect(
@@ -198,10 +199,10 @@ describe("Salon v2 frozen hierarchy — DRF-2932", () => {
       now.compareDocumentPosition(create) & Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
     expect(
-      create.compareDocumentPosition(schedule[0]!) & Node.DOCUMENT_POSITION_FOLLOWING,
+      create.compareDocumentPosition(schedule) & Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
     expect(
-      schedule[0]!.compareDocumentPosition(readinessCard) & Node.DOCUMENT_POSITION_FOLLOWING,
+      schedule.compareDocumentPosition(readinessCard) & Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
   });
 
