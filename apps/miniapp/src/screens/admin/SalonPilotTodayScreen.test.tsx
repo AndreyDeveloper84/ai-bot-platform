@@ -181,7 +181,14 @@ describe("Salon v2 frozen hierarchy — DRF-2932", () => {
     const masters = await screen.findByRole("heading", { name: "Мастера сегодня" });
     const now = screen.getByRole("region", { name: /Сейчас по расписанию/ });
     const create = screen.getByRole("button", { name: "+ Новая запись" });
-    const schedule = screen.getByRole("button", { name: "Расписание" });
+    // «Расписание» на экране два, и оба нарисованы доской: вкладка нижней
+    // панели и secondary-действие Today под «+ Новая запись» (DRF-2932).
+    // Порядок проверяется у действия, поэтому вкладку отсекаем по ориентиру.
+    const nav = screen.getByRole("navigation", { name: "Основная навигация" });
+    const scheduleButtons = screen.getAllByRole("button", { name: "Расписание" });
+    expect(scheduleButtons.filter((b) => nav.contains(b))).toHaveLength(1);
+    const schedule = scheduleButtons.filter((b) => !nav.contains(b));
+    expect(schedule).toHaveLength(1);
     const readinessCard = await screen.findByRole("link", { name: /Готовность/ });
 
     expect(
@@ -191,10 +198,10 @@ describe("Salon v2 frozen hierarchy — DRF-2932", () => {
       now.compareDocumentPosition(create) & Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
     expect(
-      create.compareDocumentPosition(schedule) & Node.DOCUMENT_POSITION_FOLLOWING,
+      create.compareDocumentPosition(schedule[0]!) & Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
     expect(
-      schedule.compareDocumentPosition(readinessCard) & Node.DOCUMENT_POSITION_FOLLOWING,
+      schedule[0]!.compareDocumentPosition(readinessCard) & Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
   });
 
