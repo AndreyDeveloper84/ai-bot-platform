@@ -92,6 +92,34 @@ ADMIN_ROUTES: dict[str, Entry] = {
             "master's own schedule remark as Ayla returns it, no customer row is in this body"
         ),
     ),
+    # --- salon subscription (DRF-2988 B3) -----------------------------------
+    "billing_status": third_party(
+        "subscription.card.last4",
+        "subscription.card.brand",
+        via=A + "views_billing:_call",
+        whose="the salon's payer — whoever bound the card, not necessarily the caller",
+        why=(
+            "the owner or admin who settles the salon's debt must see which card will be "
+            "charged; the catalog sends only the last four digits and the brand, never the PAN"
+        ),
+    ),
+    "billing_card_setup": none(
+        "{confirmation_url} — a payment-provider link to bind a card; no person field",
+        via=A + "views_billing:_call",
+    ),
+    "billing_pay_debt": none(
+        "{payment_id, invoice_id, confirmation_url, amount, status, subscription_status} — "
+        "the outcome of one debt charge, no person field",
+        via=A + "views_billing:_call",
+    ),
+    "billing_cancel": none(
+        "{status, effective_at} — when the salon's subscription ends, no person field",
+        via=A + "views_billing:_call",
+    ),
+    "billing_convert_to_salon": none(
+        "{tariff, effective_from} — the new tariff and its start date, no person field",
+        via=A + "views_billing:_call",
+    ),
     # --- bookings on behalf of the salon ------------------------------------
     "create_booking": none(
         "the §18 outcome envelope {outcome, detail, appointment_id?, reason_code?, "

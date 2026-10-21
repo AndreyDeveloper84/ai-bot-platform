@@ -246,8 +246,8 @@ def _gate(
         if not allowed:
             return _role_refusal(role_ctx, tenant_slug=bot_user.tenant.slug)
 
-        # DRF-2984 B2 — заморозка подписки. У админской поверхности открытых
-        # маршрутов нет: биллинг живёт в Mini App мастера (B3 решит экран салона).
+        # DRF-2984 B2 — заморозка подписки. Открыты только маршруты биллинга
+        # салона (DRF-2988 B3, ``views_billing``) — из них владелец платит.
         frozen = frozen_refusal(request, bot_user.tenant)
         if frozen is not None:
             return frozen

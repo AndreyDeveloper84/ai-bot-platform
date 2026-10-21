@@ -54,7 +54,14 @@ class BillingAuthError(BillingProxyError):
 
 
 class BillingNotFoundError(BillingProxyError):
-    """404 — specialist unknown or outside tenant scope (C2/C3)."""
+    """404 — specialist unknown or outside tenant scope (C2/C3).
+
+    ``code`` — ``error.code`` каталога (``SUBSCRIPTION_NOT_FOUND`` и т.п.).
+    """
+
+    def __init__(self, message: str, *, code: str = "") -> None:
+        super().__init__(message)
+        self.code = code
 
 
 class BillingClientError(BillingProxyError):
@@ -64,9 +71,21 @@ class BillingClientError(BillingProxyError):
 class BillingConflictError(BillingProxyError):
     """409 — carries the wire ``error.code`` (e.g. ``NO_DEBT``)."""
 
-    def __init__(self, message: str, *, code: str | None = None) -> None:
+    def __init__(
+        self, message: str, *, code: str | None = None, details: dict[str, Any] | None = None
+    ) -> None:
         super().__init__(message)
         self.code = code
+        #: ``error.details`` каталога (``PRICE_MISMATCH`` → ``current_price``).
+        self.details: dict[str, Any] = details or {}
+
+
+class BillingDisabledError(BillingNotFoundError):
+    """404 ``BILLING_DISABLED`` — биллинг каталога выключен флагом (DRF-2984 C1).
+
+    Наследник :class:`BillingNotFoundError`, чтобы двери мастера (C2/C3),
+    которые знают только «не найдено», вели себя как прежде.
+    """
 
 
 class BillingTransportError(BillingProxyError):
@@ -75,6 +94,21 @@ class BillingTransportError(BillingProxyError):
 
 class BillingConfigError(BillingTransportError):
     """Config gap (missing token, invalid base URL) — never retried."""
+
+
+class BillingNotSentError(BillingTransportError):
+    """Соединение не установлено — запрос до каталога точно не дошёл.
+
+    Единственный сбой, после которого денежный POST (``pay-debt``) можно
+    повторить, не рискуя вторым списанием.
+    """
+
+
+class BillingChargesDisabledError(BillingTransportError):
+    """503 ``BILLING_CHARGES_DISABLED`` — списания выключены (до «GO на платный»).
+
+    Не сбой сети: повтор ответа не изменит, поэтому не повторяется.
+    """
 
 
 _BACKOFF_SECONDS = (0.5, 1.0, 2.0)
@@ -156,6 +190,82 @@ class AylaBillingClient:
         return self._post(
             f"internal/billing/specialists/{specialist_id}/pay-debt/",
             json_body={"return_url": return_url},
+            charge=True,
+        )
+
+    # ------------------------------------------------------------------
+    # Подписка тенанта (DRF-2984 C3): internal/billing/tenants/{id}/…
+    #
+    # ``tenant_id`` — общий id тенанта бота и каталога. Ручки со вторым
+    # фактором (card-setup, cancel, convert-to-salon) требуют
+    # ``X-External-User-ID`` активного admin этого тенанта в каталоге;
+    # чужой субъект каталог отвечает 404 — не 403.
+    #
+    # Открывает подписку (``POST …/subscription/``) только каталог — на первой
+    # публикации соло и салона (решение главного окна 21.10, В-10). Бот её не
+    # открывает: он зеркалит статус из событий ``subscription.*``.
+    # ------------------------------------------------------------------
+
+    def get_tenant_status(self, *, tenant_id: str) -> dict[str, Any]:
+        """``GET tenants/{id}/status/`` → ``{tenant_id, subscription|null}`` verbatim."""
+        return self._get(f"internal/billing/tenants/{tenant_id}/status/")
+
+    def tenant_card_setup(
+        self,
+        *,
+        tenant_id: str,
+        external_user_id: str,
+        return_url: str,
+        consent_version: str = "",
+    ) -> dict[str, Any]:
+        """``POST tenants/{id}/card-setup/`` (второй фактор) → ``{confirmation_url}``."""
+        body: dict[str, Any] = {"return_url": return_url}
+        if consent_version:
+            body["consent_version"] = consent_version
+        return self._post(
+            f"internal/billing/tenants/{tenant_id}/card-setup/",
+            json_body=body,
+            external_user_id=external_user_id,
+        )
+
+    def tenant_pay_debt(self, *, tenant_id: str, return_url: str = "") -> dict[str, Any]:
+        """``POST tenants/{id}/pay-debt/`` — каталог субъекта не проверяет.
+
+        Кто вправе платить, решает вызывающая дверь бота.
+        """
+        return self._post(
+            f"internal/billing/tenants/{tenant_id}/pay-debt/",
+            json_body={"return_url": return_url},
+            charge=True,
+        )
+
+    def tenant_cancel(
+        self, *, tenant_id: str, external_user_id: str, idempotency_key: str
+    ) -> dict[str, Any]:
+        """``POST tenants/{id}/cancel/`` (второй фактор) → ``{status, effective_at}``."""
+        return self._post(
+            f"internal/billing/tenants/{tenant_id}/cancel/",
+            json_body={"idempotency_key": idempotency_key},
+            external_user_id=external_user_id,
+        )
+
+    def tenant_convert_to_salon(
+        self,
+        *,
+        tenant_id: str,
+        external_user_id: str,
+        idempotency_key: str,
+        confirmed_price: str,
+    ) -> dict[str, Any]:
+        """``POST tenants/{id}/convert-to-salon/`` (второй фактор).
+
+        ``confirmed_price`` — строка ``"990.00"`` (число каталог отвергает).
+        409 ``PRICE_MISMATCH`` / ``ALREADY_SALON``.
+        """
+        return self._post(
+            f"internal/billing/tenants/{tenant_id}/convert-to-salon/",
+            json_body={"idempotency_key": idempotency_key, "confirmed_price": confirmed_price},
+            external_user_id=external_user_id,
         )
 
     # ------------------------------------------------------------------
@@ -165,21 +275,49 @@ class AylaBillingClient:
     def _get(self, path: str) -> dict[str, Any]:
         return self._with_retry("GET", path)
 
-    def _post(self, path: str, *, json_body: dict[str, Any]) -> dict[str, Any]:
+    def _post(
+        self,
+        path: str,
+        *,
+        json_body: dict[str, Any],
+        external_user_id: str = "",
+        charge: bool = False,
+    ) -> dict[str, Any]:
         # Upstream is idempotent per day (billing.charges.start_card_setup),
-        # so the retry policy matches the GETs.
-        return self._with_retry("POST", path, json_body=json_body)
+        # so the retry policy matches the GETs. Ручки тенанта (C3) идемпотентны
+        # по состоянию (одна подписка на тенант, select_for_update).
+        #
+        # ``charge`` — списание (pay-debt): ключа идемпотентности у него нет,
+        # и повтор после потерянного ответа создал бы второй платёж. Повторяем
+        # только то, что точно не ушло (:class:`BillingNotSentError`).
+        return self._with_retry(
+            "POST",
+            path,
+            json_body=json_body,
+            external_user_id=external_user_id,
+            charge=charge,
+        )
 
     def _with_retry(
-        self, method: str, path: str, *, json_body: dict[str, Any] | None = None
+        self,
+        method: str,
+        path: str,
+        *,
+        json_body: dict[str, Any] | None = None,
+        external_user_id: str = "",
+        charge: bool = False,
     ) -> dict[str, Any]:
         last_exc: Exception | None = None
         for attempt in range(self._retries):
             try:
-                return self._send(method, path, json_body=json_body)
-            except BillingConfigError:
+                return self._send(
+                    method, path, json_body=json_body, external_user_id=external_user_id
+                )
+            except (BillingConfigError, BillingChargesDisabledError):
                 raise
             except BillingTransportError as exc:
+                if charge and not isinstance(exc, BillingNotSentError):
+                    raise
                 last_exc = exc
                 if attempt == self._retries - 1:
                     break
@@ -196,7 +334,12 @@ class AylaBillingClient:
         ) from last_exc
 
     def _send(
-        self, method: str, path: str, *, json_body: dict[str, Any] | None = None
+        self,
+        method: str,
+        path: str,
+        *,
+        json_body: dict[str, Any] | None = None,
+        external_user_id: str = "",
     ) -> dict[str, Any]:
         try:
             url = AylaUrlBuilder(self._base_url).build(path)
@@ -205,36 +348,48 @@ class AylaBillingClient:
         if not self._token:
             raise BillingConfigError("AYLA_INTERNAL_API_TOKEN not configured")
 
+        headers = with_request_id(
+            {
+                "Authorization": f"Bearer {self._token}",
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+            }
+        )
+        if external_user_id:
+            headers["X-External-User-ID"] = external_user_id
         try:
             response = self._client().request(
                 method,
                 url,
                 json=json_body,
-                headers=with_request_id(
-                    {
-                        "Authorization": f"Bearer {self._token}",
-                        "Accept": "application/json",
-                        "Content-Type": "application/json",
-                    }
-                ),
+                headers=headers,
                 timeout=self._timeout,
             )
+        except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
+            raise BillingNotSentError(f"not sent: {exc.__class__.__name__} on {path}") from exc
         except httpx.HTTPError as exc:
             raise BillingTransportError(f"network: {exc.__class__.__name__} on {path}") from exc
 
         if response.status_code in (401, 403):
             raise BillingAuthError(f"Ayla billing auth failed: HTTP {response.status_code}")
         if response.status_code == 404:
-            raise BillingNotFoundError(f"SPECIALIST_NOT_FOUND: {path}")
+            if _err_code(response) == "BILLING_DISABLED":
+                raise BillingDisabledError(f"BILLING_DISABLED: {path}")
+            raise BillingNotFoundError(
+                f"NOT_FOUND code={_err_code(response)!r}: {path}", code=_err_code(response)
+            )
         if response.status_code == 409:
             raise BillingConflictError(
                 f"Ayla billing 409: code={_err_code(response)!r} on {path}",
                 code=_err_code(response),
+                details=_err_details(response),
             )
         if 400 <= response.status_code < 500:
             raise BillingClientError(
                 f"Ayla billing 4xx: HTTP {response.status_code} body={response.text[:200]!r}"
             )
+        if response.status_code == 503 and _err_code(response) == "BILLING_CHARGES_DISABLED":
+            raise BillingChargesDisabledError(f"BILLING_CHARGES_DISABLED on {path}")
         if response.status_code >= 500:
             raise BillingTransportError(f"http_{response.status_code} on {path}")
         try:
@@ -267,3 +422,12 @@ def _err_code(resp: httpx.Response) -> str:
         return (resp.json().get("error") or {}).get("code", "") or "unknown"
     except (ValueError, AttributeError):
         return "unknown"
+
+
+def _err_details(resp: httpx.Response) -> dict[str, Any]:
+    """Pull ``error.details`` from an error body, best-effort."""
+    try:
+        details = (resp.json().get("error") or {}).get("details")
+    except (ValueError, AttributeError):
+        return {}
+    return dict(details) if isinstance(details, dict) else {}

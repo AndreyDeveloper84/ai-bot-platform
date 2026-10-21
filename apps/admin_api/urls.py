@@ -16,6 +16,7 @@ from apps.admin_api import (
     views_assistant,
     views_availability,
     views_availability_slots,
+    views_billing,
     views_booking_cancel,
     views_booking_complete,
     views_booking_create,
@@ -51,6 +52,17 @@ urlpatterns = [
     # вторая половина одного экрана, визиты берутся из ``day/`` и только
     # оттуда (см. докстринг ``views_salon_frame``).
     path("day/frame/", views_salon_frame.salon_day_frame, name="salon_day_frame"),
+    # DRF-2988 B3 — подписка салона поверх C3 каталога. Все пять открыты при
+    # заморозке (``billing_gate.OPEN_WHEN_FROZEN``): отсюда владелец платит.
+    path("billing/status/", views_billing.billing_status, name="billing_status"),
+    path("billing/card-setup/", views_billing.billing_card_setup, name="billing_card_setup"),
+    path("billing/pay-debt/", views_billing.billing_pay_debt, name="billing_pay_debt"),
+    path("billing/cancel/", views_billing.billing_cancel, name="billing_cancel"),
+    path(
+        "billing/convert-to-salon/",
+        views_billing.billing_convert_to_salon,
+        name="billing_convert_to_salon",
+    ),
     # Phase 2 — bookable starts for the manual-booking flow. Wraps Ayla's
     # canonical slots read; see the module docstring for why it refuses
     # rather than returning an empty list on upstream failure.
