@@ -153,6 +153,24 @@ describe("заморозка и долг", () => {
     );
   });
 
+  it("платёж без подтверждения — не говорит, что долг погашен", async () => {
+    status.mockResolvedValue({ tenant_id: "t-1", subscription: sub({ status: "past_due" }) });
+    vi.mocked(paySalonDebt).mockResolvedValue({
+      payment_id: "p",
+      invoice_id: "i",
+      confirmation_url: null,
+      amount: "1140.00",
+      status: "pending",
+      subscription_status: "past_due",
+    });
+    renderBilling();
+
+    await userEvent.click(await screen.findByRole("button", { name: "Оплатить долг" }));
+
+    expect(await screen.findByText(/Платёж принят в обработку/)).toBeInTheDocument();
+    expect(screen.queryByText(/Задолженность погашена/)).toBeNull();
+  });
+
   it("списания выключены — честно говорит, что оплата не подключена", async () => {
     status.mockResolvedValue({ tenant_id: "t-1", subscription: sub({ status: "past_due" }) });
     vi.mocked(paySalonDebt).mockRejectedValue(
@@ -224,7 +242,10 @@ describe("кто что может", () => {
     renderBilling({ ...OWNER, is_owner: false, is_receptionist: true });
 
     expect(
-      await screen.findByText("Подпиской управляют владелец и администратор салона."),
+      await screen.findByText(
+        "Подпиской управляют владелец и администратор салона — если салон приостановлен, " +
+          "попросите их оплатить.",
+      ),
     ).toBeInTheDocument();
   });
 });
@@ -261,5 +282,28 @@ describe("переход «Соло» → «Салон» (В-2)", () => {
 
     expect(await screen.findByRole("button", { name: "Перейти за 1 090 ₽" })).toBeInTheDocument();
     expect(screen.getByRole("alert")).toHaveTextContent("Цена изменилась");
+
+    // Новая цена — новое решение: второе подтверждение идёт с новым ключом.
+    vi.mocked(convertToSalon).mockResolvedValueOnce({
+      tariff: "salon",
+      effective_from: "2026-11-01",
+    });
+    await userEvent.click(screen.getByRole("button", { name: "Перейти за 1 090 ₽" }));
+    const [first, second] = vi.mocked(convertToSalon).mock.calls;
+    expect(second?.[0]).toBe("1090.00");
+    expect(second?.[1]).toBeTruthy();
+    expect(second?.[1]).not.toBe(first?.[1]);
+  });
+
+  it("после открытия формы привязки — можно привязать заново", async () => {
+    status.mockResolvedValue({ tenant_id: "t-1", subscription: sub() });
+    vi.mocked(setupSalonCard).mockResolvedValue({ confirmation_url: "https://pay.test/c" });
+    renderBilling();
+
+    await userEvent.click(await screen.findByRole("checkbox"));
+    await userEvent.click(screen.getByRole("button", { name: "Привязать карту" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Привязать заново" }));
+
+    expect(screen.getByRole("button", { name: "Привязать карту" })).toBeInTheDocument();
   });
 });

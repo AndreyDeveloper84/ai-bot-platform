@@ -64,7 +64,9 @@ export const BILLING_REFUSAL_TEXT: Record<string, string> = {
   billing_subject_not_admin:
     "В каталоге ваша учётная запись не отмечена администратором салона — обратитесь в поддержку Ayla.",
   owner_only: "Это может сделать только владелец салона.",
-  forbidden: "Подпиской управляют владелец и администратор салона.",
+  forbidden:
+    "Подпиской управляют владелец и администратор салона — если салон приостановлен, "
+    + "попросите их оплатить.",
   no_tenant_admin: "У салона в каталоге нет администратора-плательщика — обратитесь в поддержку Ayla.",
 };
 
@@ -113,20 +115,33 @@ export function SalonBillingScreen({ me }: { me: MeResponse }) {
             onRetry={() => void reload()}
           />
         ))}
-      {load.kind === "ok" &&
-        (load.data.subscription ? (
-          <Subscription
-            sub={load.data.subscription}
-            isOwner={me.is_owner}
-            onChanged={() => void reload({ silent: true })}
-          />
-        ) : (
-          <div className="callout" role="status">
-            <p style={{ margin: 0 }}>
-              Подписка откроется, когда салон появится в каталоге: первый месяц — бесплатно.
-            </p>
-          </div>
-        ))}
+      {load.kind === "ok" && load.data.subscription ? (
+        <Subscription
+          sub={load.data.subscription}
+          isOwner={me.is_owner}
+          onChanged={() => void reload({ silent: true })}
+        />
+      ) : null}
+      {load.kind === "ok" && !load.data.subscription ? (
+        <div className="callout" role="status">
+          <p style={{ margin: 0 }}>
+            Подписка откроется, когда салон появится в каталоге: первый месяц — бесплатно.
+          </p>
+        </div>
+      ) : null}
+      {load.kind === "ok" && (
+        <div className="profile-section__cta-row">
+          {/* После формы оплаты провайдер возвращает сюда, а статус каталог
+              узнаёт вебхуком — обновить его может сам человек. */}
+          <button
+            type="button"
+            className="btn-secondary"
+            onClick={() => void reload({ silent: true })}
+          >
+            Обновить статус
+          </button>
+        </div>
+      )}
 
       <AdminTabBar me={me} />
     </div>
@@ -222,9 +237,12 @@ function PayDebt({ frozen, onChanged }: { frozen: boolean; onChanged: () => void
       const result = await paySalonDebt(returnUrl());
       if (result.confirmation_url) {
         openPaymentConfirmation(result.confirmation_url);
-        setNote("Открыли страницу оплаты. После списания статус обновится.");
-      } else {
+        setNote("Открыли страницу оплаты. После оплаты нажмите «Обновить статус».");
+      } else if (result.status === "succeeded") {
         setNote(`Списано ${formatMoney(result.amount)}. Задолженность погашена.`);
+      } else {
+        // Не подтверждено каталогом — не утверждаем, что долга нет.
+        setNote("Платёж принят в обработку — нажмите «Обновить статус» чуть позже.");
       }
       onChanged();
     } catch (err) {
@@ -295,9 +313,16 @@ function Card({ card }: { card: SalonSubscription["card"] }) {
           <span>·· {card.last4}</span>
         </p>
       ) : pending ? (
-        <p className="profile-section__caption" role="status">
-          Карта привязывается — появится здесь после подтверждения.
-        </p>
+        <>
+          <p className="profile-section__caption" role="status">
+            Карта привязывается: когда закончите на странице оплаты, нажмите «Обновить статус».
+          </p>
+          <div className="profile-section__cta-row">
+            <button type="button" className="btn-secondary" onClick={() => setPending(false)}>
+              Привязать заново
+            </button>
+          </div>
+        </>
       ) : (
         <>
           <p className="profile-section__caption">

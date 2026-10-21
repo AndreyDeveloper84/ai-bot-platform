@@ -35,7 +35,8 @@ export function SalonPlanChangeScreen({ me }: { me: MeResponse }) {
   const [busy, setBusy] = useState(false);
   const [done, setDone] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
-  const [key] = useState(() => crypto.randomUUID());
+  // Ключ — одно решение: новая цена — новое решение, новый ключ.
+  const [key, setKey] = useState(() => crypto.randomUUID());
 
   useEffect(() => {
     setBackButton(true);
@@ -56,7 +57,10 @@ export function SalonPlanChangeScreen({ me }: { me: MeResponse }) {
     } catch (err) {
       if (err instanceof ApiError && err.slug === "price_mismatch") {
         const current = err.details?.current_price;
-        if (typeof current === "string" && current) setPrice(current);
+        if (typeof current === "string" && current) {
+          setPrice(current);
+          setKey(crypto.randomUUID());
+        }
         setNote("Цена изменилась — проверьте новую и подтвердите ещё раз.");
       } else if (err instanceof ApiError && err.slug === "already_salon") {
         setDone("");

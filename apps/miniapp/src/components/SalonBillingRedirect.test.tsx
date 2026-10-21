@@ -4,11 +4,19 @@
  * Сигнал шлёт настоящий `admin-api.ts` на ответ сервера: предмет — путь
  * «отказ двери → экран», а не только сам слушатель.
  */
-import { render, screen } from "@testing-library/react";
-import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
+import { act, render, screen } from "@testing-library/react";
+import {
+  MemoryRouter,
+  Route,
+  RouterProvider,
+  Routes,
+  createMemoryRouter,
+  useLocation,
+} from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { getSalonDay } from "../lib/admin-api";
+import { emitSalonBillingSignal } from "../lib/salon-billing-signal";
 import { SalonBillingRedirect } from "./SalonBillingRedirect";
 
 function Where() {
@@ -60,6 +68,38 @@ describe("отказ двери → экран", () => {
     await expect(getSalonDay()).rejects.toThrow();
 
     expect(await screen.findByText("at /admin/billing/salon · 990.00")).toBeInTheDocument();
+  });
+
+  it("два отказа в одном тике — один переход: «назад» ведёт на форму", async () => {
+    // Рендер видит только последний адрес, дубль в истории — нет; его видно
+    // шагом назад: с дублем он вернул бы на тот же экран перехода.
+    const router = createMemoryRouter(
+      [
+        {
+          path: "*",
+          element: (
+            <>
+              <SalonBillingRedirect />
+              <Where />
+            </>
+          ),
+        },
+      ],
+      { initialEntries: ["/admin/team/invite"] },
+    );
+    render(<RouterProvider router={router} />);
+
+    // Синхронно, до перерисовки: адрес в замыкании слушателя ещё прежний,
+    // и держит один переход только флаг ухода.
+    act(() => {
+      emitSalonBillingSignal({ kind: "plan_change", salonPrice: "990.00" });
+      emitSalonBillingSignal({ kind: "plan_change", salonPrice: "990.00" });
+    });
+    expect(await screen.findByText("at /admin/billing/salon · 990.00")).toBeInTheDocument();
+
+    await act(() => router.navigate(-1));
+
+    expect(await screen.findByText("at /admin/team/invite")).toBeInTheDocument();
   });
 
   it("другой отказ — остаётся на месте", async () => {

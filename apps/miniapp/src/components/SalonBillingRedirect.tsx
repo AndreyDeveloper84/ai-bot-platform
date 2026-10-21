@@ -6,7 +6,7 @@
  * снимают. Уже на месте — не уводим: экран биллинга сам ходит в открытые при
  * заморозке ручки, и повторный переход сбил бы его состояние.
  */
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 
 import {
@@ -18,11 +18,18 @@ import {
 export function SalonBillingRedirect() {
   const navigate = useNavigate();
   const { pathname } = useLocation();
+  // Несколько отказов в одном тике (параллельные запросы экрана) — один
+  // переход: флаг снимается, когда адрес действительно сменился.
+  const leaving = useRef(false);
+  useEffect(() => {
+    leaving.current = false;
+  }, [pathname]);
 
   useEffect(
     () =>
       onSalonBillingSignal((signal) => {
-        if (pathname.startsWith(SALON_BILLING_PATH)) return;
+        if (leaving.current || pathname.startsWith(SALON_BILLING_PATH)) return;
+        leaving.current = true;
         if (signal.kind === "frozen") {
           navigate(SALON_BILLING_PATH, { replace: true });
         } else {
