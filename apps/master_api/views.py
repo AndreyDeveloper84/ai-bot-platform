@@ -120,6 +120,11 @@ from apps.master_api.auth import (
     validate_invite_token,
 )
 from apps.miniapp_api.master_media import master_photo_path
+from apps.tenancy.billing_gate import (
+    MasterAddRefused,
+    assert_can_add_master,
+    master_add_refusal_response,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -589,6 +594,11 @@ def onboarding_accept(request: HttpRequest) -> HttpResponse:
         # same ``archived_at`` guard applies — see the comment at the
         # fresh-accept write.
         if not existing.is_active and existing.archived_at is None:
+            # DRF-2984 B2 — починка на повторе тоже делает мастера активным.
+            try:
+                assert_can_add_master(existing.tenant, master_id=existing.id)
+            except MasterAddRefused as exc:
+                return master_add_refusal_response(exc)
             existing.is_active = True
             existing.save(update_fields=["is_active"])
             logger.info(
@@ -675,6 +685,15 @@ def onboarding_accept(request: HttpRequest) -> HttpResponse:
                 )
 
             handle = canonical_handle(master.max_handle) or _init_data_handle(request)
+
+            # DRF-2984 B2 — приземление делает мастера активным в салоне.
+            # Отказ до записи: токен не погашен, сработает после оплаты.
+            try:
+                assert_can_add_master(
+                    master.tenant, master_id=glue.id if glue is not None else master.id
+                )
+            except MasterAddRefused as exc:
+                return master_add_refusal_response(exc)
 
             if glue is not None:
                 landed = _land_on_glue_row(
