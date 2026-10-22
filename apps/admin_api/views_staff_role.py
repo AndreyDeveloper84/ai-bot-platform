@@ -398,3 +398,81 @@ def _restore_master(request: HttpRequest, *, master_id: str, bot_user_id: str) -
         master.id,
     )
     return JsonResponse({"changed": True, "role": "master"}, status=200)
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@require_admin_role
+def staff_receptionist_link(request: HttpRequest) -> HttpResponse:
+    """Open the booking desk in the catalog for a receptionist of this salon.
+
+    DRF-2833 (B3), the owner's decision 07.10 (sheet p.22, variant B): the
+    front desk is wired into the catalog by a separate action in the Mini
+    App, never by the invite code (DRF-2085 p.1). The bot role already
+    exists — a code or «Сменить роль» gave it; this adds the catalog half
+    that ``require_booking_desk`` alone cannot (the catalog answers 403 to a
+    receptionist it has no TUR for).
+
+    Owner only, as ``staff/role/``: granting roles is the owner's (22.09);
+    widening to admins is a separate decision. The catalog checks the owner
+    again — an active admin of THIS salon in the catalog
+    (``assigner_not_admin``), since owner in the bot is not admin there.
+
+    Body:
+      ``bot_user_id`` — the receptionist (required)
+
+    Returns 200 with ``{linked: true, created}``; ``created: false`` — the
+    desk was already open (the catalog replayed the same key).
+    """
+
+    from apps.identity.services.receptionist_link import link_receptionist_to_catalog
+
+    role_ctx = request.role_context  # type: ignore[attr-defined]
+    tenant = request.tenant  # type: ignore[attr-defined]
+    actor = request.bot_user  # type: ignore[attr-defined]
+
+    if not role_ctx.is_owner:
+        return _error("forbidden", "only the salon owner can assign the front desk", 403)
+
+    try:
+        body: dict[str, Any] = json.loads(request.body or b"{}")
+    except json.JSONDecodeError:
+        return _error("bad_request", "invalid JSON body", 400)
+    if not isinstance(body, dict):
+        return _error("bad_request", "body must be a JSON object", 400)
+
+    bot_user_id = str(body.get("bot_user_id") or "").strip()
+    if not bot_user_id:
+        return _error("bad_request", "bot_user_id is required", 400)
+
+    # Tenant-scoped manager (require_admin_role's tenant_scope): a person
+    # from another salon is simply not found.
+    try:
+        person = BotUser.objects.filter(pk=bot_user_id).first()
+    except (ValidationError, ValueError):
+        return _error("bad_request", "bot_user_id is not a valid id", 400)
+    if person is None or getattr(person, "tenant_id", None) != tenant.id:
+        return _error("not_found", "no such person in this salon", 404)
+    if person.id == actor.id:
+        return _error("forbidden", "you cannot assign yourself to the front desk", 403)
+
+    try:
+        result = link_receptionist_to_catalog(
+            tenant=tenant,
+            person=person,
+            assigned_by=actor,
+            actor_label=f"salon_miniapp:bot_user:{actor.pk}",
+        )
+    except CatalogAdminLinkRefused as exc:
+        return _error(exc.slug, exc.reason, 409, details={"hint": exc.hint})
+    except InviteError as exc:
+        return _error(exc.slug, str(exc), 409)
+
+    logger.info(
+        "admin_api.staff_receptionist_link tenant=%s person=%s by=%s created=%s",
+        tenant.slug,
+        person.id,
+        actor.id,
+        result.created,
+    )
+    return JsonResponse({"linked": True, "created": result.created}, status=200)

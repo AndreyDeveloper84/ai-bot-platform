@@ -327,6 +327,11 @@ ADMIN_ROUTES: dict[str, Entry] = {
         "a flag and a role name, no field of the person",
         via=A + "views_staff_role:staff_restore",
     ),
+    "staff_receptionist_link": none(
+        "{linked, created} — whether the catalog opened the booking desk for the receptionist "
+        "and whether it was new; two flags, no field of the person",
+        via=A + "views_staff_role:staff_receptionist_link",
+    ),
     "staff_invites_list": third_party(
         "items[].note",
         "items[].master_name",

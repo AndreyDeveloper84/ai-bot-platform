@@ -155,6 +155,13 @@ urlpatterns = [
         views_staff_role.staff_restore,
         name="staff_restore",
     ),
+    # DRF-2833 (B3) — opening the booking desk in the catalog for a
+    # receptionist. Owner-only; see the view.
+    path(
+        "staff/receptionist/link/",
+        views_staff_role.staff_receptionist_link,
+        name="staff_receptionist_link",
+    ),
     # DRF-2275 — issued codes: list, cancel, resend. Owner and admin; an
     # owner code is the owner's alone. See the view.
     path(
