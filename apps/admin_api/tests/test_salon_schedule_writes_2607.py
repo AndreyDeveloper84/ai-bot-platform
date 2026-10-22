@@ -183,6 +183,19 @@ class TestTheWriteIsThePersons:
     @pytest.mark.parametrize(
         ("name", "method", "extra", "body", "catalog_status", "expected"),
         [
+            (
+                "master_schedule",
+                "put",
+                [],
+                {
+                    "schedule": [
+                        {"day_of_week": day, "is_working_day": False}
+                        for day in range(7)
+                    ]
+                },
+                200,
+                200,
+            ),
             ("master_time_off_detail", "delete", [TIME_OFF_ID], None, 204, 204),
             (
                 "master_date_exception",
@@ -437,6 +450,17 @@ class TestWhoMayAsk:
 
 
 _EVERY_WRITE = [
+    (
+        "master_schedule",
+        "put",
+        [],
+        {
+            "schedule": [
+                {"day_of_week": day, "is_working_day": False}
+                for day in range(7)
+            ]
+        },
+    ),
     (
         "master_time_off",
         "post",

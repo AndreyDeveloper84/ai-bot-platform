@@ -226,22 +226,15 @@ SALON_ROUTES: tuple[SalonRoute, ...] = (
         name="tenants-master-schedule",
         method="PUT",
         path="masters/{specialist_id}/schedule/",
-        access=SalonRouteAccess.SERVICE_READ_ONLY,
-        reason=(
-            "Weekly recurring template. Closed twice over: "
-            "ServiceCredentialIsReadOnly refuses the method to a service "
-            "Bearer, and OD_SALON_P0_CONTRACT В-4 row D declares the weekly "
-            "shrink guard an open backend gap — «до закрытия gap Ayla weekly "
-            "writes считаются unsupported». So this stays uncalled even if "
-            "the credential question is settled."
-        ),
+        access=SalonRouteAccess.PERSON_TOKEN,
+        client_method="replace_weekly_schedule",
     ),
     SalonRoute(
         name="tenants-master-schedule",
         method="PATCH",
         path="masters/{specialist_id}/schedule/",
-        access=SalonRouteAccess.SERVICE_READ_ONLY,
-        reason="Same weekly template as the PUT above — see that row.",
+        access=SalonRouteAccess.PERSON_TOKEN,
+        client_method="update_weekly_schedule",
     ),
     SalonRoute(
         name="tenants-master-schedule-impact",

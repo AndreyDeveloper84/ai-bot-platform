@@ -366,6 +366,48 @@ class AylaSalonClient:
         self._raise_for_status(resp)
         raise SalonAPIError("unreachable")  # pragma: no cover — _raise_for_status always raises
 
+    def replace_weekly_schedule(
+        self,
+        *,
+        person_token: str,
+        tenant_slug: str,
+        specialist_id: str,
+        schedule: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """PUT the complete 7-day weekly template as the salon administrator."""
+
+        _require_id(specialist_id, field="specialist_id")
+        if len(schedule) != 7:
+            raise SalonValidationError("weekly schedule replacement requires all 7 days")
+        return self._send_as_person(
+            "PUT",
+            f"masters/{specialist_id}/schedule/",
+            person_token=person_token,
+            tenant_slug=tenant_slug,
+            json_body={"schedule": schedule},
+        )
+
+    def update_weekly_schedule(
+        self,
+        *,
+        person_token: str,
+        tenant_slug: str,
+        specialist_id: str,
+        schedule: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """PATCH one or more days of the weekly template as the administrator."""
+
+        _require_id(specialist_id, field="specialist_id")
+        if not schedule:
+            raise SalonValidationError("weekly schedule patch requires at least one day")
+        return self._send_as_person(
+            "PATCH",
+            f"masters/{specialist_id}/schedule/",
+            person_token=person_token,
+            tenant_slug=tenant_slug,
+            json_body={"schedule": schedule},
+        )
+
     def create_time_off(
         self,
         *,

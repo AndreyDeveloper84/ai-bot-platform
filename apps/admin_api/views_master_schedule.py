@@ -183,10 +183,44 @@ def _read_or_error(master: CatalogMaster) -> tuple[sc.WeeklyTemplate | None, Jso
 
 
 @csrf_exempt
-@require_http_methods(["GET"])
+@require_http_methods(["GET", "PUT", "PATCH"])
 @require_admin_role
 def master_schedule(request: HttpRequest, master_id: str) -> HttpResponse:
-    """Рабочие часы мастера из того источника, по которому его продают."""
+    """Read or change the weekly template through its one canonical admin URL.
+
+    GET keeps the existing authoritative read. PUT/PATCH are DRF-2605: the
+    mutation is delegated to the existing person-token write seam, so the
+    service credential never participates and a lost answer remains unknown.
+    """
+
+    if request.method in {"PUT", "PATCH"}:
+        from apps.admin_api.views_salon_schedule_writes import _body, _write
+
+        body = _body(request)
+        schedule = body.get("schedule") if isinstance(body, dict) else None
+        if not isinstance(schedule, list) or not schedule:
+            return _error("validation", "schedule must be a non-empty list", 400)
+
+        method = request.method
+
+        def call(client, token, slug, master):
+            kwargs = {
+                "person_token": token,
+                "tenant_slug": slug,
+                "specialist_id": catalog_specialist_id(master),
+                "schedule": schedule,
+            }
+            if method == "PUT":
+                return client.replace_weekly_schedule(**kwargs)
+            return client.update_weekly_schedule(**kwargs)
+
+        return _write(
+            request,
+            master_id,
+            "weekly_schedule_replace" if method == "PUT" else "weekly_schedule_update",
+            call,
+            success_status=200,
+        )
 
     master = _master_or_none(master_id)
     if master is None:
