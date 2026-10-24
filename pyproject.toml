@@ -200,15 +200,21 @@ build-backend = "setuptools.build_meta"
 #                            в память без предела (#60); medium: бесконечный
 #                            цикл на chunked deflate (#61); приходит через
 #                            requests, sentry-sdk, kubernetes
-#   virtualenv >= 21.7.12  — high: скачанные seed-колёса не проверяются на
+#   virtualenv >= 21.7.13  — high: скачанные seed-колёса не проверяются на
 #                            целостность (#63); medium: инъекция в pyvenv.cfg
-#                            (#62); приходит через pre-commit (extra dev)
+#                            (#62); high: activate/activate.fish исполняют
+#                            команды из пути окружения (#64, DRF-2995);
+#                            приходит через pre-commit (extra dev)
 #   oauthlib >= 4.0.0      — medium ×2: JSONP-инъекция в RevocationEndpoint
 #                            (#57), сравнение PKCE code_verifier не за
 #                            постоянное время (#58). Обе — в СЕРВЕРНОЙ части
 #                            oauthlib; приходит через chromadb → kubernetes →
 #                            requests-oauthlib и нашим путём не импортируется
 #                            (DRF-2698). Мажор 3 → 4.
+#   fsspec >= 2026.6.0     — high: SSTI в ReferenceFileSystem — шаблоны
+#                            Jinja2 из JSON ссылок рендерятся без песочницы
+#                            (#66, DRF-2995). Приходит через huggingface-hub;
+#                            ReferenceFileSystem нашим путём не вызывается.
 #
 # Сборки идут строго по uv.lock (Dockerfile: `uv sync --locked`, CI:
 # `--frozen`), поэтому действует лок; пол держит его от отката.
@@ -217,8 +223,9 @@ constraint-dependencies = [
     "sqlparse>=0.6.0",
     "pydantic-settings>=2.14.2",
     "urllib3>=2.8.0",
-    "virtualenv>=21.7.12",
+    "virtualenv>=21.7.13",
     "oauthlib>=4.0.0",
+    "fsspec>=2026.6.0",
 ]
 
 [tool.setuptools.packages.find]
