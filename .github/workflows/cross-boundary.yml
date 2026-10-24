@@ -50,7 +50,7 @@ env:
 jobs:
   cross-boundary:
     if: vars.CROSS_BOUNDARY_ENABLED == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     # Один сценарий — один стенд. P7 доказывает «мастера есть, VERIFIED нет,
     # рекомендовать некого»; P1 сеет VERIFIED-мастера. В одной базе P1

@@ -169,7 +169,7 @@ jobs:
   # ---------------------------------------------------------------------
   changes:
     name: change set (docs-only or code)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 2
     outputs:
       code: ${{ steps.detect.outputs.code }}
@@ -223,7 +223,7 @@ jobs:
 
   fixtures:
     name: replay fixtures (golden + adversarial + voice)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # 10 → 15, together with the budgets and with the measurement DRF-1373
     # asked for.
     #
@@ -446,7 +446,7 @@ jobs:
   # status check confirming the bypass is intentional.
   bypassed:
     name: replay (bypassed via prompt-regression-accepted)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 1
     if: >-
       github.event_name == 'pull_request' &&
