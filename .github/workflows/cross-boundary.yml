@@ -85,10 +85,10 @@ jobs:
 
     steps:
       - name: Checkout bot
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Checkout catalog @ pinned SHA
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           repository: ${{ env.CATALOG_REPO }}
           ref: ${{ env.CATALOG_SHA }}
@@ -102,7 +102,7 @@ jobs:
           echo "bot     $(git rev-parse HEAD)"
           echo "catalog $(git -C catalog rev-parse HEAD)  (pinned ${CATALOG_SHA})"
 
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
           python-version: "3.12"
 

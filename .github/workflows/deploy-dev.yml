@@ -161,7 +161,7 @@ jobs:
       # старше этого стража по построению не голова dev, и отсутствие скрипта
       # читается как superseded, а не как поломка.
       - name: Checkout tools/ci of the verified SHA (для стража)
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           ref: ${{ steps.verified.outputs.sha }}
           sparse-checkout: tools/ci
@@ -667,7 +667,7 @@ jobs:
       # Тот же проверенный SHA, что и на хосте: витрина и бот из ОДНОГО
       # коммита, иначе экран может ждать поле, которого у сервера ещё нет.
       - name: Checkout the verified SHA (для сборки Mini App)
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           ref: ${{ steps.verified.outputs.sha }}
 
@@ -678,7 +678,7 @@ jobs:
       # (замер DRF-2690), но это держалось совпадением, а не устройством.
       # Шаг стоит ПОСЛЕ checkout проверенного SHA: файл читается из него.
       - name: Set up Node (from apps/miniapp/.nvmrc)
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
         with:
           node-version-file: apps/miniapp/.nvmrc
           cache: npm
@@ -704,7 +704,7 @@ jobs:
       # нужна для разбора ошибок, но не человеку на машине: на машину её не
       # везём (см. шаг отправки), а сохраняем здесь, артефактом прогона.
       - name: Keep the source map as a run artifact (not shipped)
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: miniapp-sourcemap-${{ steps.verified.outputs.sha }}
           path: apps/miniapp/dist/assets/*.map

@@ -168,7 +168,7 @@ jobs:
       # wrong: it replaces the whole working tree, including
       # tools/ci/miniapp_bundle_drift.py. The checkout action's `ref` selects the
       # commit without ever discarding the code being run.
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           ref: >-
             ${{ github.event_name == 'workflow_dispatch' && github.ref || 'dev' }}
@@ -187,7 +187,7 @@ jobs:
       # so the published bundle and this reference are built on one Node line
       # (held by tests/test_node_version_single_source_2692.py).
       - name: Set up Node (from apps/miniapp/.nvmrc)
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
         with:
           node-version-file: apps/miniapp/.nvmrc
           cache: npm
