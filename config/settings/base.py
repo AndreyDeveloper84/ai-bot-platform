@@ -52,10 +52,52 @@ from config.security import (
 
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 
-SECRET_KEY = os.environ.get(
-    "DJANGO_SECRET_KEY",
-    "django-insecure-sprint0-scaffold-only-replace-before-staging",
-)
+# The scaffold default exists for local dev and CI only. ``production.py``
+# and ``staging.py`` call :func:`secret_key_or_refuse` so a deployed contour
+# cannot boot on it — see that function for what is refused.
+_SCAFFOLD_SECRET_KEY = "django-insecure-sprint0-scaffold-only-replace-before-staging"  # pragma: allowlist secret
+
+SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY", _SCAFFOLD_SECRET_KEY)
+
+# Values that are a placeholder by construction: the committed scaffold
+# default above, the `.env.example` line, and anything Django's own
+# ``startproject`` marks as insecure. ``django-insecure-`` is a prefix check
+# so a copy-pasted startproject key is refused as well.
+_PLACEHOLDER_SECRET_KEYS = frozenset({_SCAFFOLD_SECRET_KEY, "replace-me-in-staging-and-prod"})
+_INSECURE_SECRET_KEY_PREFIX = "django-insecure-"
+
+
+def secret_key_or_refuse(raw: str | None, *, contour: str) -> str:
+    """``DJANGO_SECRET_KEY`` for a deployed contour, or ``ImproperlyConfigured``.
+
+    Refused: unset, empty / whitespace, a known placeholder, or a value
+    starting with ``django-insecure-``. ``SECRET_KEY`` signs sessions, CSRF
+    tokens, the master session signer and the HMAC of every encrypted field
+    (ADR-0006), so a deploy that silently fell back to the committed scaffold
+    default would be signing with a key that is public in this repository.
+    Same form as the service-token guards in ``production.py``:
+    ``ImproperlyConfigured`` at import, not ``assert`` (``python -O`` strips
+    asserts).
+
+    ``contour`` is only for the message («production» / «staging»).
+    """
+    from django.core.exceptions import ImproperlyConfigured
+
+    value = (raw or "").strip()
+    if (
+        not value
+        or value in _PLACEHOLDER_SECRET_KEYS
+        or value.startswith(_INSECURE_SECRET_KEY_PREFIX)
+    ):
+        raise ImproperlyConfigured(
+            f"DJANGO_SECRET_KEY is required in {contour} and must be a real key: it is "
+            "unset, empty, the committed placeholder, or starts with 'django-insecure-'. "
+            "Generate one with python -c 'import secrets; print(secrets.token_urlsafe(64))' "
+            "— on a server that already has data keep the CURRENT value (DRF-2555: "
+            "encrypted fields are signed with it and a new key makes them unreadable)."
+        )
+    return value
+
 
 # DRF-2555 — ключ шифрования полей (`encrypt(...)`; сегодня одно поле — MemoryEntry.content).
 #
