@@ -1162,6 +1162,17 @@ YCLIENTS_BASE_URL = os.environ.get("YCLIENTS_BASE_URL", "https://api.yclients.co
 # + 200 (still no retries from YClients) until ops configures the slug.
 YCLIENTS_WEBHOOK_TENANT_SLUG = os.environ.get("YCLIENTS_WEBHOOK_TENANT_SLUG", "")
 
+# Shared secret for the YClients admin webhook (``POST /api/v1/yclients/webhook/``).
+# YClients' public API does not sign webhooks, so the receiver was reachable by
+# anyone who knew the URL: an unauthenticated POST could write BookingRequest /
+# BookingReminder rows and the response body said whether a phone matched a
+# BotUser. The value is sent by YClients (webhook URL settings → custom header)
+# as ``X-Webhook-Secret`` and compared with ``hmac.compare_digest``.
+# Empty default FAILS CLOSED: the receiver answers 404 to everything and logs a
+# warning once — not required in production, because the pilot runs with
+# ``BOOKING_VIA_AYLA_REST=true`` where this receiver stands down anyway.
+YCLIENTS_WEBHOOK_SECRET = os.environ.get("YCLIENTS_WEBHOOK_SECRET", "")
+
 # #428 (Bucket 6) — YooKassa settings RETIRED. Per ADR-0009 §Domain
 # ownership matrix, YooKassa payment lifecycle (create, capture,
 # refund, webhook) lives in Ayla djangoproject only. The four settings

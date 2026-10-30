@@ -15,7 +15,7 @@ the event to ``/api/v1/yclients/webhook/``, and we:
    dispatch a welcome message through whatever channel the BotUser
    is reachable on.
 
-## Why ALWAYS 200
+## Why ALWAYS 200 (once authenticated)
 
 YClients' delivery loop retries any non-2xx response indefinitely.
 A 5xx during a transient bug becomes a stream of duplicate deliveries
@@ -28,6 +28,46 @@ This is the same invariant the Sprint-10 catalog webhook
 (:mod:`apps.catalog.webhooks.views`) enforces — they share the rule
 because they share the upstream retry semantic (mysite Celery, also
 upstream-controlled).
+
+The ONE exception is authentication (next section): a caller that does
+not present the shared secret is not YClients, so the retry argument
+does not apply to it. It gets 403 (or 404 while the receiver is
+dormant) and nothing is parsed, written or audited beyond a
+``yclients.webhook.rejected`` row.
+
+## Response body is uniform
+
+Every authenticated request is answered with ``{"status": "ok"}`` —
+created, skipped, ignored, malformed, handler exception alike. The
+body used to carry the outcome (``created`` / ``skipped
+no_bot_user_match`` / …), which told the caller whether the phone in
+the payload belongs to one of our BotUsers: a phone-enumeration oracle
+on an endpoint that, until the shared secret landed, had no
+authentication at all. The outcome now goes to the log (INFO) and to
+the audit row; the body says nothing. Operators already read the audit
+log, never the body (see the section above).
+
+## Authentication — shared secret
+
+YClients' public API does not sign webhooks (no HMAC as of the port),
+and the mysite source verified nothing. We no longer carry that
+forward. The receiver requires ``settings.YCLIENTS_WEBHOOK_SECRET``
+(env ``YCLIENTS_WEBHOOK_SECRET``) to be presented by the caller in the
+``X-Webhook-Secret`` header — YClients lets the salon admin attach a
+custom header to the webhook URL — and compares it with
+:func:`hmac.compare_digest`.
+
+* Secret EMPTY (default) → the receiver is dormant: 404 for every
+  request, one WARNING log line per process. Fail-closed, so an
+  unconfigured deploy cannot be written to.
+* Header missing or mismatched → 403 + ``yclients.webhook.rejected``
+  audit row (``reason=secret_mismatch``). The secret itself is never
+  logged or audited.
+* Match → the payload is processed as before.
+
+If YClients adds signed webhooks in a future API version, Sprint 10 /
+C3's ``_verify_signature`` is the template and this check is where the
+signature verification should land.
 
 ## Idempotency
 
@@ -81,9 +121,11 @@ upgrade is a one-line swap.
 
 from __future__ import annotations
 
+import hmac
 import json
 import logging
 from datetime import datetime
+from functools import lru_cache
 from typing import Any
 
 from django.conf import settings
@@ -109,11 +151,71 @@ logger = logging.getLogger(__name__)
 
 _EVENT_BOOKING_CREATED_FROM_YCLIENTS_ADMIN = "booking_created_from_yclients_admin"
 
+# WSGI/Django META key for the ``X-Webhook-Secret`` header.
+WEBHOOK_SECRET_HEADER = "HTTP_X_WEBHOOK_SECRET"
 
-# Always-200 ack. JSON body returned regardless of internal outcome.
+# The one body every authenticated caller sees — see module docstring
+# "Response body is uniform".
+_UNIFORM_BODY: dict[str, str] = {"status": "ok"}
+
+
 def _ack(status: str, **extra: object) -> JsonResponse:
-    body: dict[str, object] = {"status": status, **extra}
-    return JsonResponse(body, status=200)
+    """Always-200 ack with the uniform body.
+
+    The outcome (``status`` + details) goes to the log only. It used to be
+    the response body — see module docstring "Response body is uniform"
+    for why it no longer is.
+    """
+    logger.info("yclients_webhook: outcome=%s %s", status, extra)
+    return JsonResponse(dict(_UNIFORM_BODY), status=200)
+
+
+# ─── authentication ───────────────────────────────────────────────────────
+
+
+@lru_cache(maxsize=1)
+def _warn_dormant_once() -> None:
+    """One WARNING per process while the secret is unset.
+
+    ``lru_cache`` on a no-arg function is the simplest «run once» — the
+    cached ``None`` is the side effect having happened. Tests reset it
+    with ``_warn_dormant_once.cache_clear()``.
+    """
+    logger.warning(
+        "yclients_webhook: YCLIENTS_WEBHOOK_SECRET is not set — receiver is dormant, "
+        "answering 404 to every request",
+    )
+
+
+def _authenticate(request: HttpRequest) -> JsonResponse | None:
+    """Shared-secret check. ``None`` means «proceed»; otherwise the refusal.
+
+    See module docstring "Authentication — shared secret". Runs BEFORE the
+    body is parsed, so an unauthenticated caller triggers no JSON parsing,
+    no tenant lookup and no DB write beyond the rejection audit row.
+    """
+    secret = str(getattr(settings, "YCLIENTS_WEBHOOK_SECRET", "") or "")
+    if not secret:
+        _warn_dormant_once()
+        return JsonResponse({"detail": "not found"}, status=404)
+
+    provided = str(request.META.get(WEBHOOK_SECRET_HEADER, "") or "")
+    if not provided or not hmac.compare_digest(
+        provided.encode("utf-8"), secret.encode("utf-8")
+    ):
+        # Neither value is logged: the header may be a near-miss of the
+        # real secret, and a log line is a wider audience than a DB row.
+        logger.warning(
+            "yclients_webhook: rejected — X-Webhook-Secret %s",
+            "mismatched" if provided else "missing",
+        )
+        write_audit(
+            action="yclients.webhook.rejected",
+            target="yclients.webhook",
+            payload={"reason": "secret_mismatch", "header_present": bool(provided)},
+        )
+        return JsonResponse({"detail": "forbidden"}, status=403)
+    return None
 
 
 # ─── view ─────────────────────────────────────────────────────────────────
@@ -124,7 +226,12 @@ def _ack(status: str, **extra: object) -> JsonResponse:
 def yclients_webhook(request: HttpRequest) -> JsonResponse:
     """POST ``/api/v1/yclients/webhook/`` — YClients admin event receiver.
 
-    Always returns 200 — see module docstring "Why ALWAYS 200".
+    Authentication first: 404 while ``YCLIENTS_WEBHOOK_SECRET`` is unset,
+    403 when ``X-Webhook-Secret`` is missing or wrong — see module
+    docstring "Authentication — shared secret".
+
+    Once authenticated, always returns 200 with ``{"status": "ok"}`` — see
+    module docstring "Why ALWAYS 200" and "Response body is uniform".
 
     Failure modes (each writes an audit row, returns 200):
 
@@ -142,6 +249,9 @@ def yclients_webhook(request: HttpRequest) -> JsonResponse:
     # Any uncaught exception inside the handler is an audit-row + 200,
     # never a 5xx.
     try:
+        refusal = _authenticate(request)
+        if refusal is not None:
+            return refusal
         return _dispatch(request)
     except Exception as exc:  # noqa: BLE001 — see "Why ALWAYS 200"
         logger.exception("yclients_webhook: unhandled exception: %s", exc)
@@ -225,7 +335,8 @@ def _dispatch(request: HttpRequest) -> JsonResponse:
         else:
             result = {"status": "ignored", "reason": f"unknown_status={status}"}
 
-    return JsonResponse(result, status=200)
+    # The handler outcome is logged by ``_ack``; the body stays uniform.
+    return _ack(**result)
 
 
 # ─── tenant resolution ────────────────────────────────────────────────────
