@@ -176,8 +176,13 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           GH_TOKEN: ${{ github.token }}
         run: |
-          DEV_HEAD="$(git -c http.version=HTTP/1.1 ls-remote "https://github.com/${GITHUB_REPOSITORY}.git" refs/heads/dev | cut -f1)"
-          echo "::notice::голова dev по ls-remote: ${DEV_HEAD}; проверенный ${SHA}; event=${EVENT_NAME}"
+          # Репозиторий приватный с 20.10.2026: анонимный `git ls-remote
+          # https://github.com/…` на нём молчит, DEV_HEAD пустел, и сторож
+          # закрывал КАЖДЫЙ workflow_run («голова dev не 40 hex») — 12 из 12
+          # выкладок 20.10–01.11 красные этим. Голову берём через REST с
+          # GH_TOKEN — тот же токен, которым ниже отменяем свой прогон.
+          DEV_HEAD="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/dev" --jq '.object.sha')"
+          echo "::notice::голова dev по gh api: ${DEV_HEAD}; проверенный ${SHA}; event=${EVENT_NAME}"
           echo "dev_head=${DEV_HEAD}" >> "$GITHUB_OUTPUT"
           GUARD=guard/tools/ci/deploy_sha_is_dev_head.sh
           set +e
