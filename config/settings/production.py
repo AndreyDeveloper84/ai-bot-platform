@@ -17,9 +17,26 @@ import os
 from django.core.exceptions import ImproperlyConfigured
 
 from .base import *  # noqa: F401,F403
-from .base import booking_via_ayla_rest_from, payments_test_mode_from, secret_key_or_refuse
+from .base import (
+    booking_via_ayla_rest_from,
+    dev_bypass_enabled_from,
+    payments_test_mode_from,
+    secret_key_or_refuse,
+)
 
 DEBUG = False
+
+# Mini App dev-bypass is DEAD here, and an environment that says otherwise is
+# a misconfiguration worth a refused boot, not a silent override: the bypass
+# lets a caller pick any BotUser + tenant by header, skipping init-data HMAC.
+# (It also needs DEBUG=True, which is False above — the refusal is the
+# second lock, so that one wrong line in an env file is noticed.)
+if dev_bypass_enabled_from(os.environ.get("MINIAPP_DEV_BYPASS_ENABLED")):
+    raise ImproperlyConfigured(
+        "MINIAPP_DEV_BYPASS_ENABLED must not be enabled in production: it lets a caller "
+        "skip Mini App init-data verification by header. Remove it from the environment."
+    )
+MINIAPP_DEV_BYPASS_ENABLED = False
 
 
 # SECRET_KEY — the one every other secret rests on (sessions, CSRF, the

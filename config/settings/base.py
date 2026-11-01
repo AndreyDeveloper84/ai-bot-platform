@@ -121,6 +121,21 @@ CRYPTOGRAPHY_KEY = os.environ.get("DJANGO_CRYPTOGRAPHY_KEY") or None
 
 DEBUG = os.environ.get("DJANGO_DEBUG", "False").lower() == "true"
 
+
+def dev_bypass_enabled_from(raw: str | None) -> bool:
+    """``"true"/"1"`` → True; anything else (including unset) → False."""
+    return (raw or "").strip().lower() in {"true", "1"}
+
+
+# Mini App dev-bypass (apps/miniapp_api/dev_bypass.py) — the header-opt-in
+# path that skips MAX init-data HMAC for local browser dev. It used to be
+# gated on ``DEBUG`` alone, so any contour that ended up with DEBUG=True
+# (DRF-1447 measured one on staging) also had HMAC skippable by header.
+# Now BOTH are required: ``DEBUG`` and this explicit flag. Default False;
+# ``production.py`` / ``staging.py`` pin it to False and refuse to boot if
+# the environment tries to enable it.
+MINIAPP_DEV_BYPASS_ENABLED = dev_bypass_enabled_from(os.environ.get("MINIAPP_DEV_BYPASS_ENABLED"))
+
 ALLOWED_HOSTS: list[str] = os.environ.get("DJANGO_ALLOWED_HOSTS", "").split(",")
 ALLOWED_HOSTS = [h.strip() for h in ALLOWED_HOSTS if h.strip()]
 

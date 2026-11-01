@@ -21,10 +21,27 @@ auditing. This is the desired terminal state.
 
 import os
 
+from django.core.exceptions import ImproperlyConfigured
+
 from .base import *  # noqa: F401,F403
-from .base import booking_via_ayla_rest_from, payments_test_mode_from, secret_key_or_refuse
+from .base import (
+    booking_via_ayla_rest_from,
+    dev_bypass_enabled_from,
+    payments_test_mode_from,
+    secret_key_or_refuse,
+)
 
 DEBUG = False
+
+# Mini App dev-bypass is DEAD on staging too — same reasoning and same
+# refusal as production.py. Staging is the contour where DEBUG was once
+# found True on a service (DRF-1447); the explicit flag is the second lock.
+if dev_bypass_enabled_from(os.environ.get("MINIAPP_DEV_BYPASS_ENABLED")):
+    raise ImproperlyConfigured(
+        "MINIAPP_DEV_BYPASS_ENABLED must not be enabled on staging: it lets a caller "
+        "skip Mini App init-data verification by header. Remove it from the environment."
+    )
+MINIAPP_DEV_BYPASS_ENABLED = False
 
 # SECRET_KEY — same guard as production.py. Staging is a public contour
 # (api-dev.gobeauty.site) with real pilot data; a service that lost its

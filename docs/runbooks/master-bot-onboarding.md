@@ -16,20 +16,21 @@ Status: living document (PR 1 / M0). Update as later master PRs land.
 > **Bypass работает только в DEBUG=True. Никогда не используется в prod.
 > Не коммитьте `.env.local`.**
 >
-> The dev-bypass is a **DEBUG-only, header-opt-in, loudly-logged** path that
-> lets developers open `/onboarding/master?token=...`,
-> `/master/dashboard`, and customer screens in a regular Chrome tab. In
-> production (`DEBUG=False`) the bypass code path is **dead code** —
+> The dev-bypass is a **DEBUG + explicit-flag, header-opt-in, loudly-logged**
+> path that lets developers open `/onboarding/master?token=...`,
+> `/master/dashboard`, and customer screens in a regular Chrome tab. It needs
+> BOTH `DJANGO_DEBUG=True` and `MINIAPP_DEV_BYPASS_ENABLED=true`; with either
+> one missing the bypass code path is **dead code** —
 > `apps/miniapp_api/dev_bypass.py::try_dev_bypass` exits before reading any
-> header. Every successful bypass writes a `WARNING` log line; rejected
-> bypass attempts also log. There is no `ALLOW_DEV_BYPASS` setting — DEBUG
-> is the canonical gate.
+> header. `config/settings/production.py` and `staging.py` pin the flag to
+> false and refuse to boot if the environment sets it. Every successful bypass
+> writes a `WARNING` log line; rejected bypass attempts also log.
 
 ### Step-by-step
 
-1. **Start the backend with DEBUG=True**:
+1. **Start the backend with DEBUG=True and the bypass flag on**:
    ```
-   DJANGO_DEBUG=True uv run python manage.py runserver
+   DJANGO_DEBUG=True MINIAPP_DEV_BYPASS_ENABLED=true uv run python manage.py runserver
    ```
 
 2. **Create a PENDING invite + placeholder BotUser** in one shot. The
