@@ -214,6 +214,16 @@ jobs:
           DEV_HOST: ${{ secrets.DEV_HOST }}
         run: |
           mkdir -p ~/.ssh
+          # Keepalive с раннера. 01.11.2026 (run 41330642787): сборка образа
+          # шла молча 4 минуты (apt качал 11 МБ с медленного зеркала), и ssh
+          # упал «client_loop: send disconnect: Broken pipe» — раннеры GitHub
+          # стоят за Azure NAT, который рвёт TCP без трафика ровно через 4
+          # минуты. sshd на стенде ClientAliveInterval 0, то есть keepalive
+          # посылать некому, кроме клиента. 30 с × 10 — 5 минут без ответа
+          # до отказа: достаточно, чтобы переждать сетевой сбой, но не
+          # оставить прогон висеть.
+          printf '%s\n' 'Host *' '  ServerAliveInterval 30' '  ServerAliveCountMax 10' > ~/.ssh/config
+          chmod 600 ~/.ssh/config
           printf '%s\n' "${DEV_SSH_KEY}" > ~/.ssh/dev_deploy
           chmod 600 ~/.ssh/dev_deploy
           ssh-keyscan -H "${DEV_HOST}" >> ~/.ssh/known_hosts 2>/dev/null
