@@ -135,12 +135,12 @@ def _post(client: Client, payload: object, *, secret: str | None = _SECRET):
     couple us to a stub internal.
 
     ``secret=None`` sends no ``X-Webhook-Secret`` header at all."""
-    headers = {} if secret is None else {"HTTP_X_WEBHOOK_SECRET": secret}
+    headers = {} if secret is None else {"X-Webhook-Secret": secret}
     return client.post(
         _URL,
         data=json.dumps(payload),
         content_type="application/json",
-        **headers,
+        headers=headers,
     )
 
 

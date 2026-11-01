@@ -66,7 +66,7 @@ SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY", _SCAFFOLD_SECRET_KEY)
 # ``startproject`` marks as insecure. ``django-insecure-`` is a prefix check
 # so a copy-pasted startproject key is refused as well.
 _PLACEHOLDER_SECRET_KEYS = frozenset({_SCAFFOLD_SECRET_KEY, "replace-me-in-staging-and-prod"})
-_INSECURE_SECRET_KEY_PREFIX = "django-insecure-"
+_INSECURE_SECRET_KEY_PREFIX = "django-insecure-"  # pragma: allowlist secret
 
 
 def secret_key_or_refuse(raw: str | None, *, contour: str) -> str:

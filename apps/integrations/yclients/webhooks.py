@@ -152,7 +152,7 @@ logger = logging.getLogger(__name__)
 _EVENT_BOOKING_CREATED_FROM_YCLIENTS_ADMIN = "booking_created_from_yclients_admin"
 
 # WSGI/Django META key for the ``X-Webhook-Secret`` header.
-WEBHOOK_SECRET_HEADER = "HTTP_X_WEBHOOK_SECRET"
+WEBHOOK_SECRET_HEADER = "HTTP_X_WEBHOOK_SECRET"  # pragma: allowlist secret
 
 # The one body every authenticated caller sees — see module docstring
 # "Response body is uniform".
