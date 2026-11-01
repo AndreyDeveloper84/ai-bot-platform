@@ -671,9 +671,7 @@ class TestSharedSecretAuthentication:
         assert resp.status_code == 403
         assert BookingRequest.all_tenants.count() == 0
         rejected = _audit_payloads("yclients.webhook.rejected")
-        assert [(p["reason"], p["header_present"]) for p in rejected] == [
-            ("secret_mismatch", True)
-        ]
+        assert [(p["reason"], p["header_present"]) for p in rejected] == [("secret_mismatch", True)]
         emit_mock.assert_not_called()
 
     def test_secret_never_lands_in_audit_or_log(

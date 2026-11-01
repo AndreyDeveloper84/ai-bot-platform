@@ -200,9 +200,7 @@ def _authenticate(request: HttpRequest) -> JsonResponse | None:
         return JsonResponse({"detail": "not found"}, status=404)
 
     provided = str(request.META.get(WEBHOOK_SECRET_HEADER, "") or "")
-    if not provided or not hmac.compare_digest(
-        provided.encode("utf-8"), secret.encode("utf-8")
-    ):
+    if not provided or not hmac.compare_digest(provided.encode("utf-8"), secret.encode("utf-8")):
         # Neither value is logged: the header may be a near-miss of the
         # real secret, and a log line is a wider audience than a DB row.
         logger.warning(

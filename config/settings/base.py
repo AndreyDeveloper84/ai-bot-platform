@@ -55,7 +55,9 @@ BASE_DIR = Path(__file__).resolve().parent.parent.parent
 # The scaffold default exists for local dev and CI only. ``production.py``
 # and ``staging.py`` call :func:`secret_key_or_refuse` so a deployed contour
 # cannot boot on it — see that function for what is refused.
-_SCAFFOLD_SECRET_KEY = "django-insecure-sprint0-scaffold-only-replace-before-staging"  # pragma: allowlist secret
+_SCAFFOLD_SECRET_KEY = (
+    "django-insecure-sprint0-scaffold-only-replace-before-staging"  # pragma: allowlist secret
+)
 
 SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY", _SCAFFOLD_SECRET_KEY)
 
