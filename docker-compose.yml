@@ -118,6 +118,11 @@ services:
         # (scripts/docker-build.sh), потому что пилот достаёт Hub плохо —
         # измерения в шапке Dockerfile.
         PYTHON_BASE_IMAGE: ${PYTHON_BASE_IMAGE:-python:3.12-slim}
+        # ayla-ai-core снова приватный (20.10.2026): без токена `uv sync`
+        # в Dockerfile не достанет пин. Значение берётся из окружения /
+        # `--env-file` (на пилоте — .env.staging); пустое = прежняя
+        # анонимная выкачка, Dockerfile пропускает URL-rewrite.
+        GH_DEPLOY_TOKEN: ${GH_DEPLOY_TOKEN:-}
     command: python manage.py runserver 0.0.0.0:8000
     environment:
       DJANGO_SETTINGS_MODULE: config.settings.local
@@ -159,6 +164,7 @@ services:
       # DRF-1440 — см. `web` в docker-compose.yml.
       args:
         PYTHON_BASE_IMAGE: ${PYTHON_BASE_IMAGE:-python:3.12-slim}
+        GH_DEPLOY_TOKEN: ${GH_DEPLOY_TOKEN:-}
     command: python -m apps.workers.consumer --forever
     # A drainer that dies silently re-creates the #1010 symptom (stream
     # accepted but never processed). --forever exits cleanly on SIGINT; any
@@ -199,6 +205,7 @@ services:
       # DRF-1440 — см. `web` в docker-compose.yml.
       args:
         PYTHON_BASE_IMAGE: ${PYTHON_BASE_IMAGE:-python:3.12-slim}
+        GH_DEPLOY_TOKEN: ${GH_DEPLOY_TOKEN:-}
     command: celery -A config worker --loglevel=INFO -Q shadow --concurrency=2 --prefetch-multiplier=1
     restart: unless-stopped
     environment:
