@@ -1,4 +1,4 @@
-"""Dev-only init-data HMAC bypass — DEBUG-gated, header-opt-in, loudly logged.
+"""Dev-only init-data HMAC bypass — DEBUG + explicit flag, header-opt-in, loudly logged.
 
 Purpose
 -------
@@ -6,22 +6,30 @@ Local browser dev: open ``/onboarding/master?token=...``, ``/master/dashboard``,
 customer screens etc. in a regular Chrome tab without spinning up a real MAX
 bot session. The MAX ``initData`` HMAC requires a real MAX wrapper to mint;
 during dev that's painful. This helper offers an opt-in, per-request bypass
-that is **DEAD CODE in production** because ``settings.DEBUG`` is the gate.
+that is **DEAD CODE in production** because TWO settings gate it:
+``settings.DEBUG`` AND ``settings.MINIAPP_DEV_BYPASS_ENABLED`` (env
+``MINIAPP_DEV_BYPASS_ENABLED``, default False; production.py and staging.py
+pin it to False and refuse to boot if the environment tries to enable it).
 
 Security model
 --------------
 
-| ``settings.DEBUG`` | ``X-Dev-Bypass: 1`` | Other dev headers           | Result                                  |
-|--------------------|---------------------|-----------------------------|-----------------------------------------|
-| False (prod)       | any                 | any                         | bypass ignored, HMAC enforced (no log)  |
-| True (dev)         | absent              | n/a                         | HMAC enforced (real init-data path)     |
-| True (dev)         | ``1``               | valid user + tenant headers | BYPASS + WARNING log                    |
-| True (dev)         | ``1``               | missing / invalid           | no bypass + WARNING log                 |
+| ``DEBUG`` | ``MINIAPP_DEV_BYPASS_ENABLED`` | ``X-Dev-Bypass: 1`` | Other dev headers           | Result                                  |
+|-----------|--------------------------------|---------------------|-----------------------------|-----------------------------------------|
+| False     | any                            | any                 | any                         | bypass ignored, HMAC enforced (no log)  |
+| True      | False (default)                | any                 | any                         | bypass ignored, HMAC enforced (no log)  |
+| True      | True                           | absent              | n/a                         | HMAC enforced (real init-data path)     |
+| True      | True                           | ``1``               | valid user + tenant headers | BYPASS + WARNING log                    |
+| True      | True                           | ``1``               | missing / invalid           | no bypass + WARNING log                 |
 
-Rationale: in prod the bypass code path is unreachable — the ``if not settings.DEBUG``
-guard exits before any header is consulted. In dev the bypass is opt-in per request
-(must send three headers) and every use emits a WARNING log so it can never be
-"quietly" running.
+Rationale: in prod the bypass code path is unreachable — the gate exits before
+any header is consulted. ``DEBUG`` alone used to be the gate, which made the
+bypass hostage to a setting that exists for tracebacks and SQL logging: a
+contour that ended up with ``DEBUG=True`` by accident (DRF-1447 measured one
+on staging) also had init-data verification skippable by header. The explicit
+flag is a second lock that nothing else turns. In dev the bypass is opt-in per
+request (must send three headers) and every use emits a WARNING log so it can
+never be "quietly" running.
 
 Wiring
 ------
@@ -78,6 +86,8 @@ def try_dev_bypass(request: "HttpRequest") -> tuple[BotUser, Tenant] | None:
     Returns ``None`` (caller falls through to HMAC verification) when:
 
     * ``settings.DEBUG is False`` — dead code in prod, never logs.
+    * ``settings.MINIAPP_DEV_BYPASS_ENABLED`` is False (the default) —
+      same: exits before any header is read, never logs.
     * ``X-Dev-Bypass`` header is absent or not exactly ``"1"``.
     * ``X-Dev-User-Id`` or ``X-Dev-Tenant-Slug`` are missing (logs WARNING).
     * The referenced tenant / user does not exist or is cross-tenant
@@ -90,8 +100,13 @@ def try_dev_bypass(request: "HttpRequest") -> tuple[BotUser, Tenant] | None:
 
     # PROD guard — runs FIRST. In production this exits before reading
     # any header, so no log lines leak even if an attacker probes with
-    # dev headers. Coverage: test_prod_mode_ignores_bypass.
-    if not settings.DEBUG:
+    # dev headers. Both locks are required: DEBUG (tracebacks, SQL log —
+    # a setting that has been found True where it should not be) AND the
+    # explicit flag that exists for nothing but this bypass. ``getattr``
+    # with a False default so a settings module that never heard of the
+    # flag fails closed. Coverage: TestProdModeIgnoresBypass,
+    # TestFlagOffIgnoresBypass.
+    if not settings.DEBUG or not getattr(settings, "MINIAPP_DEV_BYPASS_ENABLED", False):
         return None
 
     if request.META.get(DEV_BYPASS_HEADER) != "1":

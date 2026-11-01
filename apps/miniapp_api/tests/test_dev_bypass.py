@@ -2,14 +2,16 @@
 
 Coverage matrix mirrors apps/miniapp_api/dev_bypass.py docstring:
 
-  | DEBUG  | X-Dev-Bypass | other headers      | Result                  |
-  | False  | any          | any                | HMAC enforced, no log   |
-  | True   | absent       | n/a                | HMAC enforced           |
-  | True   | "1"          | valid user+tenant  | BYPASS + WARNING log    |
-  | True   | "1"          | missing/invalid    | HMAC enforced + log     |
+  | DEBUG  | MINIAPP_DEV_BYPASS_ENABLED | X-Dev-Bypass | other headers      | Result                  |
+  | False  | any                        | any          | any                | HMAC enforced, no log   |
+  | True   | False (default)            | any          | any                | HMAC enforced, no log   |
+  | True   | True                       | absent       | n/a                | HMAC enforced           |
+  | True   | True                       | "1"          | valid user+tenant  | BYPASS + WARNING log    |
+  | True   | True                       | "1"          | missing/invalid    | HMAC enforced + log     |
 
-The bypass is OPT-IN per request and DEBUG-gated so it cannot accidentally
-activate in production. These tests pin that contract.
+The bypass is OPT-IN per request and gated on BOTH ``DEBUG`` and the explicit
+``MINIAPP_DEV_BYPASS_ENABLED`` flag, so it cannot accidentally activate on a
+contour that merely has DEBUG on. These tests pin that contract.
 """
 
 from __future__ import annotations
@@ -151,11 +153,80 @@ class TestProdModeIgnoresBypass:
         }
 
 
+# --- 1b. FLAG OFF: DEBUG ALONE IS NOT ENOUGH --------------------------------
+
+
+class TestFlagOffIgnoresBypass:
+    """DEBUG=True with ``MINIAPP_DEV_BYPASS_ENABLED`` left at its default.
+
+    This is the state of any contour that has DEBUG on by accident (the
+    reason the flag exists): dev headers MUST be a no-op, exactly as in prod.
+    """
+
+    @override_settings(DEBUG=True, MINIAPP_DEV_BYPASS_ENABLED=False)
+    def test_debug_without_the_flag_enforces_hmac_and_stays_silent(
+        self, tenant: Tenant, bot_user: BotUser, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        client = Client()
+        caplog.set_level(logging.WARNING, logger="apps.miniapp_api.dev_bypass")
+
+        resp = client.post(
+            AUTH_VERIFY_URL,
+            HTTP_X_DEV_BYPASS="1",
+            HTTP_X_DEV_USER_ID=str(bot_user.id),
+            HTTP_X_DEV_TENANT_SLUG=tenant.slug,
+        )
+
+        assert resp.status_code == 401
+        # Exits before reading a header, so a probe generates no signal —
+        # the same contract as DEBUG=False.
+        # empty-assert-ok: the gate exits before any header is read, so no log line may exist
+        assert not any("DEV-BYPASS" in rec.getMessage() for rec in caplog.records)
+
+    @override_settings(DEBUG=False, MINIAPP_DEV_BYPASS_ENABLED=True)
+    def test_flag_without_debug_is_not_enough_either(
+        self, tenant: Tenant, bot_user: BotUser, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Both locks, not either: the flag alone does not reopen the path."""
+        client = Client()
+        caplog.set_level(logging.WARNING, logger="apps.miniapp_api.dev_bypass")
+
+        resp = client.post(
+            AUTH_VERIFY_URL,
+            HTTP_X_DEV_BYPASS="1",
+            HTTP_X_DEV_USER_ID=str(bot_user.id),
+            HTTP_X_DEV_TENANT_SLUG=tenant.slug,
+        )
+
+        assert resp.status_code == 401
+        # empty-assert-ok: DEBUG=False exits before any header is read, so no log line may exist
+        assert not any("DEV-BYPASS" in rec.getMessage() for rec in caplog.records)
+
+    def test_the_flag_is_declared_and_defaults_to_off(self) -> None:
+        from django.conf import settings as live_settings
+
+        assert hasattr(live_settings, "MINIAPP_DEV_BYPASS_ENABLED")
+        assert live_settings.MINIAPP_DEV_BYPASS_ENABLED is False
+
+    def test_a_settings_module_without_the_flag_fails_closed(self, settings) -> None:
+        """``getattr(..., False)``: a contour that never heard of the flag is OFF."""
+        from apps.miniapp_api.dev_bypass import try_dev_bypass
+
+        settings.DEBUG = True
+        del settings.MINIAPP_DEV_BYPASS_ENABLED
+
+        class _Req:
+            META = {"HTTP_X_DEV_BYPASS": "1"}
+            path = "/x"
+
+        assert try_dev_bypass(_Req()) is None  # type: ignore[arg-type]
+
+
 # --- 2. DEV-MODE HAPPY PATH ------------------------------------------------
 
 
 class TestDevModeHappyPath:
-    @override_settings(DEBUG=True)
+    @override_settings(DEBUG=True, MINIAPP_DEV_BYPASS_ENABLED=True)
     def test_correct_headers_bypass_succeeds(
         self, tenant: Tenant, bot_user: BotUser, caplog: pytest.LogCaptureFixture
     ) -> None:
@@ -193,7 +264,7 @@ class TestDevModeHappyPath:
 class TestDevModeRejections:
     """Bypass header present but other headers missing / invalid."""
 
-    @override_settings(DEBUG=True)
+    @override_settings(DEBUG=True, MINIAPP_DEV_BYPASS_ENABLED=True)
     def test_no_bypass_header_runs_hmac_path(
         self, tenant: Tenant, bot_user: BotUser, caplog: pytest.LogCaptureFixture
     ) -> None:
@@ -209,7 +280,7 @@ class TestDevModeRejections:
         # No bypass log lines.
         assert not any("DEV-BYPASS" in rec.getMessage() for rec in caplog.records)
 
-    @override_settings(DEBUG=True)
+    @override_settings(DEBUG=True, MINIAPP_DEV_BYPASS_ENABLED=True)
     def test_missing_user_id_header(
         self, tenant: Tenant, bot_user: BotUser, caplog: pytest.LogCaptureFixture
     ) -> None:
@@ -230,7 +301,7 @@ class TestDevModeRejections:
             for rec in caplog.records
         )
 
-    @override_settings(DEBUG=True)
+    @override_settings(DEBUG=True, MINIAPP_DEV_BYPASS_ENABLED=True)
     def test_missing_tenant_slug_header(
         self, tenant: Tenant, bot_user: BotUser, caplog: pytest.LogCaptureFixture
     ) -> None:
@@ -249,7 +320,7 @@ class TestDevModeRejections:
             for rec in caplog.records
         )
 
-    @override_settings(DEBUG=True)
+    @override_settings(DEBUG=True, MINIAPP_DEV_BYPASS_ENABLED=True)
     def test_invalid_uuid_user_id(self, tenant: Tenant, caplog: pytest.LogCaptureFixture) -> None:
         # 15.09.2026 UTC (DRF-1893): отказ транспорта — один код 401 no_init_data (было 400 malformed / 401 bad_signature).
         client = Client()
@@ -267,7 +338,7 @@ class TestDevModeRejections:
             for rec in caplog.records
         )
 
-    @override_settings(DEBUG=True)
+    @override_settings(DEBUG=True, MINIAPP_DEV_BYPASS_ENABLED=True)
     def test_nonexistent_user_id(self, tenant: Tenant, caplog: pytest.LogCaptureFixture) -> None:
         # 15.09.2026 UTC (DRF-1893): отказ транспорта — один код 401 no_init_data (было 400 malformed / 401 bad_signature).
         client = Client()
@@ -286,7 +357,7 @@ class TestDevModeRejections:
             for rec in caplog.records
         )
 
-    @override_settings(DEBUG=True)
+    @override_settings(DEBUG=True, MINIAPP_DEV_BYPASS_ENABLED=True)
     def test_cross_tenant_user(
         self,
         tenant: Tenant,
@@ -316,7 +387,7 @@ class TestDevModeRejections:
             for rec in caplog.records
         )
 
-    @override_settings(DEBUG=True)
+    @override_settings(DEBUG=True, MINIAPP_DEV_BYPASS_ENABLED=True)
     def test_nonexistent_tenant_slug(
         self, bot_user: BotUser, caplog: pytest.LogCaptureFixture
     ) -> None:
@@ -338,7 +409,7 @@ class TestDevModeRejections:
             for rec in caplog.records
         )
 
-    @override_settings(DEBUG=True)
+    @override_settings(DEBUG=True, MINIAPP_DEV_BYPASS_ENABLED=True)
     def test_bypass_header_value_not_exactly_one(
         self, tenant: Tenant, bot_user: BotUser, caplog: pytest.LogCaptureFixture
     ) -> None:
@@ -362,7 +433,7 @@ class TestDevModeRejections:
 
 
 class TestRealInitDataStillWorks:
-    @override_settings(DEBUG=True)
+    @override_settings(DEBUG=True, MINIAPP_DEV_BYPASS_ENABLED=True)
     def test_real_init_data_no_dev_headers_runs_hmac_path(
         self, tenant: Tenant, bot_user: BotUser
     ) -> None:
@@ -374,7 +445,7 @@ class TestRealInitDataStillWorks:
         assert resp.status_code == 200
         assert resp.json()["user"]["channel_user_id"] == "12345"
 
-    @override_settings(DEBUG=True)
+    @override_settings(DEBUG=True, MINIAPP_DEV_BYPASS_ENABLED=True)
     def test_real_init_data_plus_dev_headers_bypass_wins(
         self, tenant: Tenant, bot_user: BotUser, caplog: pytest.LogCaptureFixture
     ) -> None:
