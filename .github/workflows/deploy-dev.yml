@@ -379,7 +379,9 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           GH_TOKEN: ${{ github.token }}
         run: |
-          DEV_HEAD="$(git -c http.version=HTTP/1.1 ls-remote "https://github.com/${GITHUB_REPOSITORY}.git" refs/heads/dev | cut -f1)"
+          # Та же причина, что у первого стража выше: репозиторий приватный,
+          # анонимный ls-remote молчит. Голову читаем через REST с GH_TOKEN.
+          DEV_HEAD="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/dev" --jq '.object.sha')"
           GUARD=guard/tools/ci/deploy_sha_is_dev_head.sh
           set +e
           if [ -f "$GUARD" ]; then
