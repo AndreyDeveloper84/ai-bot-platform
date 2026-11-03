@@ -101,23 +101,34 @@ RUN pip install --upgrade pip && pip install "uv==0.11.12"
 
 WORKDIR /app
 
-# OPTIONAL build-time credential for the ayla-ai-core dep.
+# Build-time credential for the ayla-ai-core dep — a BuildKit SECRET, never
+# a build-arg.
 #
-# ayla-ai-core is PUBLIC (owner's decision 04.09.2026, recorded in
-# OPEN_DECISIONS.md §22 in the workspace root, outside this repo), so this
-# build needs no token: with the ARG empty the `if` below is skipped and
-# `uv sync` fetches the pinned SHA anonymously. Verified 04.09.2026 by an
-# unauthenticated fetch of the pin.
+# ayla-ai-core is private again since 20.10.2026, so `uv sync` needs a
+# token to fetch the pinned SHA. Until this change it came in as
+# `ARG GH_DEPLOY_TOKEN` and was written by `git config --global` into
+# /root/.gitconfig. Three things were wrong with that:
+#   * the image is single-stage and runs as root, so the token sat in
+#     /root/.gitconfig of the RUNTIME image, readable by the app process;
+#   * a build-arg used by RUN is printed by `docker history`;
+#   * BuildKit's build history (`docker buildx history inspect`) keeps the
+#     value of every build-arg it was given, for months.
 #
-# The token path is kept for the day the visibility is closed again (the
-# decision says public "for now"): pass via
-# `docker build --build-arg GH_DEPLOY_TOKEN=...` and the URL-rewrite makes
-# git clone authenticate transparently. Consumed at build time only — not
-# baked into the runtime image.
-ARG GH_DEPLOY_TOKEN=""
-RUN if [ -n "$GH_DEPLOY_TOKEN" ]; then \
-      git config --global url."https://${GH_DEPLOY_TOKEN}@github.com/".insteadOf "https://github.com/"; \
-    fi
+# Now the token is mounted for the duration of the two `uv sync` RUNs only
+# (`--mount=type=secret,id=gh_deploy_token`, supplied by compose
+# `build.secrets`) and reaches git through GIT_CONFIG_COUNT/KEY/VALUE —
+# environment of that one shell, nothing written to disk. A later layer
+# sees neither /run/secrets nor the variables. Without the secret (a
+# laptop, a fork, the day the repo is public again) the `if` is skipped
+# and uv fetches anonymously, as before.
+#
+# Do NOT add `set -x`, `env`, `git config --list` or any
+# `git config --global/--system/--file` to these RUNs: the first three print
+# the token into a `--progress=plain` log, the last puts it back on disk.
+# Do NOT add a `# syntax=` line to get a newer frontend either: it is
+# fetched from Docker Hub, which the pilot reaches badly (see the top of
+# this file); the frontend built into Docker already has secret mounts.
+# Guard: tests/test_ai_core_token_build_secret.py.
 
 # Dependencies first, from the lock and nothing but the lock, in their own
 # layer: a source-only change must not re-resolve or re-download anything.
@@ -131,11 +142,29 @@ RUN if [ -n "$GH_DEPLOY_TOKEN" ]; then \
 # README.md is copied because pyproject.toml declares `readme = "README.md"`
 # and setuptools reads it while building project metadata.
 COPY pyproject.toml uv.lock README.md ./
-RUN uv sync --locked --extra dev --extra ai-core --no-install-project
+RUN --mount=type=secret,id=gh_deploy_token \
+    if [ -s /run/secrets/gh_deploy_token ]; then \
+      echo "gh_deploy_token: present"; \
+      export GIT_CONFIG_COUNT=1 \
+        GIT_CONFIG_KEY_0="url.https://x-access-token:$(cat /run/secrets/gh_deploy_token)@github.com/.insteadOf" \
+        GIT_CONFIG_VALUE_0="https://github.com/"; \
+    else \
+      echo "gh_deploy_token: absent — fetching ayla-ai-core anonymously"; \
+    fi; \
+    uv sync --locked --extra dev --extra ai-core --no-install-project
 
 # Now the source, and the project itself on top of the already-resolved deps.
 COPY . .
-RUN uv sync --locked --extra dev --extra ai-core
+RUN --mount=type=secret,id=gh_deploy_token \
+    if [ -s /run/secrets/gh_deploy_token ]; then \
+      echo "gh_deploy_token: present"; \
+      export GIT_CONFIG_COUNT=1 \
+        GIT_CONFIG_KEY_0="url.https://x-access-token:$(cat /run/secrets/gh_deploy_token)@github.com/.insteadOf" \
+        GIT_CONFIG_VALUE_0="https://github.com/"; \
+    else \
+      echo "gh_deploy_token: absent — fetching ayla-ai-core anonymously"; \
+    fi; \
+    uv sync --locked --extra dev --extra ai-core
 
 # The build refuses to produce an image whose runtime environment is not the
 # lock. `uv sync --locked` above already guarantees that for everything uv

@@ -65,12 +65,18 @@ cd beautygo/dev && git checkout c4efa64
 Проверить наличие, **не печатая значений**:
 
 ```bash
-for k in ANTHROPIC_API_KEY ANTHROPIC_PROXY LLM_PROVIDER DJANGO_ALLOWED_HOSTS GH_DEPLOY_TOKEN; do
+for k in ANTHROPIC_API_KEY ANTHROPIC_PROXY LLM_PROVIDER DJANGO_ALLOWED_HOSTS; do
   echo "$k: $(grep -c "^$k=" .env.staging)"
 done
+echo "GH_DEPLOY_TOKEN: $(grep -c '^GH_DEPLOY_TOKEN=.' ~/.config/ayla-bot/build.env)"
+echo "в .env.staging (должно быть 0): $(grep -c '^GH_DEPLOY_TOKEN=' .env.staging)"
 ```
 
-`GH_DEPLOY_TOKEN` нужен сборке — без него образ не соберётся.
+`GH_DEPLOY_TOKEN` нужен сборке — без него образ не соберётся (ayla-ai-core
+приватный). Его место — `~/.config/ayla-bot/build.env` владельца дерева
+(`chmod 600`, вне каталога выкладки), **не** `.env.staging`: тот подключён ко
+всем контейнерам и лежит у них на диске через `./:/app`. deploy-dev передаёт
+файл только команде `build` (секрет BuildKit, см. Dockerfile).
 
 ## 4. Данные (минуты — базы крошечные)
 

@@ -525,14 +525,33 @@ jobs:
             # скомпилированной строки. Скрипт перебирает источники от
             # зеркала в GHCR до прежнего поведения и печатает одну ссылку;
             # хуже, чем было, стать не может.
-            BASE_IMAGE=\"\$(sudo -u \"\$OWNER\" -H env DOCKER_CMD=docker ENV_FILE=.env.staging bash scripts/resolve-base-image.sh)\"
+            # Секрет сборки для приватного ayla-ai-core (см. Dockerfile) живёт в
+            # файле владельца ВНЕ дерева выкладки и уходит только в команду build.
+            # Не в .env.staging: тот подключён ко всем контейнерам через env_file
+            # и лежит у них на диске через ./:/app, а процесс в контейнере — root.
+            # Файла нет — переходный режим: токен берётся из .env.staging, как до
+            # этой правки, выкладка не встаёт, но шаг говорит об этом вслух.
+            # Значение токена шаг не читает и не печатает: только test -f и grep -q.
+            BUILD_ENV=\"\$(getent passwd \"\$OWNER\" | cut -d: -f6)/.config/ayla-bot/build.env\"
+            BUILD_ENV_ARGS=()
+            TOKEN_ENV_FILE=.env.staging
+            if sudo -u \"\$OWNER\" test -f \"\$BUILD_ENV\"; then
+              BUILD_ENV_ARGS=(--env-file \"\$BUILD_ENV\")
+              TOKEN_ENV_FILE=\"\$BUILD_ENV\"
+            else
+              echo \"::warning::нет \$BUILD_ENV — токен ayla-ai-core для сборки берётся из .env.staging; перенести строку GH_DEPLOY_TOKEN в этот файл (0600)\"
+            fi
+            if sudo -u \"\$OWNER\" grep -q '^GH_DEPLOY_TOKEN=.' .env.staging; then
+              echo \"::warning::GH_DEPLOY_TOKEN всё ещё в .env.staging — он виден контейнерам с диска (./:/app); после переноса в \$BUILD_ENV строку удалить\"
+            fi
+            BASE_IMAGE=\"\$(sudo -u \"\$OWNER\" -H env DOCKER_CMD=docker ENV_FILE=\"\$TOKEN_ENV_FILE\" bash scripts/resolve-base-image.sh)\"
             # \`sudo env VAR=...\`, а не \`export\` перед \`sudo\`: sudo по
             # умолчанию сбрасывает окружение (env_reset), и compose,
             # запущенный под root, не увидел бы переменную —
             # интерполяция \${PYTHON_BASE_IMAGE:-...} молча вернулась бы к
             # Docker Hub, то есть ровно к тому, что мы убираем.
             sudo -u \"\$OWNER\" -H env PYTHON_BASE_IMAGE=\"\$BASE_IMAGE\" \
-              docker compose --env-file .env.staging \
+              docker compose --env-file .env.staging \"\${BUILD_ENV_ARGS[@]}\" \
               -f docker-compose.yml -f docker-compose.staging.yml \
               -f docker-compose.staging.local.yml \
               -p ayla-bot-staging build web worker celery-worker celery-beat shadow-worker

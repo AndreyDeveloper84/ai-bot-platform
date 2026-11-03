@@ -40,10 +40,10 @@ EOF
 fi
 
 echo "==> uv sync --extra dev --extra ai-core --frozen   (in $REPO_ROOT)"
-# `ai-core` pulls ayla-ai-core from a separate PUBLIC repo (owner's
-# decision 04.09.2026), so this normally works with no git auth at all.
-# CI and Docker still rewrite the URL with GH_DEPLOY_TOKEN when that
-# variable is non-empty, for the day the visibility is closed again. If
+# `ai-core` pulls ayla-ai-core from a separate repo that is PRIVATE again
+# since 20.10.2026 (it was public by the owner's decision of 04.09.2026),
+# so this needs git access to it: your own GitHub credentials, or
+# GH_DEPLOY_TOKEN the way CI and the Docker build use it. If
 # this step fails, the environment is NOT usable for anything touching
 # apps/orchestrator — do not paper over it by dropping the extra.
 if ! uv sync --extra dev --extra ai-core --frozen; then
