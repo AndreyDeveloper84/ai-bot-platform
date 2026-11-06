@@ -53,12 +53,13 @@ _API_APPS = ("miniapp_api", "master_api", "admin_api")
 _SKIPPED_PARTS = ("migrations", "tests", "__pycache__")
 _FIELD = "avatar_url"
 
-#: Известные законные места. Оба читают ``avatar_url`` из ответа КАТАЛОГА о
+#: Известные законные места. Все читают ``avatar_url`` из ответа КАТАЛОГА о
 #: мастере и кладут в ``photo_url`` мастера: это фото мастера, не поле
 #: ``BotUser``. Они же — положительная сторона сторожа: обход обязан их найти.
 _ALLOWED: dict[str, str] = {
     "apps/master_api/views.py": "фото мастера из ответа каталога (DRF-1813)",
     "apps/master_api/views_profile_card.py": "фото мастера из ответа каталога (DRF-1814)",
+    "apps/admin_api/views.py": "фото мастера рукой администратора из ответа каталога (DRF-2619)",
 }
 
 

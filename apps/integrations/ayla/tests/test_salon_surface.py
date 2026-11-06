@@ -174,7 +174,9 @@ class TestRegistryShape:
 
     def test_the_person_token_opens_exactly_time_off_and_date_exceptions(self) -> None:
         """DRF-2607: the owner opened these four, and nothing else. The
-        weekly template waits for the shrink guard; closures stay closed."""
+        weekly template waits for the shrink guard; closures stay closed.
+        DRF-2619 adds the master's photo: the admin upload wrote to the bot's
+        disk and the next sync erased it — the catalog owns the bytes."""
 
         opened = {(r.method, r.name) for r in routes_by_access(SalonRouteAccess.PERSON_TOKEN)}
         assert opened == {
@@ -182,6 +184,7 @@ class TestRegistryShape:
             ("DELETE", "tenants-master-time-off-detail"),
             ("PUT", "tenants-master-schedule-exceptions"),
             ("DELETE", "tenants-master-schedule-exception-detail"),
+            ("POST", "tenants-master-avatar"),
         }
         weekly = capability("tenants-master-schedule", "PUT")
         closures = capability("tenants-closures", "POST")
@@ -439,6 +442,8 @@ class TestWireShape:
 #: service's may ride along.
 #: A date the client accepts (it validates ``YYYY-MM-DD`` before sending).
 EXCEPTION_DATE = "2026-08-25"
+#: Not a real image — the catalog judges the content, the client only carries it.
+PHOTO_BYTES = b"\x89PNG-bytes-2619"
 
 PERSON_CALLS: dict[str, Any] = {
     "create_time_off": lambda c: c.create_time_off(
@@ -466,6 +471,14 @@ PERSON_CALLS: dict[str, Any] = {
         tenant_slug=TENANT,
         specialist_id="SPECIALIST-ARG",
         date=EXCEPTION_DATE,
+    ),
+    "upload_master_avatar": lambda c: c.upload_master_avatar(
+        person_token=PERSON_TOKEN,
+        tenant_slug=TENANT,
+        specialist_id="SPECIALIST-ARG",
+        filename="face.png",
+        content=PHOTO_BYTES,
+        content_type="image/png",
     ),
 }
 
@@ -510,6 +523,42 @@ class TestPersonTokenWireShape:
         assert TOKEN not in " ".join(headers.values())
         assert headers.get("x-tenant") == TENANT
         assert headers.get("x-app-type") == "pro"
+
+    def test_the_photo_goes_as_multipart_the_json_writes_as_json(self) -> None:
+        """Pair (DRF-2619): one client, one ``_send_as_person`` — the photo row
+        carries its bytes in a multipart ``image`` part and no JSON type, a
+        JSON row keeps ``application/json``."""
+
+        routes = {r.client_method: r for r in routes_by_access(SalonRouteAccess.PERSON_TOKEN)}
+        photo = _drive_as_person(routes["upload_master_avatar"])
+        json_row = _drive_as_person(routes["create_time_off"])
+
+        assert photo.headers["content-type"].startswith("multipart/form-data; boundary=")
+        body = photo.read()
+        assert b'name="image"; filename="face.png"' in body
+        assert PHOTO_BYTES in body
+        assert json_row.headers["content-type"] == "application/json"
+
+    def test_a_refused_photo_says_which_rule_refused_it(self) -> None:
+        """400 carries Ayla's ``error.details`` — the screen needs the reason
+        (``not_square``), not the prose; a 400 without details carries None."""
+
+        from apps.integrations.ayla.salon_client import AylaSalonClient, SalonValidationError
+
+        def answer(details: dict[str, Any] | None) -> SalonValidationError:
+            error: dict[str, Any] = {"code": "VALIDATION_ERROR", "message": "File not accepted."}
+            if details is not None:
+                error["details"] = details
+            transport = httpx.MockTransport(lambda req: httpx.Response(400, json={"error": error}))
+            client = AylaSalonClient(
+                base_url="https://ayla.example", service_token=TOKEN, transport=transport
+            )
+            with pytest.raises(SalonValidationError) as caught:
+                PERSON_CALLS["upload_master_avatar"](client)
+            return caught.value
+
+        assert answer({"reason": "not_square"}).details == {"reason": "not_square"}
+        assert answer(None).details is None
 
     def test_without_a_person_token_nothing_is_sent(self) -> None:
         """No token → refused here. Not «then the service key»: no request
