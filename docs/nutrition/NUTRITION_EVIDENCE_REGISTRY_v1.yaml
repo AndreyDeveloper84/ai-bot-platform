@@ -1,0 +1,119 @@
+registry: ayla.nutrition-evidence-registry
+version: "1.0-draft"
+status: DRAFT
+
+evidence_statuses:
+  - VERIFIED_SOURCE
+  - PRODUCT_POLICY
+  - REVIEW_REQUIRED
+  - UNSUPPORTED
+
+rules:
+  - rule_id: NUT-ENERGY-BMR-001
+    subject: resting_energy
+    implementation: mifflin_st_jeor
+    current_version: mifflin_st_jeor_v2
+    evidence_status: VERIFIED_SOURCE
+    sources:
+      - type: primary_research
+        citation: "Mifflin MD et al. A new predictive equation for resting energy expenditure in healthy individuals. 1990."
+        url: "https://pubmed.ncbi.nlm.nih.gov/2305711/"
+    applicability: healthy_adults
+    limitations:
+      - estimate_not_measurement
+      - not_a_weight_timeline_model
+
+  - rule_id: NUT-ENERGY-ACTIVITY-001
+    subject: activity_coefficients
+    implementation_values: [1.2, 1.375, 1.55, 1.725]
+    evidence_status: REVIEW_REQUIRED
+    reason: exact coefficient set has no pinned professional source in runtime
+
+  - rule_id: NUT-ENERGY-GOAL-001
+    subject: goal_adjustment
+    implementation:
+      lose: -0.10
+      maintain: 0.00
+      gain: 0.10
+    evidence_status: PRODUCT_POLICY
+    reason: conservative pilot boundary, not a prediction of body-weight change
+    result_guaranteed: false
+
+  - rule_id: NUT-MACRO-PROTEIN-001
+    subject: protein_target
+    implementation:
+      lose_or_tone_g_per_kg: 1.6
+      other_g_per_kg: 1.4
+    evidence_status: REVIEW_REQUIRED
+    reason: values exist in code but no approved evidence record pins population and training context
+
+  - rule_id: NUT-MACRO-FAT-001
+    subject: fat_share
+    implementation_percent_energy: 30
+    evidence_status: REVIEW_REQUIRED
+    reason: value exists in code and needs professional approval for v1 scope
+
+  - rule_id: NUT-MACRO-CARBS-001
+    subject: carbohydrate_target
+    implementation: remaining_energy_after_protein_and_fat
+    evidence_status: PRODUCT_POLICY
+    limitations:
+      - not_suitable_for_therapeutic_low_carb_use
+
+  - rule_id: NUT-FLUIDS-001
+    subject: beverage_reference
+    implementation:
+      female_ml: 2200
+      male_ml: 3000
+      version: adult_beverages_reference_v1
+    evidence_status: REVIEW_REQUIRED
+    reason: current owner-approved reference lacks a pinned external evidence record
+    limitations:
+      - not_weight_based
+      - no_automatic_weather_or_exercise_adjustment
+      - not_for_blocking_health_flags
+
+  - rule_id: NUT-MICRO-RDA-001
+    subject: micronutrient_reference_intakes
+    nutrients:
+      - vitamin_d
+      - vitamin_b12
+      - vitamin_c
+      - iron
+      - calcium
+      - magnesium
+      - omega3
+      - fiber
+    evidence_status: REVIEW_REQUIRED
+    sources:
+      - type: official_reference
+        citation: "NIH Office of Dietary Supplements / Dietary Reference Intakes"
+        url: "https://ods.od.nih.gov/HealthInformation/nutrientrecommendations.aspx"
+    reason: sources are named in code, but exact table/version mapping requires professional verification
+
+  - rule_id: NUT-FOOD-USDA-001
+    subject: food_composition_usda
+    evidence_status: VERIFIED_SOURCE
+    sources:
+      - type: official_database
+        citation: "USDA FoodData Central"
+        url: "https://fdc.nal.usda.gov/"
+    provenance_required: true
+
+  - rule_id: NUT-FOOD-RU-SEED-001
+    subject: russian_dishes_seed
+    evidence_status: REVIEW_REQUIRED
+    sources:
+      - type: mixed
+        citation: "Skurikhin-Tutelyan tables, Rospotrebnadzor and commercial averages"
+    reason: every dish needs row-level source and version; averages must expose uncertainty
+
+  - rule_id: NUT-FOOD-AI-ESTIMATE-001
+    subject: llm_food_estimate
+    evidence_status: PRODUCT_POLICY
+    confidence: low
+    requirements:
+      - label_ai_estimate
+      - never_override_verified_data
+      - exclude_from_high_confidence_pattern_when_quality_gate_fails
+      - show_uncertainty
