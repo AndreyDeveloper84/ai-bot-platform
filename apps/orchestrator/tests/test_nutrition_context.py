@@ -48,6 +48,22 @@ def _flag_on(settings):
     settings.CONCIERGE_NUTRITION_CONTEXT_ENABLED = True
 
 
+@pytest.fixture(autouse=True)
+def _ordinary_profile(monkeypatch):
+    """The third Ayla door (DRF-2760): the profile, read before anything else.
+
+    The sensitive perimeter (§7.1) lives in it. Every test in this file is
+    about an ORDINARY person, so the door answers with an ordinary profile;
+    the perimeter itself is exercised in
+    ``test_nutrition_context_perimeter_2760``. Without this stub every block
+    below would be ``""`` — and the «does not contain» assertions would pass
+    for the wrong reason.
+    """
+    from apps.nutrition_proactive.tests.test_remarks_suppressed_2222 import profile
+
+    monkeypatch.setattr(nutrition_context, "_fetch_profile", Mock(return_value=profile()))
+
+
 @pytest.fixture
 def open_consent(monkeypatch):
     """Both 152-ФЗ bases granted."""

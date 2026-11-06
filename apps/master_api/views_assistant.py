@@ -186,6 +186,11 @@ def assistant_ask(request: HttpRequest) -> HttpResponse:
     if isinstance(body, JsonResponse):
         return body
 
+    # DRF-2666: свободный текст из тела хранится или уходит наружу — нестроковое
+    # значение получает отказ этой двери, а не становится текстом "{'a': 1}".
+    for field in ("text",):
+        if body.get(field) is not None and not isinstance(body.get(field), str):
+            return _error("bad_request", f"{field} must be a string", 400)
     text = str(body.get("text") or "").strip()
     if not text:
         return _error("bad_request", "text is required", 400)
@@ -198,8 +203,8 @@ def assistant_ask(request: HttpRequest) -> HttpResponse:
         recent_staff_history,
     )
 
-    # DRF-2153: выбор из карточки (клиент из «Кого вы имеете в виду?», время
-    # из «Свободно рядом») уходит модели уточнением — в нить пишется только
+    # DRF-2153 / DRF-2945: выбор из карточки (клиент, услуга, время)
+    # уходит модели уточнением — в нить пишется только
     # то, что мастер видел на кнопке.
     raw_select = body.get("select")
     select: dict[str, Any] = raw_select if isinstance(raw_select, dict) else {}
@@ -207,9 +212,12 @@ def assistant_ask(request: HttpRequest) -> HttpResponse:
     # Значения из карточки — короткие id/метки; предел, чтобы тело не
     # раздувало запрос к модели мимо лимита на text.
     client_id = str(select.get("client_id") or "").strip()[:64]
+    service_id = str(select.get("service_id") or "").strip()[:64]
     start_at = str(select.get("start_at") or "").strip()[:64]
     if client_id:
         hints.append(f"клиент выбран — client_id={client_id}")
+    if service_id:
+        hints.append(f"услуга выбрана — service_id={service_id}")
     if start_at:
         hints.append(f"время выбрано — start_at={start_at}")
     model_text = text

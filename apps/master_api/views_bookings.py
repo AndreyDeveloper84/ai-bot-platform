@@ -49,6 +49,7 @@ from apps.catalog.models import CatalogMaster
 from apps.identity.models import BotUser
 from apps.integrations.ayla.user_proxy import external_user_id_for
 from apps.master_api.auth import require_master_init_data
+from apps.master_api.services.booking_actions import execute_master_booking_action
 from apps.master_api.services.bookings import (
     ALTERNATIVES_LIMIT,
     booking_detail,
@@ -90,6 +91,37 @@ def booking_detail_view(request: HttpRequest, appointment_id: uuid.UUID) -> Http
     if detail is None:
         return _error("not_found", "booking not found", 404)
     return JsonResponse(detail.to_dict(salon_zone(master.tenant)))
+
+
+# ─── POST bookings/<id>/action ───────────────────────────────────────────────
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@require_master_init_data
+def booking_action(request: HttpRequest, appointment_id: uuid.UUID) -> HttpResponse:
+    """Thin HTTP adapter over the canonical specialist action service."""
+
+    master: CatalogMaster = request.master  # type: ignore[attr-defined]
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+
+    try:
+        body = json.loads(request.body or b"{}")
+    except ValueError:
+        return _error("bad_request", "invalid JSON body", 400)
+    if not isinstance(body, dict):
+        return _error("bad_request", "body must be a JSON object", 400)
+
+    result = execute_master_booking_action(
+        master=master,
+        bot_user=bot_user,
+        appointment_id=appointment_id,
+        action=body.get("action"),
+        expected_version=body.get("expected_version"),
+        reason=body.get("reason"),
+        new_start_datetime=body.get("new_start_datetime"),
+    )
+    return JsonResponse(result.payload, status=result.status_code)
 
 
 # ─── POST bookings ──────────────────────────────────────────────────────────
@@ -145,6 +177,11 @@ def create_booking(request: HttpRequest) -> HttpResponse:
     if not isinstance(body, dict):
         return _error("bad_request", "body must be a JSON object", 400)
 
+    # DRF-2666: свободный текст из тела хранится или уходит наружу — нестроковое
+    # значение получает отказ этой двери, а не становится текстом "{'a': 1}".
+    for field in ("client_name", "client_phone", "idempotency_key"):
+        if body.get(field) is not None and not isinstance(body.get(field), str):
+            return _error("bad_request", f"{field} must be a string", 400)
     service_id = str(body.get("service_id") or "").strip()
     start_at = str(body.get("start_at") or "").strip()
     idempotency_key = str(body.get("idempotency_key") or "").strip()
@@ -289,4 +326,10 @@ def search_customers(request: HttpRequest, query: str) -> HttpResponse:
     return JsonResponse({"results": results})
 
 
-__all__ = ["booking_detail_view", "booking_slots", "create_booking", "search_customers"]
+__all__ = [
+    "booking_action",
+    "booking_detail_view",
+    "booking_slots",
+    "create_booking",
+    "search_customers",
+]

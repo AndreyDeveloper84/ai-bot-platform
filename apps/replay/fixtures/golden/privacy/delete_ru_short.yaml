@@ -12,7 +12,7 @@ must_pass:
   - skill_used: privacy_consent
   # See privacy_delete_ru_polite — same product change, same replacement.
   - response_contains_all:
-      - удалить данные
+      - удалить аккаунт и личные данные
       - ничего не удалила
 forbidden:
   - response_contains_any:

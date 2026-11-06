@@ -41,7 +41,7 @@ from django.http import HttpRequest, HttpResponse, JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 
-from apps.admin_api.auth import require_admin_role
+from apps.admin_api.auth import require_booking_desk
 from apps.booking.models import RemoteBookingProxy
 from apps.identity.models import BotUser
 from apps.integrations.ayla.user_proxy import external_user_id_for
@@ -85,7 +85,7 @@ def _outcome(
 
 @csrf_exempt
 @require_http_methods(["POST"])
-@require_admin_role
+@require_booking_desk
 def cancel_booking(request: HttpRequest, appointment_id: str) -> HttpResponse:
     """Cancel a booking on behalf of the calling administrator."""
 
@@ -99,6 +99,11 @@ def cancel_booking(request: HttpRequest, appointment_id: str) -> HttpResponse:
     if not isinstance(body, dict):
         return _error("bad_request", "body must be a JSON object", 400)
 
+    # DRF-2666: свободный текст из тела хранится или уходит наружу — нестроковое
+    # значение получает отказ этой двери, а не становится текстом "{'a': 1}".
+    for field in ("reason",):
+        if body.get(field) is not None and not isinstance(body.get(field), str):
+            return _error("bad_request", f"{field} must be a string", 400)
     reason = str(body.get("reason") or "").strip()
     if len(reason) > MAX_REASON_LEN:
         return _error("bad_request", "reason too long", 400)

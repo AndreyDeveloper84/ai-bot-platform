@@ -55,6 +55,7 @@ from apps.orchestrator.memory_block import (
     BACKEND_STATED_SOURCE,
     concierge_memory_enabled,
 )
+from apps.orchestrator.turn_commands import mentions_booking, names_a_command
 
 logger = logging.getLogger(__name__)
 
@@ -110,6 +111,39 @@ def _clear_pending(conversation_id: Any) -> None:
 def _is_skip(text: str) -> bool:
     low = (text or "").strip().lower()
     return any(marker in low for marker in _SKIP_MARKERS)
+
+
+#: Поля, ответ на которые разбирается как свободный текст (``_parse_free_text``).
+_FREE_TEXT_FIELDS = frozenset({"workplace_district", "home_district"})
+_SHOW_RE = re.compile(r"(?<!\w)покажи(?:те)?(?!\w)")
+
+
+def _booking_in_flight(conversation: Any) -> bool:
+    """Незаконченная запись: следующая реплика — её день, а не ответ памяти."""
+    from apps.orchestrator.booking_context import load_booking_context
+
+    return load_booking_context(conversation) is not None
+
+
+def _not_an_answer(field: str, text: str) -> bool:
+    """DRF-2981 — реплика, которую нельзя сохранять ответом на вопрос памяти.
+
+    * Вопрос («а в субботу вы работаете?», «а маникюр за 2000 есть?») — для
+      любого поля: иначе разбор вынимает из вопроса день, цену, рейтинг или
+      диету и сохраняет их — у занятых дней со смыслом наоборот. Цена: «вечером?»
+      тоже не сохранится — вопрос задастся снова после паузы.
+    * Свободный ответ о районе принимает любой текст, поэтому для него ещё:
+      запись к мастеру, «покажи …» и названная услуга — не место.
+    """
+    if text.strip().endswith("?"):
+        return True
+    if field not in _FREE_TEXT_FIELDS:
+        return False
+    if mentions_booking(text) or _SHOW_RE.search(text.lower()):
+        return True
+    from apps.skills.menu.matching import mentions_service
+
+    return mentions_service(text)
 
 
 def _weave(hint: str) -> str:
@@ -183,11 +217,19 @@ def try_handle_answer(
         if pending is None:
             return None
         field = pending["field"]
+        # DRF-2981 — до «пропустить»: «пропусти, отмени запись на завтра» —
+        # команда, а не отказ отвечать; ложный «пропустить» липкий (счётчик
+        # пропусков в Ayla), снятый вопрос стоит одного повтора после паузы.
+        # Незаконченная запись важнее вопроса: «на завтра» после тапа по
+        # мастеру — день записи, а не район и не занятые дни.
+        if _booking_in_flight(conversation) or names_a_command(text):
+            _clear_pending(conversation.id)
+            return None
         if _is_skip(text):
             skip(bot_user, field)  # non-idempotent: exactly once per skip
             _clear_pending(conversation.id)
             return DiscoveryReply(text="Хорошо, не буду спрашивать 🤍")
-        value = _FIELD_PARSERS[field](text)
+        value = _UNPARSED if _not_an_answer(field, text) else _FIELD_PARSERS[field](text)
         if value is _UNPARSED:
             _clear_pending(conversation.id)
             return None

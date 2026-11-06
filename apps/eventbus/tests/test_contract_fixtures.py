@@ -134,7 +134,10 @@ class TestEventFixturesParse:
         # Every §3 data value is a string: UUIDs, ISO8601 stamps, decimal
         # strings, enums. A non-string value is a contract break.
         # appointment.rescheduled is intentionally structured (version ints,
-        # changed_fields list, actor object) and is type-checked separately.
+        # changed_fields list) and is type-checked separately. ``actor`` is
+        # a bare string from the registry's closed list (DRF-2673): that is
+        # what the producer writes; the object this fixture carried before
+        # came from a bot-side plan, not from the registry or the producer.
         if name == "appointment.rescheduled.v1.json":
             assert isinstance(data["appointment_id"], str)
             assert isinstance(data["version"], int)
@@ -142,7 +145,7 @@ class TestEventFixturesParse:
             assert isinstance(data["revision_id"], str)
             assert isinstance(data["changed_fields"], list)
             assert all(isinstance(field, str) for field in data["changed_fields"])
-            assert isinstance(data["actor"], dict)
+            assert isinstance(data["actor"], str)
             assert isinstance(data["starts_at"], str)
             assert isinstance(data["previous_starts_at"], str)
         else:

@@ -75,6 +75,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useNavigate } from "react-router-dom";
 
 import { StateError } from "../../components/StateError";
 import {
@@ -251,6 +252,7 @@ function shiftLine(master: SalonDayFrame["masters"][number]): string {
 }
 
 export function SalonPilotScheduleScreen({ me }: { me: MeResponse }) {
+  const navigate = useNavigate();
   const [mode, setMode] = useState<Mode>("one");
   const [salon, setSalon] = useState<SalonDayResponse | null>(null);
   const [selected, setSelected] = useState<string>("");
@@ -546,7 +548,24 @@ export function SalonPilotScheduleScreen({ me }: { me: MeResponse }) {
             ) : (
               <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
                 {day.bookings.map((b) => (
-                  <li key={b.booking_id} style={{ padding: "2px 0" }}>
+                  <li
+                    key={b.booking_id}
+                    style={{ padding: "2px 0", cursor: "pointer" }}
+                    role="button"
+                    tabIndex={0}
+                    onClick={() =>
+                      navigate(`/admin/bookings/${encodeURIComponent(b.booking_id)}`, {
+                        state: { from: "/admin/schedule" },
+                      })
+                    }
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" || event.key === " ") {
+                        navigate(`/admin/bookings/${encodeURIComponent(b.booking_id)}`, {
+                          state: { from: "/admin/schedule" },
+                        });
+                      }
+                    }}
+                  >
                     {`${formatSlotTime(b.visit_at)} · ${b.service_name} · ${b.client_first_name} ${b.client_last_initial}`}
                     {b.is_in_progress && NOW_MARKER}
                   </li>
@@ -975,11 +994,26 @@ export function SalonPilotScheduleScreen({ me }: { me: MeResponse }) {
                           key={visit.id}
                           style={{
                             padding: "2px 0",
+                            cursor: "pointer",
                             textDecoration: RELEASED_VISIT_STATUSES.has(
                               visit.status,
                             )
                               ? "line-through"
                               : undefined,
+                          }}
+                          role="button"
+                          tabIndex={0}
+                          onClick={() =>
+                            navigate(`/admin/bookings/${encodeURIComponent(visit.id)}`, {
+                              state: { from: "/admin/schedule" },
+                            })
+                          }
+                          onKeyDown={(event) => {
+                            if (event.key === "Enter" || event.key === " ") {
+                              navigate(`/admin/bookings/${encodeURIComponent(visit.id)}`, {
+                                state: { from: "/admin/schedule" },
+                              });
+                            }
                           }}
                         >
                           {`${masterName} · ${visit.service_name} · ${visit.client_first_name} ${visit.client_last_initial}`}

@@ -49,6 +49,9 @@ ALLOWED_EVENT_NAMES: Final[frozenset[str]] = frozenset(
         # emits it from mark_no_show. It is NOT modelled as
         # booking.cancelled + reason_code.
         "booking.no_show",
+        # DRF-2785: the master confirmed they will take the visit
+        # («✅ Подтверждаю»). Status is unchanged; the fact is the event.
+        "booking.acknowledged",
         "payment.authorized",
         "payment.captured",
         "payment.failed",
@@ -62,6 +65,13 @@ ALLOWED_EVENT_NAMES: Final[frozenset[str]] = frozenset(
         "subscription.activated",
         "subscription.past_due",
         "billing.fee_charged",
+        # DRF-2984 — подписка платформы по тенанту (design §6.2). Не
+        # tenant-nullable: новая подписка всегда на тенанте каталога.
+        "subscription.trial_started",
+        "subscription.renewed",
+        "subscription.frozen",
+        "subscription.canceled",
+        "subscription.plan_changed",
         # DRF-2196 (а1, §64) — системный сигнал: без пользователя и тенанта.
         "system.module.health.degraded",
     }

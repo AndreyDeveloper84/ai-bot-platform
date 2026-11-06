@@ -10,7 +10,9 @@ test_handler_voice_input.py``), доказанный на втором вход�
 
 from __future__ import annotations
 
+import json
 import logging
+import uuid
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -67,6 +69,7 @@ def _msg(
 def _flags(settings):
     settings.GLOBAL_BOT_ONBOARDING = False
     settings.VOICE_INPUT_ENABLED = True
+    settings.VOICE_ALLOWED_USER_IDS = "*"  # DRF-2424 — список допуска: всем
     settings.VOICE_CROSS_BORDER_ALLOWED = True
     settings.VOICE_STT_PROVIDER = "fake"
     settings.VOICE_GATE_STRIP_PUNCT = True
@@ -194,14 +197,28 @@ class TestGlobalVoice:
             concierge.call_args.args[0] == "Умираю, хочу кофе."
         )  # модели — оригинал, не копия без знаков
 
-    def test_k19_same_transcript_stops_when_strip_is_off(
-        self, sent, fake_redis, concierge, settings
-    ):
+    def test_k19_a_typed_comma_stops_without_the_copy(self, sent, fake_redis, concierge, settings):
+        # DRF-2684 (B, решение владельца): знак сразу после «умираю» снова даёт
+        # кризис. С выключенным флагом (без копии) гейт видит сырой знак — и эта
+        # расшифровка с запятой получает кризисный ответ, модель не вызывается.
+        # Копия (флаг включён) знак снимает и пропускает — см. ..._with_strip выше.
         settings.VOICE_GATE_STRIP_PUNCT = False
         _provider("Умираю, хочу кофе.")
         with patch(_DOWNLOAD, return_value=ogg_of(2)):
             max_handler.handle_global_max_event(_msg(user_id=70005, attachments=[AUDIO]))
+        assert [c["text"] for c in sent] == [CRISIS_REPLY_TEXT]
         assert Message.all_tenants.filter(action_type="safety_pre_check").count() == 1
+        concierge.assert_not_called()
+
+    @pytest.mark.parametrize(("user_id", "strip"), [(70015, True), (70016, False)])
+    def test_k19_a_crisis_behind_the_hyperbole_stops_with_and_without_the_copy(
+        self, sent, fake_redis, concierge, settings, user_id, strip
+    ):
+        settings.VOICE_GATE_STRIP_PUNCT = strip
+        _provider("Умираю, хочу просто умереть.")
+        with patch(_DOWNLOAD, return_value=ogg_of(2)):
+            max_handler.handle_global_max_event(_msg(user_id=user_id, attachments=[AUDIO]))
+        assert [c["text"] for c in sent] == [CRISIS_REPLY_TEXT]
         concierge.assert_not_called()
 
     def test_too_long_is_answered_and_the_model_is_not_called(
@@ -224,6 +241,32 @@ class TestGlobalVoice:
         with patch(_DOWNLOAD, return_value=ogg_of(2)):
             max_handler.handle_global_max_event(_msg(user_id=70007, attachments=[AUDIO]))
         assert sent[0]["text"] == "Я услышала: «привет»\n\nРасскажи чуть подробнее?"
+
+    @pytest.mark.parametrize(
+        ("said", "reaches_the_model"),
+        [
+            ("Запиши к мастеру завтра в десять тридцать.", "Запиши к мастеру завтра в 10:30."),
+            ("Запиши к Денису на пятнадцать ноль ноль.", "Запиши к Денису на 15:00."),
+            ("Запиши на двадцать пятое октября.", "Запиши на 25 октября."),
+        ],
+    )
+    def test_a_spoken_time_reaches_the_model_as_it_was_said(
+        self, sent, fake_redis, concierge, settings, said, reaches_the_model
+    ):
+        """DRF-2710 — модели и человеку достаётся названное время, а не сумма.
+
+        До правки нормализатор чисел складывал «десять тридцать» в 40: модель
+        получала «…завтра в 40.», и запись уходила на время, которого человек
+        не называл. Та же строка стояла в эхе — так владелец это и увидел.
+        """
+        settings.VOICE_ECHO_MODE = "always"
+        _provider(said)
+        with patch(_DOWNLOAD, return_value=ogg_of(2)):
+            max_handler.handle_global_max_event(_msg(user_id=70020, attachments=[AUDIO]))
+
+        assert concierge.call_count == 1
+        assert concierge.call_args.args[0] == reaches_the_model
+        assert sent[0]["text"] == f"Я услышала: «{reaches_the_model}»\n\nРасскажи чуть подробнее?"
 
     def test_voice_and_typed_rows_differ_only_in_input_channel(self, sent, fake_redis, concierge):
         """DRF-2488 — паритет строк Message на глобальном пути.
@@ -280,10 +323,10 @@ class TestGlobalVoice:
     def test_logs_carry_no_transcript(self, sent, fake_redis, concierge, caplog, settings):
         """DRF-2488 — пометка не тянет расшифровку в логи: слушаем корень на DEBUG.
 
-        Пост-ответный разбор намерений выключен: это живой вызов OpenAI, и
-        SDK ``openai`` на DEBUG сам пишет тело запроса — с текстом реплики,
-        набранной или надиктованной одинаково. Это не код бота и не предмет
-        DRF-2488; на проде корень на INFO.
+        Пост-ответный разбор намерений выключен: это настоящий исходящий HTTP
+        к OpenAI (в CI ключ-заглушка → 401), тесту не нужна сеть. Тело запроса
+        SDK в лог больше не пишет и при DEBUG — ``openai._base_client`` прибит
+        на INFO в ``LOGGING`` (DRF-2634, свой тест в ``apps/observability``).
         """
         settings.INTENT_RESOLUTION_LIVE_ENABLED = False
         caplog.set_level(logging.DEBUG)
@@ -295,3 +338,302 @@ class TestGlobalVoice:
         assert "conversations.message.stored(global)" in text
         assert _user_rows(70014) == [("СЕКРЕТНОЕ СЛОВО ксилофон", "voice")]
         assert "ксилофон" not in text
+
+    def test_allowlist_on_the_global_path(self, sent, fake_redis, concierge, settings):
+        """DRF-2424 — на глобальном пути тот же список допуска."""
+        settings.VOICE_ALLOWED_USER_IDS = "70021"
+        provider = _provider("привет")
+        with patch(_DOWNLOAD, return_value=ogg_of(2)):
+            max_handler.handle_global_max_event(
+                _msg(user_id=70021, chat_id=21, mid="al-1", attachments=[AUDIO])
+            )
+        assert len(provider.calls) == 1
+        assert _user_rows(70021) == [("привет", "voice")]
+        sent.clear()
+
+        with patch(_DOWNLOAD) as dl:
+            max_handler.handle_global_max_event(
+                _msg(user_id=70022, chat_id=22, mid="al-2", attachments=[AUDIO])
+            )
+        assert [c["text"] for c in sent] == [VOICE_NOT_SUPPORTED_TEXT]
+        dl.assert_not_called()
+        assert len(provider.calls) == 1
+        assert _user_rows(70022) == [("", "text")]
+
+
+@pytest.fixture
+def persisting_concierge(monkeypatch):
+    """Консьерж, который, как настоящий, сам пишет свой ответ в переписку (DRF-2686).
+
+    Обычная фикстура ``concierge`` отдаёт ``persisted=False`` — строку пишет
+    обработчик, и потеря эха в строке консьержа на ней не видна.
+    """
+    from apps.conversations.services import record_global_message
+    from apps.orchestrator.discovery import DiscoveryReply
+
+    def reply(message_text, *, conversation, trace_id=None, **kwargs):
+        record_global_message(
+            conversation,
+            role="assistant",
+            content="Расскажи чуть подробнее?",
+            rendered_text="Расскажи чуть подробнее?",
+            action_type="concierge",
+            tokens_in=11,
+            tokens_out=5,
+            trace_id=trace_id,
+        )
+        return DiscoveryReply(text="Расскажи чуть подробнее?", persisted=True)
+
+    spy = MagicMock(side_effect=reply)
+    monkeypatch.setattr("apps.orchestrator.concierge.generate_concierge_reply", spy)
+    return spy
+
+
+def _assistant_rows(user_id: int) -> list[Message]:
+    return list(
+        Message.all_tenants.filter(
+            conversation__bot_user__channel_user_id=str(user_id), role="assistant"
+        )
+    )
+
+
+class TestEchoInTheConciergeRow:
+    """DRF-2686 — переписка хранит ответ консьержа таким, каким его прочитали."""
+
+    ECHOED = "Я услышала: «привет»\n\nРасскажи чуть подробнее?"
+
+    def _voice(self, user_id: int) -> None:
+        _provider("привет")
+        with patch(_DOWNLOAD, return_value=ogg_of(2)):
+            max_handler.handle_global_max_event(
+                _msg(user_id=user_id, attachments=[AUDIO]), trace_id=str(uuid.uuid4())
+            )
+
+    def test_the_row_carries_the_echo_the_person_read(
+        self, sent, fake_redis, persisting_concierge, settings
+    ):
+        settings.VOICE_ECHO_MODE = "always"
+        self._voice(70031)
+        assert [c["text"] for c in sent] == [self.ECHOED]
+        (row,) = _assistant_rows(70031)  # одна строка — не дубль
+        assert row.content == row.rendered_text == sent[0]["text"]
+        assert (row.action_type, row.tokens_in, row.tokens_out) == ("concierge", 11, 5)
+
+    def test_no_echo_mode_leaves_the_row_as_written(
+        self, sent, fake_redis, persisting_concierge, settings
+    ):
+        settings.VOICE_ECHO_MODE = "never"
+        self._voice(70032)
+        (row,) = _assistant_rows(70032)
+        assert row.content == sent[0]["text"] == "Расскажи чуть подробнее?"
+
+    def test_typed_text_leaves_the_row_as_written(
+        self, sent, fake_redis, persisting_concierge, settings
+    ):
+        settings.VOICE_ECHO_MODE = "always"
+        max_handler.handle_global_max_event(
+            _msg(text="привет", user_id=70033), trace_id=str(uuid.uuid4())
+        )
+        (row,) = _assistant_rows(70033)
+        assert row.content == sent[0]["text"] == "Расскажи чуть подробнее?"
+
+    def test_a_blocked_reply_is_a_new_row_and_the_concierge_row_is_untouched(
+        self, sent, fake_redis, persisting_concierge, settings, monkeypatch
+    ):
+        """Гард заблокировал ответ: человеку ушла замена без эха, она и записана."""
+        from apps.orchestrator.safety.gate import OUTBOUND_ACTION_TYPE
+        from apps.orchestrator.safety.outbound import OutboundVerdict
+
+        settings.VOICE_ECHO_MODE = "always"
+        monkeypatch.setattr(
+            max_handler,
+            "guard_outbound",
+            lambda text, **kwargs: OutboundVerdict(allowed=False, text="Тут нужен человек."),
+        )
+        self._voice(70034)
+        assert [c["text"] for c in sent] == ["Тут нужен человек."]  # эха у замены нет
+        rows = {r.action_type: r.content for r in _assistant_rows(70034)}
+        assert rows == {
+            "concierge": "Расскажи чуть подробнее?",
+            OUTBOUND_ACTION_TYPE: "Тут нужен человек.",
+        }
+
+    def test_a_missing_row_does_not_cost_the_turn(self, sent, fake_redis, monkeypatch, settings):
+        """Консьерж сказал ``persisted``, а строки нет — ход всё равно доходит до человека."""
+        from apps.orchestrator.discovery import DiscoveryReply
+
+        settings.VOICE_ECHO_MODE = "always"
+        monkeypatch.setattr(
+            "apps.orchestrator.concierge.generate_concierge_reply",
+            MagicMock(return_value=DiscoveryReply(text="Расскажи чуть подробнее?", persisted=True)),
+        )
+        self._voice(70035)
+        assert [c["text"] for c in sent] == [self.ECHOED]
+        assert _assistant_rows(70035) == []
+
+
+#: Обычная речь, которая в ЭХЕ цепляла гард исходящего (DRF-2702): по одной
+#: фразе на класс. Входной гейт их пропускает — это не кризис и не неотложка.
+SPOKEN_THAT_TRIPPED_THE_GUARD = [
+    pytest.param("Запишите меня на массаж, мой номер 8 905 123 45 67.", id="contact-phone"),
+    pytest.param("Моя почта ivan@example.com", id="contact-email"),
+    pytest.param("Я выпила парацетамол, можно на массаж?", id="medical"),
+    pytest.param("Вы гарантируете результат?", id="promise"),
+    pytest.param("Хожу на маникюр раз в месяц.", id="planning"),
+    pytest.param("Болит три дня подряд.", id="nag"),
+]
+
+
+class TestEchoStaysOutOfTheGuard:
+    """DRF-2702 — гард исходящего проверяет ответ бота, а не слова человека в эхе."""
+
+    REPLY = "Расскажи чуть подробнее?"
+
+    def _voice(self, user_id: int, spoken: str) -> None:
+        _provider(spoken)
+        with patch(_DOWNLOAD, return_value=ogg_of(2)):
+            max_handler.handle_global_max_event(
+                _msg(user_id=user_id, attachments=[AUDIO]), trace_id=str(uuid.uuid4())
+            )
+
+    @pytest.mark.parametrize("spoken", SPOKEN_THAT_TRIPPED_THE_GUARD)
+    def test_the_persons_own_words_do_not_block_the_reply(
+        self, sent, fake_redis, concierge, settings, spoken
+    ):
+        from apps.orchestrator.safety.outbound import evaluate_outbound
+
+        settings.VOICE_ECHO_MODE = "always"
+        self._voice(70041, spoken)
+        ((heard, channel),) = _user_rows(70041)
+        assert channel == "voice"
+        echoed = f"Я услышала: «{heard}»\n\n{self.REPLY}"
+        # Узел не пустой: именно эта склейка до DRF-2702 шла в гард и блокировалась.
+        assert evaluate_outbound(echoed).blocked
+        assert [c["text"] for c in sent] == [echoed]
+        assert [(r.action_type, r.content) for r in _assistant_rows(70041)] == [("", echoed)]
+
+    def test_the_guard_never_sees_the_echo(
+        self, sent, fake_redis, concierge, settings, monkeypatch
+    ):
+        settings.VOICE_ECHO_MODE = "always"
+        seen: list[str] = []
+        real = max_handler.guard_outbound
+
+        def spy(text, **kwargs):
+            seen.append(text)
+            return real(text, **kwargs)
+
+        monkeypatch.setattr(max_handler, "guard_outbound", spy)
+        self._voice(70042, "привет")
+        assert seen[0] == self.REPLY
+        assert sent[0]["text"] == f"Я услышала: «привет»\n\n{self.REPLY}"
+        assert [t for t in seen if "Я услышала" in t] == []
+
+    def test_a_contact_in_the_bots_reply_is_still_blocked(
+        self, sent, fake_redis, monkeypatch, settings
+    ):
+        """Голос ничего не ослабил: телефон в ОТВЕТЕ бота блокируется, эха у замены нет."""
+        from apps.orchestrator.discovery import DiscoveryReply
+        from apps.orchestrator.safety.gate import OUTBOUND_ACTION_TYPE
+        from apps.orchestrator.safety.outbound import REPLACEMENT_TEXT
+
+        settings.VOICE_ECHO_MODE = "always"
+        monkeypatch.setattr(
+            "apps.orchestrator.concierge.generate_concierge_reply",
+            MagicMock(
+                return_value=DiscoveryReply(
+                    text="Телефон мастера: +7 999 123-45-67", persisted=False
+                )
+            ),
+        )
+        self._voice(70043, "привет")
+        assert [c["text"] for c in sent] == [REPLACEMENT_TEXT]
+        assert [r.action_type for r in _assistant_rows(70043)] == [OUTBOUND_ACTION_TYPE]
+
+    def test_a_model_written_echo_lookalike_is_checked(
+        self, sent, fake_redis, monkeypatch, settings
+    ):
+        """Исключение — конструкцией, не формой: «Я услышала…» от модели идёт в гард."""
+        from apps.orchestrator.discovery import DiscoveryReply
+        from apps.orchestrator.safety.outbound import REPLACEMENT_TEXT
+
+        settings.VOICE_ECHO_MODE = "always"
+        lookalike = "Я услышала: «привет»\n\nТелефон мастера: +7 999 123-45-67"
+        monkeypatch.setattr(
+            "apps.orchestrator.concierge.generate_concierge_reply",
+            MagicMock(return_value=DiscoveryReply(text=lookalike, persisted=False)),
+        )
+        max_handler.handle_global_max_event(
+            _msg(text="привет", user_id=70044), trace_id=str(uuid.uuid4())
+        )
+        assert [c["text"] for c in sent] == [REPLACEMENT_TEXT]
+
+
+def _everything_in_the_database() -> str:
+    """Все строки всех таблиц одним текстом (DRF-1943).
+
+    Обход по реестру моделей, включая авто-таблицы связей: новая таблица
+    попадает в проверку сама. Байты разворачиваются в текст, чтобы запись
+    голосового в ``BinaryField`` не прошла мимо.
+    """
+    from django.apps import apps as django_apps
+
+    def plain(value):
+        if isinstance(value, bytes | bytearray | memoryview):
+            return bytes(value).decode("latin-1")
+        return str(value)
+
+    chunks = []
+    for model in django_apps.get_models(include_auto_created=True):
+        for row in model._base_manager.values():
+            chunks.append(json.dumps(row, ensure_ascii=False, default=plain))
+    return "\n".join(chunks)
+
+
+class TestVoiceIsNotKept:
+    """DRF-1943 — решение владельца 06.10: «голос не храним, только текст»."""
+
+    URL_SIG = "SIG-MARKER-1943"
+    BYTES = b"VOICE-BYTES-1943"
+
+    def _voice_webhook(self, user_id: int) -> dict:
+        attachment = {
+            "type": "audio",
+            "payload": {
+                "id": 7,
+                "url": f"https://a.oneme.ru/v.ogg?sig={self.URL_SIG}",
+                "token": "TOKEN-MARKER-1943",
+            },
+        }
+        return _msg(user_id=user_id, mid=f"keep-{user_id}", attachments=[attachment])
+
+    def test_after_a_voice_turn_only_the_text_is_in_the_database(self, sent, fake_redis, concierge):
+        from apps.ingress.services import record_webhook
+
+        body = self._voice_webhook(70051)
+        audio = page(0, opus_head(0), flags=2) + page(96_000, self.BYTES, seq=1)
+        _provider("запиши меня на массаж")
+
+        # Приём (журнал, событие, аудит) и обработка — как в бою, подряд.
+        record_webhook(channel="max", external_event_id="keep-70051", raw_payload=body)
+        with patch(_DOWNLOAD, return_value=audio):
+            max_handler.handle_global_max_event(body, trace_id=str(uuid.uuid4()))
+
+        stored = _everything_in_the_database()
+        # Текст на месте, и журнал знает, что это было голосовое…
+        assert _user_rows(70051) == [("запиши меня на массаж", "voice")]
+        assert "запиши меня на массаж" in stored
+        assert '"redacted": "voice"' in stored
+        # …а записи и ссылки на неё нет ни в одной таблице.
+        assert self.URL_SIG not in stored
+        assert "TOKEN-MARKER-1943" not in stored
+        assert self.BYTES.decode() not in stored
+
+    def test_the_scan_does_see_a_link_that_is_stored(self):
+        """Калибровка: обход находит ссылку, если она в базе лежит."""
+        from apps.ingress.models import WebhookJournal
+
+        WebhookJournal.objects.create(
+            channel="max", external_event_id="keep-raw", raw_payload=self._voice_webhook(70052)
+        )
+        assert self.URL_SIG in _everything_in_the_database()

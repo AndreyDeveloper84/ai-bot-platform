@@ -147,10 +147,14 @@ class TestConfirmOutcomes:
         """Сбой канона → зеркало не сдвинуто → повтор того же нажатия несёт
         тот же ключ: если канон всё-таки перенёс, он ответит сохранённым."""
         mine = _proxy(home, _identity(home, ME, AYLA_UID))
+        # Повтор того же нажатия — то же время. Два вызова ``_when(9)`` берут
+        # ``now()`` дважды и на границе секунды дают разные времена, а с ними
+        # и разные ключи: узел краснел без дефекта (CI #2283, 04.10).
+        nine = _when(9)
         failing = _stub(monkeypatch, BookingUnavailableError("down"))
-        assert _confirm(client, mine, _when(9)).status_code == 502
+        assert _confirm(client, mine, nine).status_code == 502
         ok = _stub(monkeypatch)
-        assert _confirm(client, mine, _when(9)).status_code == 200
+        assert _confirm(client, mine, nine).status_code == 200
         assert _confirm(client, mine, _when(10)).status_code == 200
 
         first = failing.calls[0]["idempotency_key"]

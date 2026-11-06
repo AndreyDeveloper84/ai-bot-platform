@@ -115,7 +115,7 @@ export function HelloScreen() {
   return (
     <ScreenLayout
       back={BACK}
-      title={`Здравствуйте, ${name}!`}
+      title={`Привет, ${name}!`}
       cta={<StickyCta onClick={() => navigate("/customer/catalog")}>Записаться</StickyCta>}
     >
       <p>Помогу записаться в студию {tenant.name}.</p>

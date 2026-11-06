@@ -2,7 +2,7 @@
 
 Consumes ``knowledge.approved`` events from the colleague's
 ``Shiro-Py/salon-knowledge`` Django app. The architectural decision (see
-``docs/design/2026-05-18-phase-5-architecture-comparison.md``): the bot
+``docs/design/legacy/2026-05-18-phase-5-architecture-comparison.md``): the bot
 retrieves locally from ChromaDB, never query-time HTTP to Shiro-Py.
 This webhook is how per-salon content lands in our store: an approved
 KnowledgeDocument on the colleague's side fires here, we upsert a

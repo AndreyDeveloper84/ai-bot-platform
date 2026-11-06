@@ -1,6 +1,9 @@
 import { defaultExclude, defineConfig } from "vitest/config";
+import { loadEnv } from "vite";
 import react from "@vitejs/plugin-react";
 import path from "node:path";
+
+import { missingInProduction } from "./build-env";
 
 import { NODE_ENVIRONMENT_TESTS } from "./src/test/node-tests";
 
@@ -8,67 +11,78 @@ import { NODE_ENVIRONMENT_TESTS } from "./src/test/node-tests";
 // every route — the Mini App platform doesn't do server-side routing.
 // Backend (Django) runs on :8000 in dev; Vite proxies /api/v1/customer/*
 // so the frontend can use relative URLs identical to prod.
-export default defineConfig({
-  plugins: [react()],
-  resolve: {
-    alias: {
-      "@": path.resolve(__dirname, "./src"),
-    },
-  },
-  server: {
-    port: 5173,
-    proxy: {
-      "/api/v1/customer": {
-        target: "http://localhost:8000",
-        changeOrigin: true,
+export default defineConfig(({ mode }) => {
+  // DRF-2654: production-сборка без обязательной переменной — отказ с её
+  // именем. `loadEnv` берёт и `.env.*`, и уже заданное окружение процесса.
+  const missing = missingInProduction(mode, loadEnv(mode, process.cwd(), "VITE_"));
+  if (missing.length > 0) {
+    throw new Error(
+      `DRF-2654: production build needs ${missing.join(", ")} — set it at deploy time ` +
+        "(docs/runbooks/miniapp-build-env.md); an empty value is not a value",
+    );
+  }
+  return {
+    plugins: [react()],
+    resolve: {
+      alias: {
+        "@": path.resolve(__dirname, "./src"),
       },
     },
-  },
-  build: {
-    target: "es2022",
-    sourcemap: true,
-    // MAX Mini App container is a recent Chromium — no legacy polyfills needed.
-    cssCodeSplit: true,
-  },
-  // DRF-2389 — два набора тестов, два окружения.
-  //
-  // Замер 24.09.2026 (209 файлов, 2081 тест): полный прогон тратит на
-  // ПОСТРОЕНИЕ окружения 1167 с рабочего времени против 332 с на самих
-  // тестах — 60 % против 19 %. При этом 47 файлов не касаются DOM вовсе:
-  // на них окружение стоило 261 с, а под node — 20 мс.
-  //
-  // Изоляция НЕ МЕНЯЕТСЯ: каждый файл по-прежнему получает своё свежее
-  // окружение, просто дешёвое. Варианты, которые её меняют, замерены и
-  // отвергнуты — см. `src/test/node-tests.ts`.
-  test: {
-    css: false,
-    projects: [
-      {
-        extends: true,
-        test: {
-          name: "node",
-          environment: "node",
-          setupFiles: "./src/test/setup.node.ts",
-          // Список ЯВНЫЙ и конечный, как реестр долга у линтера:
-          // пополняется только после прогона файла под node.
-          include: [...NODE_ENVIRONMENT_TESTS],
+    server: {
+      port: 5173,
+      proxy: {
+        "/api/v1/customer": {
+          target: "http://localhost:8000",
+          changeOrigin: true,
         },
       },
-      {
-        extends: true,
-        test: {
-          name: "dom",
-          environment: "jsdom",
-          // DRF-2597: сторож запоздавшего вызова — ПОСЛЕ setup.ts, чтобы его
-          // `afterEach` шёл раньше размонтирования (порядок хуков — stack).
-          // DRF-2617: учёт таймеров — ПЕРВЫМ, раньше, чем кто-либо запомнит setTimeout.
-          setupFiles: ["./src/test/timerLedger.ts", "./src/test/setup.ts", "./src/test/lateCallGuard.ts"],
-          include: ["src/**/*.test.{ts,tsx}"],
-          // `defaultExclude` обязателен: своё `exclude` затирает умолчания
-          // vitest (node_modules, dist), и прогон полез бы в зависимости.
-          exclude: [...defaultExclude, ...NODE_ENVIRONMENT_TESTS],
+    },
+    build: {
+      target: "es2022",
+      sourcemap: true,
+      // MAX Mini App container is a recent Chromium — no legacy polyfills needed.
+      cssCodeSplit: true,
+    },
+    // DRF-2389 — два набора тестов, два окружения.
+    //
+    // Замер 24.09.2026 (209 файлов, 2081 тест): полный прогон тратит на
+    // ПОСТРОЕНИЕ окружения 1167 с рабочего времени против 332 с на самих
+    // тестах — 60 % против 19 %. При этом 47 файлов не касаются DOM вовсе:
+    // на них окружение стоило 261 с, а под node — 20 мс.
+    //
+    // Изоляция НЕ МЕНЯЕТСЯ: каждый файл по-прежнему получает своё свежее
+    // окружение, просто дешёвое. Варианты, которые её меняют, замерены и
+    // отвергнуты — см. `src/test/node-tests.ts`.
+    test: {
+      css: false,
+      projects: [
+        {
+          extends: true,
+          test: {
+            name: "node",
+            environment: "node",
+            setupFiles: "./src/test/setup.node.ts",
+            // Список ЯВНЫЙ и конечный, как реестр долга у линтера:
+            // пополняется только после прогона файла под node.
+            include: [...NODE_ENVIRONMENT_TESTS],
+          },
         },
-      },
-    ],
-  },
+        {
+          extends: true,
+          test: {
+            name: "dom",
+            environment: "jsdom",
+            // DRF-2597: сторож запоздавшего вызова — ПОСЛЕ setup.ts, чтобы его
+            // `afterEach` шёл раньше размонтирования (порядок хуков — stack).
+            // DRF-2617: учёт таймеров — ПЕРВЫМ, раньше, чем кто-либо запомнит setTimeout.
+            setupFiles: ["./src/test/timerLedger.ts", "./src/test/setup.ts", "./src/test/lateCallGuard.ts"],
+            include: ["src/**/*.test.{ts,tsx}"],
+            // `defaultExclude` обязателен: своё `exclude` затирает умолчания
+            // vitest (node_modules, dist), и прогон полез бы в зависимости.
+            exclude: [...defaultExclude, ...NODE_ENVIRONMENT_TESTS],
+          },
+        },
+      ],
+    },
+  };
 });

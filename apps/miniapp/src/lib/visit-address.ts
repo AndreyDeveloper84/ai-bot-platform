@@ -30,7 +30,7 @@
 export const ADDRESS_SAID_NONE = "Адрес не указан";
 
 /** Источник промолчал — человеку есть у кого спросить. */
-export const ADDRESS_UNKNOWN = "Уточните адрес в салоне";
+export const ADDRESS_UNKNOWN = "Уточни адрес в салоне";
 
 /**
  * Фраза для показа человеку.

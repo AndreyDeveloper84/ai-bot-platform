@@ -9,8 +9,8 @@
 404 ``dialog.not.found``. Замер на боевом контуре 07.09.2026, один
 человек и один салонный бот (`docs/OPEN_DECISIONS.md` §55)::
 
-    POST /messages?user_id=260237491   → 200, доставлено
-    POST /messages?chat_id=518410834   → 404 dialog.not.found
+    POST /messages?user_id=200000001   → 200, доставлено
+    POST /messages?chat_id=500000004   → 404 dialog.not.found
 
 **Почему тест здесь может краснеть, а прогон на боевом — нет.** Отказ
 воспроизводится только при определённом составе окружения (`MAX_BOTS`
@@ -53,8 +53,8 @@ def tenant() -> Tenant:
 
 # Числа взяты из живого замера §55, а не выдуманы: несовпадение двух
 # идентификаторов ОДНОГО человека в личном диалоге — и есть предмет теста.
-MEASURED_USER_ID = "260237491"
-MEASURED_CHAT_ID = "518410834"
+MEASURED_USER_ID = "200000001"
+MEASURED_CHAT_ID = "500000004"
 
 
 class TestProactiveAddressing:

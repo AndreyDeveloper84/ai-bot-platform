@@ -131,7 +131,7 @@ class TestDiscoveryRefusals:
         # said «Показать мастеров по одной из них», which was an offer
         # nothing on screen could accept.
         assert "«Массаж спины»" in reply.text
-        assert "Выберите одну из них" in reply.text
+        assert "Выбери одну из них" in reply.text
         assert _callbacks(reply) == ["Массаж спины", "Обёртывание"]
 
     def test_refusal_without_alternatives_still_offers_the_salon_list(self) -> None:
@@ -322,7 +322,7 @@ class TestHandoffDeadEnds:
 
         reply = handoff_mod._unavailable_reply(tenant.id)
 
-        assert "посмотрите, что ещё есть в этом салоне" in reply.text
+        assert "посмотри, что ещё есть в этом салоне" in reply.text
         assert _callbacks(reply) == [f"{CALLBACK_CATALOG_SERVICES_PREFIX}{tenant.id}"]
         tapped = execute_catalog_callback(_callbacks(reply)[0])
         assert tapped is not None
@@ -335,7 +335,7 @@ class TestHandoffDeadEnds:
 
         # The wording differs from the branch above because the offer does:
         # with T unresolved there is no «этот салон» to point at.
-        assert "посмотрите наши салоны" in reply.text
+        assert "посмотри наши салоны" in reply.text
         assert _callbacks(reply) == [CALLBACK_CATALOG_SALONS]
 
     def test_master_with_no_bookable_service_still_offers_the_salon(self) -> None:

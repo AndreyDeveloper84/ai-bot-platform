@@ -135,6 +135,17 @@ deliberately did not change (OD-T02-1 scope: "envelope без tenant_id —
 in the boot log as "this is the complete ingest surface"; the log line names
 the four exempt events.
 
+**DRF-2984 — the subscription mirror events are NOT in the carve-out.**
+`subscription.trial_started`, `subscription.renewed`, `subscription.frozen`
+and `subscription.canceled` are always tenant-scoped (the platform
+subscription lives on the catalog tenant), so they pass the allowlist like any
+booking event: until they are listed in `EVENT_INGEST_ALLOWED_EVENTS` (and the
+salon in `EVENT_INGEST_ALLOWED_TENANTS`) the stand dead-letters them and the
+tenant's `subscription_status` mirror stays `none`. The same holds for
+`subscription.activated` / `subscription.past_due` when they carry a
+`tenant_id`. The catalog side additionally needs the topics in its
+`OUTBOX_EXTERNAL_DELIVERY_TOPICS`.
+
 Two properties bound that carve-out:
 
 * **It is observable.** Every admitted tenant-null envelope emits

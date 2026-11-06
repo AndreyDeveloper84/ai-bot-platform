@@ -538,7 +538,7 @@ class TestHealthCheckHandoff:
         assert "error" in body, "ответ не тот — проверка ниже была бы про пустоту"
         assert body["error"] in HEALTH_SLUGS
         assert "booking" not in body, f"{code}: поверхность вернула запись"
-        assert "Вы записаны" not in json.dumps(body, ensure_ascii=False)
+        assert "Запись подтверждена" not in json.dumps(body, ensure_ascii=False)
 
     @pytest.mark.parametrize("code", ALL_HEALTH_CODES)
     def test_the_person_reads_no_technical_text(

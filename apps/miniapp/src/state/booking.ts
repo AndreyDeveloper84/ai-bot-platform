@@ -42,6 +42,49 @@ export const setMaster = (id: string, name: string) => {
   state = { ...state, masterId: id, masterName: name };
   emit();
 };
+/**
+ * DRF-2752 — услуга ЭТОГО пути записи: её называет экран или адрес, и она
+ * главнее того, что осталось в черновике.
+ *
+ * Адрес (`?service=`) и черновик — не два независимых источника истины.
+ * До этого листа они могли молча расходиться: услуга ехала по адресу, а
+ * экран времени читал черновик — пустой (человека выбрасывало в каталог)
+ * или оставшийся от прошлого выбора (окна и подтверждение шли по чужой
+ * услуге).
+ *
+ * - Та же услуга — черновик не трогается; имя дописывается, если стало
+ *   известно, и **никогда не затирается пустым**: подтверждение показывает
+ *   его человеку.
+ * - Другая услуга — это другой путь. Всё, что относилось к прежнему, к нему
+ *   не относится: мастер, время, источник входа и перенос чужой записи.
+ */
+export const alignService = (id: string, name = "") => {
+  if (state.serviceId === id) {
+    if (name && state.serviceName !== name) {
+      state = { ...state, serviceName: name };
+      emit();
+    }
+    return;
+  }
+  state = { ...EMPTY, serviceId: id, serviceName: name };
+  emit();
+};
+/**
+ * DRF-2752 — мастер ЭТОГО пути: тот, чьё время человек выбирает. Тот же
+ * мастер — имя дописывается и не затирается пустым. Другой — время,
+ * выбранное у прежнего, больше не выбрано.
+ */
+export const alignMaster = (id: string, name = "") => {
+  if (state.masterId === id) {
+    if (name && state.masterName !== name) {
+      state = { ...state, masterName: name };
+      emit();
+    }
+    return;
+  }
+  state = { ...state, masterId: id, masterName: name, visitAt: null };
+  emit();
+};
 export const setVisitAt = (visitAt: string | null) => {
   state = { ...state, visitAt };
   emit();

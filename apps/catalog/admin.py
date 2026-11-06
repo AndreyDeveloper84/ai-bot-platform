@@ -37,6 +37,7 @@ from apps.catalog.models import (
 from apps.catalog.provenance import MasterServiceSource, master_service_write
 from apps.catalog.services import verification
 from apps.catalog.tasks import sync_catalog_for_tenant
+from apps.tenancy.billing_gate import MasterAddVerdict, master_add_verdict
 
 
 #: Как выглядит отсутствие значения на экранах каталога.
@@ -727,6 +728,12 @@ class CatalogMasterAdmin(_MirrorAdminBase):
                 "Этим мастерам приглашение реально выписано; принять его "
                 "может только сама мастер."
             )
+        if outcome.billing_blocked:
+            # DRF-2984 B2 — та же логика: действие строк не коснулось, причина словами.
+            text += (
+                f" Не подтверждено — не пускает подписка салона: {outcome.billing_blocked}. "
+                "Салон заморожен, отменён или соло ещё не перешёл на тариф «Салон»."
+            )
         self.message_user(request, text, level=messages.SUCCESS)
 
     @admin.action(
@@ -804,8 +811,16 @@ class CatalogMasterAdmin(_MirrorAdminBase):
     )
     def unarchive_masters(self, request, queryset) -> None:  # type: ignore[no-untyped-def]
         restored = 0
+        billing_blocked = 0
         for master in queryset:
             if master.archived_at is None:
+                continue
+            # DRF-2984 B2 — возврат из архива делает мастера активным в салоне.
+            if (
+                master_add_verdict(master.tenant, master_id=master.id)
+                is not MasterAddVerdict.ALLOWED
+            ):
+                billing_blocked += 1
                 continue
             master.archived_at = None
             master.archive_reason = ""
@@ -814,7 +829,13 @@ class CatalogMasterAdmin(_MirrorAdminBase):
             restored += 1
         self.message_user(
             request,
-            f"Извлечено из архива: {restored}. Не были в архиве: {len(queryset) - restored}.",
+            f"Извлечено из архива: {restored}. "
+            f"Не были в архиве: {len(queryset) - restored - billing_blocked}."
+            + (
+                f" Не извлечено — не пускает подписка салона: {billing_blocked}."
+                if billing_blocked
+                else ""
+            ),
             level=messages.SUCCESS,
         )
 
@@ -837,6 +858,11 @@ class CatalogMasterAdmin(_MirrorAdminBase):
     #: ``test_every_refusal_slug_has_a_word_for_the_operator``: новый отказ
     #: без слова напечатал бы код, а экран читает человек.
     ONBOARD_REFUSAL_WORDS: ClassVar[dict[str, str]] = {
+        # DRF-2984 B2 — гейт подписки (apps.tenancy.billing_gate).
+        "subscription_frozen": "Подписка салона заморожена — нового мастера не подключить до оплаты.",
+        "subscription_canceled": "Подписка салона отменена — нового мастера не подключить.",
+        "plan_change_required": "Соло-кабинет: второй мастер требует перехода на тариф «Салон», "
+        "его подтверждает владелец в разделе «Биллинг».",
         "foreign_tenant": "Оператор не может действовать в этом салоне.",
         "tenant_inactive": (
             "Салон выключен — подключать мастеров нельзя. Сначала явно "

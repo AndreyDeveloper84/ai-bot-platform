@@ -2,7 +2,7 @@
 
 Typed wrapper around :class:`httpx.Client` for Ayla's read-only internal
 catalog surface (`SalonService` → `SpecialistService`, per
-``docs/CATALOG_INTERNAL_API_CONTRACT.md`` on the Ayla repo). The upserter
+``beautygo_backend/docs/CATALOG_INTERNAL_API_CONTRACT.md`` on the Ayla repo). The upserter
 (:mod:`apps.catalog.services.upserter`) consumes the returned DTOs.
 
 Covers all three read surfaces the mirror needs:
@@ -85,6 +85,7 @@ from apps.catalog.services.throttle import ThrottleWaitBudget
 from apps.integrations.ayla.url_builder import AylaUrlBuilder, AylaUrlError
 from apps.integrations.ayla.offer_refusal import KNOWN_REASONS
 from apps.integrations.ayla.request_id import with_request_id
+from apps.integrations.ayla.salon_service_duration import salon_service_duration_field
 
 logger = logging.getLogger(__name__)
 
@@ -188,7 +189,7 @@ class CatalogSpecialistServiceDTO:
 
     Ayla's canonical **bookable edge** (``SpecialistService``) — the
     master↔service relation the ``MasterService`` mirror is built from
-    (DRF-945). Per ``docs/CATALOG_INTERNAL_API_CONTRACT.md`` §2:
+    (DRF-945). Per ``beautygo_backend/docs/CATALOG_INTERNAL_API_CONTRACT.md`` §2:
 
     * ``ayla_specialist_service_id`` — ``SpecialistService.id``, the stable
       booking key and this mirror's provenance stamp.
@@ -1011,8 +1012,15 @@ class CatalogHttpClient:
         actor: str,
         correlation_id: str,
         idempotency_key: str,
+        role: str = "admin",
+        assigned_by_external_user_id: str = "",
     ) -> LinkedSalonAdminDTO:
         """Свежий администратор салона в каталоге + связь с MAX-личностью (DRF-2085).
+
+        DRF-2826: ``role="receptionist"`` заводит ресепшна — только вместе с
+        ``assigned_by_external_user_id`` администратора ЭТОГО салона; каталог
+        проверяет его сам (``assigner_not_admin``). Для ``admin`` тело
+        прежнее, лишних полей нет.
 
         ``POST /api/v1/internal/tenants/<slug>/salon-admins/`` под
         ``AYLA_SALON_ADMIN_LINK_TOKEN`` — не под общим Bearer и не под
@@ -1045,15 +1053,19 @@ class CatalogHttpClient:
         except AylaUrlError as exc:
             raise CatalogTransportError(f"invalid AYLA_BASE_URL: {exc}") from exc
 
+        body = {
+            "external_user_id": external_user_id,
+            "actor": actor,
+            "correlation_id": correlation_id,
+            "idempotency_key": idempotency_key,
+        }
+        if role != "admin":
+            body["role"] = role
+            body["assigned_by_external_user_id"] = assigned_by_external_user_id
         try:
             response = self._client().post(
                 url,
-                json={
-                    "external_user_id": external_user_id,
-                    "actor": actor,
-                    "correlation_id": correlation_id,
-                    "idempotency_key": idempotency_key,
-                },
+                json=body,
                 headers=with_request_id(
                     {
                         "Authorization": f"Bearer {token}",
@@ -1790,7 +1802,12 @@ def _parse_salon_service(row: dict[str, Any]) -> CatalogSalonServiceDTO:
         is_active=bool(row.get("is_active", True)),
         requires_health_check=bool(row.get("requires_health_check", False)),
         price_from=_parse_decimal(row.get("base_price")),
-        duration_min=_parse_int(row.get("duration_minutes")),
+        # DRF-2705: the RESOLVED salon-level duration (salon → template) when
+        # the catalog sends it. The raw ``duration_minutes`` is ``null`` for
+        # every service that takes its timing from the template, and
+        # mirroring that ``null`` made the Mini App refuse slots for a
+        # service the catalog sells.
+        duration_min=_parse_int(salon_service_duration_field(row)),
         template=row.get("template"),
         category=row.get("category"),
         goals=_parse_goals(row.get("goals")),

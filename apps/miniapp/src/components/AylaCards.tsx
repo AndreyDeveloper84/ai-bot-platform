@@ -170,7 +170,7 @@ function AylaCardView({
                 <button
                   type="button"
                   className="ayla-card__option"
-                  onClick={() => onSelect(o.name, {})}
+                  onClick={() => onSelect(o.name, { service_id: o.service_id })}
                 >
                   {o.name}
                   {o.duration_min

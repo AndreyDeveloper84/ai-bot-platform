@@ -101,6 +101,31 @@ def food_text_estimate_keyboard() -> list[dict[str, str]]:
     )
 
 
+def food_text_items_keyboard() -> list[dict[str, str]]:
+    """DRF-2768 — карточка нескольких позиций одной фразой.
+
+    «В дневник» пишет все позиции; граммы позиций не правятся по одной —
+    «Изменить» просит написать фразу заново.
+    """
+    return _to_keyboard(
+        Button(label="✅ В дневник", callback="cb:food:text_log"),
+        Button(label="✏️ Изменить", callback="cb:food:text_edit"),
+        Button(label="❌ Не то", callback="cb:food:text_reject"),
+    )
+
+
+def food_text_unpriced_keyboard() -> list[dict[str, str]]:
+    """DRF-2768 — «Сейчас не удалось рассчитать калорийность. Записать без расчёта?».
+
+    Действия — решение владельца 06.10 дословно: сохранить / изменить / отменить.
+    """
+    return _to_keyboard(
+        Button(label="💾 Сохранить", callback="cb:food:text_save"),
+        Button(label="✏️ Изменить", callback="cb:food:text_edit"),
+        Button(label="❌ Отменить", callback="cb:food:text_cancel"),
+    )
+
+
 #: DRF-1838 — тап под сохранённой записью. Один шаблон на маршрут скилла
 #: (``food_clarify.text_entry``) и на историю (``nutrition_global.resolve_food_tap``):
 #: две копии разошлись бы, и тап лёг бы в историю мимо выбора H2.

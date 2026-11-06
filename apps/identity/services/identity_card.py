@@ -226,14 +226,20 @@ def render_for_person(card: IdentityCard, *, tenant_slug: str | None) -> str:
     ``tenant_slug`` is the bot they are talking to: the salon bot shows the
     shell in that salon; the client bot (``None``) shows the global shell.
     Every other salon is a number, never a name.
+
+    DRF-2712 — обращение. Канон Ayla к клиенту — «ты»; на сотрудника решение
+    не распространяется. Роль здесь уже известна (её же карточка и печатает),
+    поэтому «вы» остаётся только тому, у кого в ЭТОМ салоне есть рабочая
+    роль. Клиентский бот (``None``), человек без роли и незнакомец — «ты».
     """
     if not card.found:
-        return "Я вас пока не знаю: в этом боте у вас нет ни одной записи."
+        return "Я тебя пока не знаю: в этом боте у тебя нет ни одной записи."
     mine = [s for s in card.shells if (s.tenant_slug == tenant_slug if tenant_slug else True)]
     if tenant_slug is not None:
         mine = mine[:1]
     others = len(card.shells) - len(mine)
-    lines = ["Что я о вас знаю:"]
+    is_staff_here = tenant_slug is not None and any(s.roles for s in mine)
+    lines = ["Что я о вас знаю:" if is_staff_here else "Что я о тебе знаю:"]
     for s in mine:
         lines.append(f"• имя: {s.display_name or 'не указано'}")
         lines.append(f"• телефон: {s.phone or 'не указан'}")

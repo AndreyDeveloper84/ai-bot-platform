@@ -1,6 +1,6 @@
 """DIY circuit breaker (DRF-428 / D1).
 
-Implements CR-3 from PHASE0_DESIGN.md: closes the 3-month single-
+Implements CR-3 from mysite/docs/arch/PHASE0_DESIGN.md: closes the 3-month single-
 provider window before multi-LLM routing lands in Sprint 7. ADR-0005
 calls for an `LLMProvider` Protocol; this breaker is the resilience
 primitive that wraps every provider implementation.

@@ -46,7 +46,7 @@ class TestNoSecondRegistryWalk:
     def test_menu_tap_calls_booking_directly(self):
         booking = MagicMock()
         booking.name = "booking"
-        booking.handle.return_value = SkillResult(reply_text="Выберите мастера:")
+        booking.handle.return_value = SkillResult(reply_text="Выбери мастера:")
 
         with (
             patch("apps.skills.registry.registered", return_value=[booking]),
@@ -57,7 +57,7 @@ class TestNoSecondRegistryWalk:
         dispatch.assert_not_called()  # no second registry walk
         booking.handle.assert_called_once()
         assert booking.handle.call_args.args[0].message_text == "Хочу записаться"
-        assert result.reply_text == "Выберите мастера:"
+        assert result.reply_text == "Выбери мастера:"
 
     def test_a_greedy_upstream_skill_cannot_intercept_the_tap(self):
         """The exact shape of the bug: a skill registered ABOVE booking
@@ -68,13 +68,13 @@ class TestNoSecondRegistryWalk:
         greedy.handle.return_value = SkillResult(reply_text="Какая у тебя цель?")
         booking = MagicMock()
         booking.name = "booking"
-        booking.handle.return_value = SkillResult(reply_text="Выберите мастера:")
+        booking.handle.return_value = SkillResult(reply_text="Выбери мастера:")
 
         with patch("apps.skills.registry.registered", return_value=[greedy, booking]):
             result = MenuSkill().handle(_ctx(CALLBACK_MENU_BOOK))
 
         greedy.handle.assert_not_called()
-        assert result.reply_text == "Выберите мастера:"
+        assert result.reply_text == "Выбери мастера:"
 
     def test_missing_booking_skill_degrades_to_menu(self):
         with patch("apps.skills.registry.registered", return_value=[]):
@@ -195,10 +195,10 @@ class TestHandoffIsGatedOnExplicitIntent:
     def test_normal_booking_replies_pass_through_on_both_paths(self):
         booking = MagicMock()
         booking.name = "booking"
-        booking.handle.return_value = SkillResult(reply_text="Выберите время:")
+        booking.handle.return_value = SkillResult(reply_text="Выбери время:")
         with patch("apps.skills.registry.registered", return_value=[booking]):
-            assert MenuSkill().handle(_ctx("Хочу массаж")).reply_text == "Выберите время:"
-            assert MenuSkill().handle(_ctx(CALLBACK_MENU_BOOK)).reply_text == "Выберите время:"
+            assert MenuSkill().handle(_ctx("Хочу массаж")).reply_text == "Выбери время:"
+            assert MenuSkill().handle(_ctx(CALLBACK_MENU_BOOK)).reply_text == "Выбери время:"
 
 
 class TestCatalogReadIsFailSoftForReal:

@@ -23,20 +23,18 @@ from __future__ import annotations
 
 import uuid
 from datetime import timedelta
+from unittest.mock import patch
 
 import pytest
 from django.utils import timezone
 
-from unittest.mock import patch
-
 from apps.identity.models import MemoryEntry, RedZoneAccessLog, UserPersonalContext
 from apps.identity.services.exceptions import ZonePromotionRequiresConsent
-
-
 from apps.identity.services.memory_writer import (
     promote_zone,
     write_entry,
 )
+from apps.identity.tests._red_zone_consent import grant_memory_zone_consents
 
 
 def _adult():
@@ -63,7 +61,11 @@ pytestmark = pytest.mark.django_db
 
 @pytest.fixture
 def upc():
-    return UserPersonalContext.objects.create(user_id=uuid.uuid4())
+    # DRF-2542 §1: писатель спрашивает журнал согласий зоны. Согласие выдано,
+    # чтобы узлы доходили до своего предмета — возраста, отказа базы, перехода.
+    context = UserPersonalContext.objects.create(user_id=uuid.uuid4())
+    grant_memory_zone_consents(context.user_id)
+    return context
 
 
 # ───────────────────────────────────────────────────────────────────────

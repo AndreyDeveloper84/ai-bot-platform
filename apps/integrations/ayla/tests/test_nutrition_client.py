@@ -135,7 +135,7 @@ class TestScanPhoto:
         monkeypatch.setattr(
             nc,
             "_fire_breaker_alert",
-            lambda transition, failures: alerts.append((transition, failures)),
+            lambda transition, failures, **_: alerts.append((transition, failures)),
         )
 
         def handler(_: httpx.Request) -> httpx.Response:
@@ -166,7 +166,7 @@ class TestScanPhoto:
         monkeypatch.setattr(
             nc,
             "_fire_breaker_alert",
-            lambda transition, failures: alerts.append((transition, failures)),
+            lambda transition, failures, **_: alerts.append((transition, failures)),
         )
 
         # Drive a fast time-skip via patching ``time.monotonic`` in the
@@ -244,6 +244,7 @@ class TestLogMeal:
             external_user_id="bot:1",
             dish_name="Cottage cheese",
             meal_type="breakfast",
+            ai_estimate_allowed=True,
         )
         assert result.log_id == "log-7"
         assert result.calories == 220

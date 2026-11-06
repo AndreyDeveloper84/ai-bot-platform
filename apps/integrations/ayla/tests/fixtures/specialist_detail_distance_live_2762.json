@@ -1,0 +1,187 @@
+{
+  "_source": {
+    "captured_on": "2026-10-03",
+    "catalog_repo": "beautygo_backend",
+    "how": "Catalog test database, synthetic masters and points; the query is what the client sent.",
+    "what": "Live responses of the catalog GET internal/specialists/{id}/ with and without ?lat&lon (DRF-2762) - captured by the ayla-7a window, not hand-written."
+  },
+  "responses": {
+    "no_place_with_point": {
+      "body": {
+        "accepting_bookings": true,
+        "address": "",
+        "avatar": null,
+        "bio": "",
+        "created_at": "2026-10-03T05:06:33.951229+03:00",
+        "display_name": "Мастер 2",
+        "distance_km": null,
+        "distance_meters": null,
+        "experience_years": 0,
+        "id": "d71f498b-b2a8-4c88-a15d-1960cc649c30",
+        "is_available": true,
+        "is_booking_enabled": true,
+        "location_lat": null,
+        "location_lng": null,
+        "portfolio": [],
+        "rating": "0.0",
+        "recent_reviews": [],
+        "reviews_count": 0,
+        "reviews_summary": {
+          "average": 0.0,
+          "count": 0,
+          "distribution": {
+            "1": 0,
+            "2": 0,
+            "3": 0,
+            "4": 0,
+            "5": 0
+          }
+        },
+        "services": [],
+        "services_count": 0,
+        "tenant": "ac73eba4-7a76-4a32-b0cb-18e785bb7eb4",
+        "tenant_address": null,
+        "tenant_city": null,
+        "user_id": "586bd1d7-cf92-4949-a3c5-5b6bb3bc346a",
+        "working_hours": []
+      },
+      "query": {
+        "lat": "53.200000",
+        "lon": "45.000000"
+      },
+      "status": 200
+    },
+    "not_a_point_nan": {
+      "body": {
+        "accepting_bookings": true,
+        "address": "точка 53.195878, 45.018316",
+        "avatar": null,
+        "bio": "",
+        "created_at": "2026-10-03T05:06:31.879058+03:00",
+        "display_name": "Мастер 1",
+        "distance_km": null,
+        "distance_meters": null,
+        "experience_years": 0,
+        "id": "488acaba-8190-4390-b6bb-81a48e8b6a0b",
+        "is_available": true,
+        "is_booking_enabled": true,
+        "location_lat": "53.195878",
+        "location_lng": "45.018316",
+        "portfolio": [],
+        "rating": "0.0",
+        "recent_reviews": [],
+        "reviews_count": 0,
+        "reviews_summary": {
+          "average": 0.0,
+          "count": 0,
+          "distribution": {
+            "1": 0,
+            "2": 0,
+            "3": 0,
+            "4": 0,
+            "5": 0
+          }
+        },
+        "services": [],
+        "services_count": 0,
+        "tenant": "ac73eba4-7a76-4a32-b0cb-18e785bb7eb4",
+        "tenant_address": null,
+        "tenant_city": null,
+        "user_id": "069f5457-d814-4e6e-9ae1-2047805a7067",
+        "working_hours": []
+      },
+      "query": {
+        "lat": "nan",
+        "lon": "45.0"
+      },
+      "status": 200
+    },
+    "with_point": {
+      "body": {
+        "accepting_bookings": true,
+        "address": "точка 53.195878, 45.018316",
+        "avatar": null,
+        "bio": "",
+        "created_at": "2026-10-03T05:06:31.879058+03:00",
+        "display_name": "Мастер 1",
+        "distance_km": 1.3033118251056248,
+        "distance_meters": 1303,
+        "experience_years": 0,
+        "id": "488acaba-8190-4390-b6bb-81a48e8b6a0b",
+        "is_available": true,
+        "is_booking_enabled": true,
+        "location_lat": "53.195878",
+        "location_lng": "45.018316",
+        "portfolio": [],
+        "rating": "0.0",
+        "recent_reviews": [],
+        "reviews_count": 0,
+        "reviews_summary": {
+          "average": 0.0,
+          "count": 0,
+          "distribution": {
+            "1": 0,
+            "2": 0,
+            "3": 0,
+            "4": 0,
+            "5": 0
+          }
+        },
+        "services": [],
+        "services_count": 0,
+        "tenant": "ac73eba4-7a76-4a32-b0cb-18e785bb7eb4",
+        "tenant_address": null,
+        "tenant_city": null,
+        "user_id": "069f5457-d814-4e6e-9ae1-2047805a7067",
+        "working_hours": []
+      },
+      "query": {
+        "lat": "53.200000",
+        "lon": "45.000000"
+      },
+      "status": 200
+    },
+    "without_point": {
+      "body": {
+        "accepting_bookings": true,
+        "address": "точка 53.195878, 45.018316",
+        "avatar": null,
+        "bio": "",
+        "created_at": "2026-10-03T05:06:31.879058+03:00",
+        "display_name": "Мастер 1",
+        "distance_km": null,
+        "distance_meters": null,
+        "experience_years": 0,
+        "id": "488acaba-8190-4390-b6bb-81a48e8b6a0b",
+        "is_available": true,
+        "is_booking_enabled": true,
+        "location_lat": "53.195878",
+        "location_lng": "45.018316",
+        "portfolio": [],
+        "rating": "0.0",
+        "recent_reviews": [],
+        "reviews_count": 0,
+        "reviews_summary": {
+          "average": 0.0,
+          "count": 0,
+          "distribution": {
+            "1": 0,
+            "2": 0,
+            "3": 0,
+            "4": 0,
+            "5": 0
+          }
+        },
+        "services": [],
+        "services_count": 0,
+        "tenant": "ac73eba4-7a76-4a32-b0cb-18e785bb7eb4",
+        "tenant_address": null,
+        "tenant_city": null,
+        "user_id": "069f5457-d814-4e6e-9ae1-2047805a7067",
+        "working_hours": []
+      },
+      "query": {},
+      "status": 200
+    }
+  }
+}

@@ -551,7 +551,7 @@ class TestCatalogChips:
         for name, address in rows:
             assert name in reply.text
             assert address in reply.text
-        assert "Нажмите на салон" in reply.text  # the tail survived too
+        assert "Нажми на салон" in reply.text  # the tail survived too
         # Set, not list: salon order is the DB collation's business, and it
         # differs between SQLite and Postgres for mixed Latin/Cyrillic names.
         assert {b["label"] for b in _buttons(reply)} == {name for name, _ in rows}

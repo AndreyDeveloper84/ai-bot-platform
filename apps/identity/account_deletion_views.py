@@ -34,6 +34,32 @@ from apps.identity.services.account_deletion import execute_bot_half
 logger = logging.getLogger(__name__)
 
 
+def _request_id(raw: object) -> str:
+    """Номер заявки каталога — непустая строка, и только она (DRF-2659).
+
+    ``str(None)`` — это ``"None"``: строка выглядит заполненной и уходит в
+    аудит ``privacy.account_deletion_bot_half`` как номер заявки. След самой
+    просьбы живёт только в каталоге (``DeletionRequest``), а у бота — лишь
+    ротируемый журнал, так что ``request_id`` в записи — единственная дорога
+    от стирания к ответу «по чьей просьбе». Пустую строку DRF-2651 уже
+    отказывал громко глубже (``privacy.delete_personal_data``); ``null`` туда
+    доходил как ``"None"`` и проверку ``bool(...)`` проходил. Та же форма отказа
+    — ``ValueError`` → 400 ``malformed_body`` — здесь, на границе.
+    """
+    if not isinstance(raw, str):
+        raise ValueError(f"request_id must be a string, got {type(raw).__name__}")
+    if not raw.strip():
+        raise ValueError("request_id must not be empty")
+    return raw
+
+
+def _external_id(raw: object) -> str:
+    """Внешний id личности: ``null`` не становится личностью ``"None"``."""
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        raise ValueError("external_user_ids must not contain null or empty values")
+    return str(raw)
+
+
 @method_decorator(csrf_exempt, name="dispatch")
 class InternalAccountDeletionView(View):
     http_method_names = ["post"]
@@ -56,10 +82,11 @@ class InternalAccountDeletionView(View):
 
         try:
             data = json.loads(body.decode("utf-8"))
-            request_id = str(data["request_id"])
+            request_id = _request_id(data["request_id"])
             ayla_user_id = uuid.UUID(str(data["ayla_user_id"]))
-            external_user_ids = [str(x) for x in data.get("external_user_ids", [])]
-        except (ValueError, KeyError, TypeError, AttributeError):
+            external_user_ids = [_external_id(x) for x in data.get("external_user_ids", [])]
+        except (ValueError, KeyError, TypeError, AttributeError) as exc:
+            logger.warning("identity.account_deletion.malformed_body reason=%s", exc)
             return JsonResponse({"status": "bad_request", "reason": "malformed_body"}, status=400)
 
         outcome = execute_bot_half(

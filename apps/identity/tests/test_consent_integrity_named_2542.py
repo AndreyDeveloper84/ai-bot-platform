@@ -32,6 +32,7 @@ from django.utils import timezone
 from apps.identity.models import MemoryEntry, RedZoneAccessLog, UserPersonalContext
 from apps.identity.services import memory_writer
 from apps.identity.services.memory_writer import write_entry
+from apps.identity.tests._red_zone_consent import grant_memory_zone_consents
 
 pytestmark = [
     pytest.mark.django_db,
@@ -71,7 +72,11 @@ def _write(upc: UserPersonalContext, zone: str, **overrides):
 
 @pytest.fixture
 def upc() -> UserPersonalContext:
-    return UserPersonalContext.objects.create(user_id=uuid.uuid4())
+    # DRF-2542 §1: писатель спрашивает журнал согласий зоны. Согласие выдано,
+    # чтобы отказ в этих узлах шёл от БАЗЫ (предмет §2), а не от проверки §1.
+    context = UserPersonalContext.objects.create(user_id=uuid.uuid4())
+    grant_memory_zone_consents(context.user_id)
+    return context
 
 
 class TestRefusalIsNamed:

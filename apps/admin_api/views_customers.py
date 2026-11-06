@@ -34,7 +34,7 @@ import logging
 from django.http import HttpRequest, HttpResponse, JsonResponse
 from django.views.decorators.http import require_http_methods
 
-from apps.admin_api.auth import require_admin_role
+from apps.admin_api.auth import require_booking_desk
 from apps.admin_api.services.booking import (
     Refusal,
     public_customer_row,
@@ -56,7 +56,7 @@ def _error(slug: str, detail: str, status: int) -> JsonResponse:
 
 
 @require_http_methods(["GET"])
-@require_admin_role
+@require_booking_desk
 def search_customers(request: HttpRequest) -> HttpResponse:
     """Search this salon's customers on behalf of the calling administrator."""
 

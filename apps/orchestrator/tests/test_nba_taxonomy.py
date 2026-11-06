@@ -48,7 +48,8 @@ OWNER_J2 = {
     "BACK_COMFORT": ("RECOVER", "PROVIDER_SESSION"),
 }
 
-#: J1 владельца (§3 + R2, OWNER_QUESTIONS раздел S) — дословно, только явный список.
+#: J1 владельца (§3 + R2; docs/OWNER_QUESTIONS_2026-09-12.md, раздел S) — дословно,
+#: только явный список.
 #: R1: близкие формулировки к FACE_FRESHNESS не вводятся, новые фразы — явно по
 #: shadow evidence.
 OWNER_J1 = {

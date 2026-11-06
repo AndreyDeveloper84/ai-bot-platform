@@ -95,6 +95,7 @@ class VisitRow:
     client_name: str
     bot_user_id: UUID | None
     service_id: UUID | None
+    appointment_version: int | None
 
     @property
     def is_completed(self) -> bool:
@@ -176,9 +177,16 @@ def _to_rows(proxies: list[RemoteBookingProxy], tenant_id) -> list[VisitRow]:
                 ),
                 bot_user_id=proxy.bot_user_id,
                 service_id=proxy.service_id,
+                appointment_version=proxy.appointment_version,
             )
         )
     return rows
+
+
+def visit_row(proxy: RemoteBookingProxy) -> VisitRow:
+    """One mirror row shaped exactly like :func:`master_visits` rows (DRF-2945)."""
+
+    return _to_rows([proxy], proxy.tenant_id)[0]
 
 
 def master_visits(

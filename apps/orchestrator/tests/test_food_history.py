@@ -337,7 +337,7 @@ class TestAylaUpTheHistoryIsRead:
     def test_the_model_block_carries_todays_dishes(self, person, ayla, monkeypatch) -> None:
         """То, что увидит диетолог DRF-1464: не только процент белка."""
         monkeypatch.setattr(nutrition_context, "_fetch_deficits", lambda _u: _deficits())
-        ayla(_FakeAyla(summary=_summary()))
+        ayla(_FakeAyla(summary=_summary(), profile=_profile()))
 
         block = nutrition_context.build_nutrition_context_block(person)
 
@@ -350,7 +350,7 @@ class TestAylaUpTheHistoryIsRead:
     ) -> None:
         """Два независимых чтения: упало одно — второе всё равно доезжает."""
         monkeypatch.setattr(nutrition_context, "_fetch_deficits", lambda _u: None)
-        ayla(_FakeAyla(summary=_summary()))
+        ayla(_FakeAyla(summary=_summary(), profile=_profile()))
 
         block = nutrition_context.build_nutrition_context_block(person)
 
@@ -410,6 +410,9 @@ class TestAylaDownHonestRefusalAndNoCopy:
         assert ALREADY_LOGGED_LINE not in card
 
     def test_the_model_block_invents_nothing(self, person, ayla, monkeypatch) -> None:
+        # DRF-2760: профиль прочитан и обычный — иначе блок молчал бы уже на
+        # периметре, и узел перестал бы проверять упавшее чтение дневника.
+        monkeypatch.setattr(nutrition_context, "_fetch_profile", lambda _u: _profile())
         monkeypatch.setattr(nutrition_context, "_fetch_deficits", lambda _u: None)
         ayla(_FakeAyla(raises=NutritionUnavailableError("http_503")))
 
@@ -435,6 +438,9 @@ class TestAylaDownHonestRefusalAndNoCopy:
         ``MemoryEntry`` до и после. Копии нет — ни «на всякий случай», ни
         «на пять минут».
         """
+        # DRF-2760: обычный профиль — чтобы блок дошёл до упавших чтений, а не
+        # замолчал раньше, на периметре.
+        monkeypatch.setattr(nutrition_context, "_fetch_profile", lambda _u: _profile())
         monkeypatch.setattr(nutrition_context, "_fetch_deficits", lambda _u: None)
         ayla(_FakeAyla(raises=NutritionUnavailableError("http_503")))
         before = _memory_rows()

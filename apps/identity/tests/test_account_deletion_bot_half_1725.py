@@ -97,7 +97,7 @@ class TestService:
             )
         assert out.all_ok and out.shells == 1 and out.flag_cleared
         assert out.failed_steps == []
-        assert [s["step"] for s in out.steps] == ["ayla_delete", "memory_delete"]
+        # DRF-2894 — первым идёт снятие доступа: роли и связь с карточкой мастера.\n        assert [s["step"] for s in out.steps] == [\n            "staff_access_revoke",\n            "ayla_delete",\n            "memory_delete",\n        ]
         assert not deletion_gate(AYLA_ID).blocked
         _ = p
 
@@ -187,6 +187,40 @@ class TestView:
         resp = Client().post(URL, data=body, content_type="application/json", **_signed(body))
         assert resp.status_code == 400
 
+    def test_a_null_request_id_is_refused_not_written_as_none(self, flagged):
+        """DRF-2659: ``str(None)`` — ``"None"``, строка, которая выглядит
+        заполненной. Пара: ``null`` → 400, каскада и записи аудита нет;
+        настоящий номер → 200, и в аудите ровно он."""
+        from apps.audit.models import AuditLog
+
+        action = "privacy.account_deletion_bot_half"
+        # Вид импортирует execute_bot_half по имени — подменять там, где зовут.
+        with patch("apps.identity.account_deletion_views.execute_bot_half") as bot_half:
+            for bad in (None, 1725, ""):
+                body = _body(request_id=bad)
+                resp = Client().post(
+                    URL, data=body, content_type="application/json", **_signed(body)
+                )
+                assert resp.status_code == 400, (bad, resp.content)
+                assert resp.json()["reason"] == "malformed_body"
+            bot_half.assert_not_called()
+        assert AuditLog.all_tenants.filter(action=action).count() == 0
+
+        body = _body()
+        with patch("apps.identity.services.account_deletion.delete_personal_data", _ok_cascade):
+            resp = Client().post(URL, data=body, content_type="application/json", **_signed(body))
+        assert resp.status_code == 200, resp.content
+        rows = list(AuditLog.all_tenants.filter(action=action).values_list("payload", flat=True))
+        assert [r["request_id"] for r in rows] == [REQUEST_ID]
+
+    def test_a_null_external_id_is_refused_not_a_person_named_none(self, flagged):
+        body = _body(external_user_ids=["bot:max:1725001", None])
+        with patch("apps.identity.services.account_deletion.delete_personal_data") as cascade:
+            resp = Client().post(URL, data=body, content_type="application/json", **_signed(body))
+        assert resp.status_code == 400
+        assert resp.json()["reason"] == "malformed_body"
+        cascade.assert_not_called()
+
     def test_failed_step_is_200_with_all_ok_false(self, flagged):
         body = _body()
         with patch("apps.identity.services.account_deletion.delete_personal_data", _failed_cascade):
@@ -213,7 +247,9 @@ class TestView:
 
 class TestRealCascade:
     """Без подмены каскада — только каталог за фальшивым клиентом: телефон
-    на оболочке стёрт, флаг снят, шаг ``ayla_delete`` сходил в каталог."""
+    на оболочке стёрт, флаг снят, а в каталог шаг ``ayla_delete`` НЕ ходит —
+    каталог стёр свою половину сам до вопроса (DRF-2639; прежний фальшивый
+    каталог отвечал успехом там, где настоящий отвечает 403)."""
 
     def test_end_to_end_with_a_fake_catalog(self, flagged):
         calls: list[dict] = []
@@ -243,7 +279,8 @@ class TestRealCascade:
                 ayla_user_id=AYLA_ID, external_user_ids=["bot:max:1725001"], request_id=REQUEST_ID
             )
         assert out.all_ok, out.failed_steps
-        assert calls == [{"ayla_user_id": str(AYLA_ID), "external_user_id": "bot:max:1725001"}]
+        assert calls == []
+        assert {"step": "ayla_delete", "ok": True, "detail": "erased_by_catalog"} in out.steps
         flagged.refresh_from_db()
         assert flagged.phone == "" and flagged.display_name == ""
         assert not deletion_gate(AYLA_ID).blocked

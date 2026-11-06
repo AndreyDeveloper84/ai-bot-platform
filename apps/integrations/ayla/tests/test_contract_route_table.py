@@ -150,6 +150,9 @@ ROUTE_TABLE: tuple[Route, ...] = (
     # point: the subject is named ONLY by the header, and there is no request
     # body a caller could use to substitute a different one.
     Route("GET", "/api/v1/internal/me/identity/", Auth.BEARER_EXT),
+    # DRF-2776 — смена согласия бот → каталог (ручку объявил каталог, ayla-00);
+    # субъект — только из X-External-User-ID.
+    Route("POST", "/api/v1/internal/me/consent-events/", Auth.BEARER_EXT),
     # profile_client (#978 → DRF-1709, 12.09.2026). Until this day: Bearer
     # ALONE, on the reading that the `user.profile.updated` consumer acts on
     # a NOTIFICATION about a person and has nobody to name. Reversed with
@@ -216,6 +219,9 @@ ROUTE_TABLE: tuple[Route, ...] = (
     Route("DELETE", "/api/v1/internal/users/{id}/cards/{id}/", Auth.BEARER_EXT),
     # recommendations_client (#1048).
     Route("POST", "/api/v1/internal/me/catalog/recommendations/", Auth.BEARER_EXT),
+    # knowledge_client (DRF-2729) - Bearer only: nothing about a person rides
+    # in the request. Ayla side: beautygo_backend DRF-2724.
+    Route("GET", "/api/v1/internal/knowledge/procedures/", Auth.BEARER),
     # nutrition_client (#1050) — X-Service-Token + X-External-User-ID.
     Route("POST", "/api/v1/nutrition/internal/scan/", Auth.SERVICE_EXT),
     Route("POST", "/api/v1/nutrition/internal/food-log/", Auth.SERVICE_EXT),
@@ -358,6 +364,10 @@ def captured(
     # sentinel-tokened client leaks into another test's process state.
     from apps.integrations.ayla import identity_client, profile_client, reset_nutrition_client
     from apps.integrations.ayla.booking_client import reset_ayla_booking_client
+    from apps.integrations.ayla.knowledge_client import (
+        close_knowledge_client,
+        reset_knowledge_circuit,
+    )
     from apps.integrations.ayla.recommendations_client import reset_recommendations_circuit
     from apps.integrations.ayla_payments import reset_ayla_payments_client
 
@@ -365,6 +375,10 @@ def captured(
     reset_nutrition_client()
     reset_ayla_payments_client()
     reset_recommendations_circuit()
+    # The knowledge client pools its httpx.Client for the process: close it,
+    # or the sentinel-transport client outlives this test.
+    close_knowledge_client()
+    reset_knowledge_circuit()
     profile_client._circuit.record_success()
     identity_client._circuit.record_success()
 
@@ -554,6 +568,22 @@ def _exercise_identity() -> None:
     _swallow(lambda: identity_client.resolve_identity(_EXT_USER))
 
 
+def _exercise_consent_events() -> None:
+    from apps.integrations.ayla.consent_events_client import post_consent_event
+
+    _swallow(
+        lambda: post_consent_event(
+            external_user_id=_EXT_USER,
+            body={
+                "event_id": "01J9CONTRACTCONSENT000001",
+                "consent_type": "personal_calculation",
+                "granted": False,
+                "granted_at": "2026-10-05T10:00:00+00:00",
+            },
+        )
+    )
+
+
 def _exercise_personal_context() -> None:
     from apps.integrations.ayla.personal_context_client import PersonalContextHttpClient
 
@@ -586,6 +616,19 @@ def _exercise_recommendations() -> None:
 
     reset_recommendations_circuit()
     _swallow(lambda: fetch_recommendations(external_user_id=_EXT_USER, payload={"goal": "relax"}))
+
+
+def _exercise_knowledge() -> None:
+    from apps.integrations.ayla.knowledge_client import (
+        close_knowledge_client,
+        read_subject,
+        reset_knowledge_circuit,
+    )
+
+    # Drop a pooled client built before the transport was swapped in.
+    close_knowledge_client()
+    reset_knowledge_circuit()
+    _swallow(lambda: read_subject(salon_service_id=str(_PROFILE_UUID)))
 
 
 def _exercise_billing() -> None:
@@ -669,7 +712,14 @@ async def _exercise_nutrition() -> None:
             pass
 
     await guard(c.scan_photo(external_user_id=_EXT_USER, image_bytes=b"x"))
-    await guard(c.log_meal(external_user_id=_EXT_USER, dish_name="apple", meal_type="snack"))
+    await guard(
+        c.log_meal(
+            external_user_id=_EXT_USER,
+            dish_name="apple",
+            meal_type="snack",
+            ai_estimate_allowed=True,
+        )
+    )
     await guard(c.daily_summary(external_user_id=_EXT_USER))
     await guard(c.weekly_deficits(external_user_id=_EXT_USER))
     await guard(c.get_profile(external_user_id=_EXT_USER))
@@ -701,10 +751,12 @@ async def test_all_clients_match_route_table(captured: list[Captured]) -> None:
     _exercise_booking()
     _exercise_profile()
     _exercise_identity()
+    _exercise_consent_events()
     _exercise_personal_context()
     _exercise_billing()
     _exercise_client_payments()
     _exercise_recommendations()
+    _exercise_knowledge()
     _exercise_payments(captured)
     await _exercise_nutrition()
 

@@ -11,10 +11,12 @@
 сообщения, гейт safety, дневник, консьерж — ни одного ``if voice`` ниже.
 Единственное исключение — K19-Б (решение владельца 22.09): гейту
 отдаётся копия текста без знаков препинания (``gate_text``), потому что
-исключение для гиперболы «умираю как хочу…» в ``pre_check.py`` не
-допускает запятую, а OpenAI ставит знаки всегда. Когда окно safety
-поправит регулярку (вариант А), ``VOICE_GATE_STRIP_PUNCT=false`` — и
-голос с текстом проверяются одинаково. Второе исключение — DRF-2488
+OpenAI ставит знаки всегда, а шаблоны ``pre_check.py`` ждут между
+словами пробел. Правило про гиперболу «умираю как хочу…», ради которого
+копию завели, с DRF-2684 (вариант А) знаков не замечает само. Но
+``VOICE_GATE_STRIP_PUNCT`` остаётся включённым: остальным шаблонам копия
+нужна по-прежнему — распознанное «Не хочу, жить.» гейт без неё
+пропускает (проба ``test_gate_strip_parity.py``). Второе исключение — DRF-2488
 (решение владельца 28.09): запись реплики человека помечается
 ``Message.input_channel=voice``, чтобы выгрузка, оператор и админка
 видели, что в ``content`` расшифровка, а не набранный текст. На ход это
@@ -32,6 +34,12 @@
 * ``VOICE_CROSS_BORDER_ALLOWED`` — отдельное разрешение на передачу за
   рубеж: без него провайдер ``openai`` не вызывается и файл даже не
   скачивается.
+* ``VOICE_ALLOWED_USER_IDS`` — кому распознавать (DRF-2424): MAX user_id
+  через запятую; пусто — никому, ``*`` — всем. Флаги выше глобальны на весь
+  стек, а на стенде пилота рядом с тестовым ботом живые люди: живой проход
+  включается только для тестового аккаунта. Вне списка — та же заглушка
+  DRF-1939, что при выключенном флаге, без скачивания. Канал не
+  учитывается — сегодня голос есть только в MAX.
 * ``VOICE_ECHO_MODE`` — «Я услышала: …» перед ответом (``always``, по
   умолчанию — решение владельца 28.09, DRF-2425) или нет (``never``); режим
   «при неуверенности» невозможен, провайдер уверенность не отдаёт.
@@ -44,8 +52,8 @@
 from __future__ import annotations
 
 import logging
-import re
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass, replace
 from typing import Any, Final
 
@@ -102,12 +110,6 @@ REFUSAL_TEXTS: Final[dict[str, str]] = {
 
 ECHO_LINE: Final[str] = "Я услышала: «{text}»"
 
-# Только знаки препинания МЕЖДУ словами. Апостроф и дефис внутри слова
-# остаются: «don't want to live» и «self-harm» — шаблоны гейта, и без
-# апострофа кризис по-английски терялся (проба DRF-2423 это поймала).
-_PUNCT = re.compile(r"[,.!?;:…\"«»“”„()\[\]{}<>—–]|(?<!\w)['\-’]|['\-’](?!\w)")
-_WS = re.compile(r"\s+")
-
 
 @dataclass(frozen=True, slots=True)
 class VoiceResolved:
@@ -143,6 +145,33 @@ def cross_border_allowed() -> bool:
     return _flag("VOICE_CROSS_BORDER_ALLOWED")
 
 
+#: Значение списка допуска, означающее «всем» (DRF-2424).
+ALLOW_EVERYONE: Final[str] = "*"
+
+
+def parse_allowed_user_ids(raw: object) -> frozenset[str]:
+    """Разобрать ``VOICE_ALLOWED_USER_IDS``: id через запятую, пробелы и пустые — прочь.
+
+    Возвращает набор строк; ``*`` в нём — «всем». Строка разбирается всегда,
+    даже если в настройках уже лежит набор: проверка вхождения в строку
+    («100» in «1001») тихо пустила бы лишнего человека.
+    """
+    items: list[str]
+    if isinstance(raw, str):
+        items = raw.split(",")
+    elif isinstance(raw, Iterable):
+        items = [str(item) for item in raw]
+    else:
+        items = []
+    return frozenset(item.strip() for item in items if item.strip())
+
+
+def voice_allowed_for(channel_user_id: str) -> bool:
+    """Распознавать ли голосовое этого человека (DRF-2424); пустой список — никому."""
+    allowed = parse_allowed_user_ids(getattr(settings, "VOICE_ALLOWED_USER_IDS", ""))
+    return ALLOW_EVERYONE in allowed or str(channel_user_id) in allowed
+
+
 def gate_strip_punct() -> bool:
     value = getattr(settings, "VOICE_GATE_STRIP_PUNCT", True)
     if isinstance(value, str):
@@ -164,16 +193,29 @@ def strip_for_gate(text: str) -> str:
     """Копия текста без знаков препинания между словами для ``evaluate_inbound`` (K19-Б).
 
     Апостроф и дефис внутри слова сохраняются («don't», «self-harm») — иначе
-    английские шаблоны гейта перестают срабатывать.
+    английские шаблоны гейта перестают срабатывать. Само правило живёт рядом с
+    гейтом (``apps.orchestrator.safety.normalize``, DRF-2922): набранный текст
+    гейт проверяет ещё и по копии без знаков внутри предложения, и две копии
+    должны описываться в одном месте.
     """
-    return _WS.sub(" ", _PUNCT.sub(" ", text)).strip()
+    from apps.orchestrator.safety.normalize import without_marks
+
+    return without_marks(text)
 
 
 def with_voice_echo(reply_text: str, transcript_text: str) -> str:
-    """Добавить «Я услышала: …» перед ответом, если ``VOICE_ECHO_MODE=always``."""
-    if echo_mode() != "always" or not transcript_text:
+    """Добавить «Я услышала: …» перед ответом, если ``VOICE_ECHO_MODE=always``.
+
+    Эхо — всегда один абзац (DRF-2817): пробельные символы расшифровки
+    схлопываются в один пробел только для этой строки. Перевод строки внутри
+    длинной диктовки рвал эхо надвое, и «Последняя тема» в Mini App
+    (``views_last_topic``) брала за тему ответа обрывок слов самого человека.
+    Сама расшифровка в переписке и для модели не меняется.
+    """
+    heard = " ".join(transcript_text.split())
+    if echo_mode() != "always" or not heard:
         return reply_text
-    return f"{ECHO_LINE.format(text=transcript_text)}\n\n{reply_text}"
+    return f"{ECHO_LINE.format(text=heard)}\n\n{reply_text}"
 
 
 def _refused(code: str, reason: str) -> VoiceRefused:
@@ -205,6 +247,12 @@ def resolve_voice_turn(
 
     if not voice_input_enabled():
         return _refused(CODE_DISABLED, "flag_off")
+
+    # DRF-2424 — вне списка допуска ответ байт в байт как при выключенном
+    # флаге: другой текст выдал бы, что функция есть, но «не для тебя». В лог
+    # — только факт, без id человека (DRF-2009).
+    if not voice_allowed_for(event.channel_user_id):
+        return _log_refusal(_refused(CODE_DISABLED, "not_allowlisted"), started)
 
     ref = extract_first_audio(event.attachments)
     if ref is None:

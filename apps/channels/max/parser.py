@@ -93,6 +93,24 @@ class ParseError(Exception):
     """Malformed or unsupported MAX webhook payload."""
 
 
+def _identity_key(value: Any, field_name: str) -> str:
+    """``channel_user_id`` — the person's key — from a MAX ``user_id``.
+
+    DRF-2661: presence of the key is not validity of the value. ``null``
+    passes ``"user_id" in d`` and ``str(None)`` is ``"None"`` — every such
+    event would become ONE person. Only an integer (MAX ids are integers) or
+    a non-blank string is a key; anything else is refused like a missing
+    field, loudly, before any row is looked up.
+    """
+
+    if isinstance(value, bool) or not isinstance(value, int | str):
+        raise ParseError(f"MAX payload field {field_name} is not a usable id")
+    key = str(value)
+    if not key.strip():
+        raise ParseError(f"MAX payload field {field_name} is not a usable id")
+    return key  # unchanged: re-keying an existing person is its own defect
+
+
 def parse_max_webhook(payload: dict[str, Any]) -> CanonicalEvent:
     """Translate a MAX webhook update into a CanonicalEvent.
 
@@ -148,7 +166,7 @@ def _parse_message_created(payload: dict[str, Any]) -> CanonicalEvent:
 
     return CanonicalEvent(
         channel="max",
-        channel_user_id=str(sender["user_id"]),
+        channel_user_id=_identity_key(sender["user_id"], "message.sender.user_id"),
         channel_message_id=channel_message_id,
         chat_id=str(recipient["chat_id"]),
         text=text,
@@ -205,7 +223,7 @@ def _parse_message_callback(payload: dict[str, Any]) -> CanonicalEvent:
 
     return CanonicalEvent(
         channel="max",
-        channel_user_id=str(user["user_id"]),
+        channel_user_id=_identity_key(user["user_id"], "callback.user.user_id"),
         channel_message_id=channel_message_id,
         chat_id=str(chat_id),
         text=str(cb_payload),
@@ -260,13 +278,14 @@ def _parse_bot_started(payload: dict[str, Any]) -> CanonicalEvent:
     # through to standard WELCOME_TEXT safely (CR #810 nits #6 + #7).
     deeplink_payload = payload.get("payload") or ""
     synthetic_text = f"/start {deeplink_payload}".strip() if deeplink_payload else "/start"
+    user_key = _identity_key(user["user_id"], "user.user_id")
     return CanonicalEvent(
         channel="max",
-        channel_user_id=str(user["user_id"]),
+        channel_user_id=user_key,
         # Synthetic id — MAX doesn't give us a stable update id for
         # lifecycle events. Prefix so idempotency keys can't collide
         # with a real message mid.
-        channel_message_id=f"bot_started:{user['user_id']}:{payload.get('timestamp', '')}",
+        channel_message_id=f"bot_started:{user_key}:{payload.get('timestamp', '')}",
         chat_id=str(chat_id),
         text=synthetic_text,
         attachments=[],

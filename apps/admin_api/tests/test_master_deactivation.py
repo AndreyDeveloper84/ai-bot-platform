@@ -595,8 +595,16 @@ class TestInventoryIntegrity:
         owner_bot_user: BotUser,
         tenant: Tenant,
         master: CatalogMaster,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """One mirror visit, one actionable booking — the guard stays out of the way."""
+        # DRF-2696 — a cascade that goes through notifies the customer. Left
+        # unstubbed, this test made a real ``POST botapi.max.ru/messages``.
+        notified: list[dict] = []
+        monkeypatch.setattr(
+            "apps.admin_api.services.master_deactivation.send_message",
+            lambda **kwargs: notified.append(kwargs),
+        )
         service = _make_service(tenant)
         _link_master_service(tenant, master, service)
         bu = _make_customer_bot_user(tenant, 1)

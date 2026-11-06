@@ -31,7 +31,7 @@
  * в `ADMIN_TABS_RECEPTION` — покраснеет пин моста; снимите
  * `setBackButton`/`onBackButton` с `SalonPilotFrame` — покраснеет выход.
  */
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -406,7 +406,11 @@ describe("мост снят с панели владельца и админис
     mockedGetMe.mockResolvedValue(OWNER_ME);
     renderAppAt("/");
     expect(await screen.findByRole("heading", { name: "Сегодня" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Расписание" })).toBeInTheDocument();
+    // Вкладка — по ориентиру навигации: когда день загрузится, «Сегодня»
+    // рисует и своё действие «Расписание» (DRF-2932, доска DRF-2850), и
+    // поиск по всему экрану зависел бы от того, успел ли день прийти.
+    const nav = screen.getByRole("navigation", { name: "Основная навигация" });
+    expect(within(nav).getByRole("button", { name: "Расписание" })).toBeInTheDocument();
   });
 });
 

@@ -31,7 +31,10 @@ Error envelope mirrors the master_api / miniapp_api shape:
 * ``bad_signature`` (401) — HMAC mismatch.
 * ``stale`` (401) — init-data ``auth_date`` expired.
 * ``user_not_registered`` (404) — no BotUser row for this MAX user.
-* ``forbidden`` (403) — caller is not Owner / Admin.
+* ``forbidden`` (403) — caller is not Owner / Admin. Since DRF-2645 the
+  refusal carries ``details = {reason, remedy}`` (see :func:`_role_refusal`):
+  a bare «admin or owner role required» told nobody what to do, while the
+  operator's move exists and has a name.
 
 :func:`require_admin_or_reception_read` is the *narrow* second gate
 (DRF-1552, owner's decision ``docs/OPEN_DECISIONS.md`` §35 п.1). It adds
@@ -58,6 +61,7 @@ from apps.identity.services.bot_user_resolver import (
 )
 from apps.identity.services.role_resolver import RoleContext, resolve_role
 from apps.miniapp_api.transport_refusal import GUARD_ATTR, verify_request_init_data
+from apps.tenancy.billing_gate import frozen_refusal
 from apps.tenancy.context import tenant_scope
 
 logger = logging.getLogger(__name__)
@@ -65,6 +69,59 @@ logger = logging.getLogger(__name__)
 
 def _error(slug: str, detail: str, status: int) -> JsonResponse:
     return JsonResponse({"error": slug, "detail": detail}, status=status)
+
+
+#: DRF-2645 — why the role gate refused, and the operator's move that fixes it.
+#: Machine codes: the words on the screen are the owner's, not this module's.
+#:
+#: * ``no_salon_role`` — the person holds no staff role in this salon at all
+#:   (``TenantStaff`` is empty for them). Only the ``platform_operations``
+#:   operator gives one: «Выдать роль в салоне» (for ``admin`` it also creates
+#:   the catalog half, DRF-2085).
+#: * ``role_insufficient`` — a role exists (receptionist, master) but this door
+#:   needs owner / admin: «Сменить роль».
+NO_SALON_ROLE = "no_salon_role"
+ROLE_INSUFFICIENT = "role_insufficient"
+REMEDY_GRANT = "operator_grants_salon_role"
+REMEDY_CHANGE = "operator_changes_salon_role"
+
+_REFUSAL_TEXT = {
+    NO_SALON_ROLE: (
+        "you hold no role in this salon — a platform operator grants one («Выдать роль в салоне»)"
+    ),
+    ROLE_INSUFFICIENT: (
+        "this needs the owner or admin role in this salon — a platform operator "
+        "changes the role («Сменить роль»)"
+    ),
+}
+
+
+def _role_refusal(role_ctx: RoleContext, *, tenant_slug: str) -> JsonResponse:
+    """403 with the reason and the operator's move named (DRF-2645).
+
+    Same status and ``error`` slug as before — screens key on them — plus
+    ``details``. The reason is decided from the resolved roles, never guessed:
+    no staff role at all and «a role, but not this one» have different moves.
+    """
+    has_staff_role = (
+        role_ctx.is_owner or role_ctx.is_admin or role_ctx.is_receptionist or role_ctx.is_master
+    )
+    reason = ROLE_INSUFFICIENT if has_staff_role else NO_SALON_ROLE
+    remedy = REMEDY_CHANGE if has_staff_role else REMEDY_GRANT
+    logger.info(
+        "admin_api.auth.role_refused reason=%s tenant=%s primary_role=%s",
+        reason,
+        tenant_slug,
+        role_ctx.primary_role,
+    )
+    return JsonResponse(
+        {
+            "error": "forbidden",
+            "detail": _REFUSAL_TEXT[reason],
+            "details": {"reason": reason, "remedy": remedy},
+        },
+        status=403,
+    )
 
 
 #: Methods a Receptionist may use on the endpoints opened to her.
@@ -77,6 +134,7 @@ def _gate(
     view_func: Callable[..., HttpResponse],
     *,
     allow_reception_read: bool,
+    allow_booking_desk: bool = False,
 ) -> Callable[..., HttpResponse]:
     """Shared body of the admin gates.
 
@@ -181,12 +239,18 @@ def _gate(
             # branch from becoming a write door if the view ever gains
             # one.
             allowed = request.method in _RECEPTION_SAFE_METHODS
+        if not allowed and allow_booking_desk and role_ctx.is_receptionist:
+            # DRF-2826 — the front desk runs the booking cycle: any method,
+            # but only on the views named with ``require_booking_desk``.
+            allowed = True
         if not allowed:
-            return _error(
-                "forbidden",
-                "admin or owner role required",
-                403,
-            )
+            return _role_refusal(role_ctx, tenant_slug=bot_user.tenant.slug)
+
+        # DRF-2984 B2 — заморозка подписки. Открыты только маршруты биллинга
+        # салона (DRF-2988 B3, ``views_billing``) — из них владелец платит.
+        frozen = frozen_refusal(request, bot_user.tenant)
+        if frozen is not None:
+            return frozen
 
         request.verified_init_data = verified  # type: ignore[attr-defined]
         request.bot_user = bot_user  # type: ignore[attr-defined]
@@ -195,7 +259,13 @@ def _gate(
         with tenant_scope(bot_user.tenant):
             return view_func(request, *args, **kwargs)
 
-    setattr(wrapper, GUARD_ATTR, "admin_or_reception_read" if allow_reception_read else "admin")
+    if allow_booking_desk:
+        guard = "booking_desk"
+    elif allow_reception_read:
+        guard = "admin_or_reception_read"
+    else:
+        guard = "admin"
+    setattr(wrapper, GUARD_ATTR, guard)
     return wrapper
 
 
@@ -233,8 +303,30 @@ def require_admin_or_reception_read(
     return _gate(view_func, allow_reception_read=True)
 
 
+def require_booking_desk(
+    view_func: Callable[..., HttpResponse],
+) -> Callable[..., HttpResponse]:
+    """Gate a view to Owner / Admin / Receptionist — the booking desk.
+
+    Owner's decision 06.10 (DRF-2826): the receptionist runs the booking
+    cycle of her salon — create, reschedule, cancel, complete, no-show,
+    the canonical version of a booking, slots, customer search, the
+    master to book with. NOT availability (time off, date exceptions,
+    weekly template, closures), roles, invites, settings.
+
+    Named view by view, like :func:`require_admin_or_reception_read`:
+    widening the desk means writing this decorator on one more view on
+    purpose. The catalog checks the same person again server-side
+    (``IsTenantBookingDesk`` on the salon surface) — this gate is the
+    bot's half, not the only one.
+    """
+
+    return _gate(view_func, allow_reception_read=False, allow_booking_desk=True)
+
+
 __all__ = [
     "RoleContext",
     "require_admin_or_reception_read",
     "require_admin_role",
+    "require_booking_desk",
 ]

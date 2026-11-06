@@ -126,7 +126,7 @@ urlpatterns = [
     # writes them as ``KbDocument`` rows in the matching tenant. HMAC
     # gate uses ``settings.SALON_KNOWLEDGE_WEBHOOK_SECRET``. See
     # ``apps/kb/webhooks.py`` + the architectural decision in
-    # ``docs/design/2026-05-18-phase-5-architecture-comparison.md``.
+    # ``docs/design/legacy/2026-05-18-phase-5-architecture-comparison.md``.
     path(
         "api/v1/salon-knowledge/",
         include("apps.kb.urls", namespace="salon_knowledge_webhooks"),

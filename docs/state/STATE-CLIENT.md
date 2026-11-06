@@ -115,6 +115,14 @@
 снято:    2026-09-08 @ 8c276fa (ai-bot-platform)
 задача:   DRF-1576
 
+### После отзыва согласия «Подсказки» включить нельзя — замок, а не сброс
+статус:   РАБОТАЕТ
+где:      apps/consent/customer.py — `set_proactive_hints`, `proactive_hints_state`; ручка отвечает 409
+проверка: git grep -c "ProactiveHintsUnavailable" origin/dev -- apps/consent/customer.py
+ожидание: >0
+снято:    2026-10-01 @ ветка fix/drf2708-hints-consent-lock (ai-bot-platform)
+задача:   §47.3 / DRF-2708 (вопрос Q-CLIENT-04 из §46 закрыт решением §47.3)
+
 ---
 
 ## Сломано или отсутствует
@@ -286,14 +294,6 @@
 ожидание: 0
 снято:    2026-09-08 @ 8c276fa (ai-bot-platform)
 задача:   §81
-
-### `set_proactive_hints` согласия не проверяет — вариант владельцем не выбран
-статус:   ЖДЁТ ВЛАДЕЛЬЦА
-где:      в коде помечено `TODO(Q-CLIENT-04)`
-проверка: git grep -c "Q-CLIENT-04" origin/dev -- apps
-ожидание: >0
-снято:    2026-09-08 @ 8c276fa (ai-bot-platform)
-задача:   Q-CLIENT-04 / §46
 
 ### Что видит человек без анкеты питания — вариант не выбран
 статус:   ЖДЁТ ВЛАДЕЛЬЦА

@@ -32,6 +32,13 @@ import {
   type WellnessToday,
 } from "../lib/customer-wellness";
 import { useScreenBack } from "../hooks/useScreenBack";
+import {
+  approxPrefix,
+  KCAL_TOTAL_AI_NOTE,
+  KCAL_TOTAL_INCOMPLETE,
+  KCAL_TOTAL_UNKNOWN,
+  kcalTotalMarks,
+} from "../lib/format";
 import { backToOrigin, originFrom } from "../lib/screen-back";
 
 interface RouterState {
@@ -51,9 +58,10 @@ export function FoodScannerSavedScreen() {
   const dishName = state.dishName ?? "Запись";
   const recapCalories = state.calories ?? null;
   // Default ED-mode TRUE — defence-in-depth for deep-link refresh
-  // (friendly CR #5). Router state is lost on refresh; if a customer
-  // with eating_disorder hits /saved fresh, we must NOT leak numbers
-  // until fetchHealthFlags confirms otherwise.
+  // (friendly CR #5). Router state is lost on refresh; if a customer who
+  // chose «Без чисел» (DRF-2766; before 04.10 — the eating_disorder flag)
+  // hits /saved fresh, we must NOT leak numbers until the diary's own
+  // `nutrition_numbers_hidden` says otherwise.
   const [edMode, setEdMode] = useState<boolean>(
     state.edMode === undefined ? true : Boolean(state.edMode),
   );
@@ -87,6 +95,9 @@ export function FoodScannerSavedScreen() {
   // это отсутствие ответа (§65).
   const eaten = summary?.calories_eaten;
   const target = summary?.calories_target;
+  // DRF-2766 фаза 2 — итог включает оценки ИИ и говорит об этом.
+  const marks = kcalTotalMarks(summary ?? {});
+  const approx = approxPrefix(marks);
   const progressPct =
     eaten !== undefined && target !== undefined && target > 0
       ? Math.min(100, Math.round((eaten * 100) / target))
@@ -166,9 +177,18 @@ export function FoodScannerSavedScreen() {
             {err === null && summary && (
               <>
                 {eaten !== undefined && (
-                  <p className="food-scanner-saved__total">
-                    {target !== undefined ? `${eaten} / ${target} ккал` : `${eaten} ккал`}
+                  <p className="food-scanner-saved__total" data-testid="saved-kcal-total">
+                    {target !== undefined ? `${approx}${eaten} / ${target} ккал` : `${approx}${eaten} ккал`}
+                    {marks.approx ? `, ${KCAL_TOTAL_AI_NOTE}` : ""}
                   </p>
+                )}
+                {eaten === undefined && marks.incomplete && (
+                  <p className="food-scanner-saved__total" data-testid="saved-kcal-total">
+                    {KCAL_TOTAL_UNKNOWN}
+                  </p>
+                )}
+                {eaten !== undefined && marks.incomplete && (
+                  <p className="food-scanner-saved__macros">{KCAL_TOTAL_INCOMPLETE}</p>
                 )}
                 {progressPct !== null && (
                   <>

@@ -38,8 +38,8 @@ CONVERTED = {
     # и подсказки адреса (DRF-1811, M19) — четыре вызова через колонку.
     ("apps/master_api/views.py", 22),
     ("apps/master_api/services/schedule_frame.py", 3),
-    # 1933b: переведено
-    ("apps/miniapp_api/views.py", 3),
+    # 1933b: переведено. DRF-2755: 3 → 4 — расстояние на карточке мастера.
+    ("apps/miniapp_api/views.py", 4),
     ("apps/admin_api/services/availability.py", 1),
     # DRF-2154: создание записи и слоты переехали из вьюх в общий сервис
     # (create_appointment + get_available_times — два вызова через колонку).
@@ -49,7 +49,9 @@ CONVERTED = {
     ("apps/admin_api/services/schedule_impact.py", 1),
     ("apps/catalog/services/schedule_confirmation.py", 1),
     # Консьерж: резолв на границе адаптера (handoff держит pk зеркала).
-    ("apps/skills/booking/provider.py", 5),
+    # DRF-2669: 5 → 4 — the two edge reads (price, preview quote) are one
+    # helper now; still translated, one call site fewer.
+    ("apps/skills/booking/provider.py", 4),
     # DRF-1814 (часть A): карточка профиля (профиль, слоты на сегодня, выбор
     # услуг) + портфолио (список, загрузка, удаление) — все шесть через колонку.
     ("apps/master_api/views_profile_card.py", 6),
@@ -65,6 +67,15 @@ CONVERTED = {
     # DRF-2619: фото мастера рукой администратора — в каталог на его токене,
     # один вызов через колонку прямо в записи.
     ("apps/admin_api/views.py", 1),
+    # DRF-2785: действия мастера на своей записи из салонного бота
+    # (подтвердить, отменить, состоялся, не пришёл) — один вызов через колонку.
+    ("apps/channels/max/master_actions.py", 1),
+    # DRF-2943: Mini App booking action bridge uses the same canonical resolver
+    # before calling the specialist action endpoint. DRF-2945: the call moved
+    # from views_bookings.py into the shared booking action service.
+    ("apps/master_api/services/booking_actions.py", 1),
+    # DRF-2984 B2b: архив мастера в каталог — один вызов через колонку.
+    ("apps/catalog/services/archive_sync.py", 1),
 }
 
 PENDING_1933B: dict[tuple[str, str], int] = {}
@@ -90,6 +101,16 @@ NOT_A_MIRROR_ROW: dict[tuple[str, str], tuple[int, str]] = {
         "фильтр get_staff: id из ответа каталога или None",
     ),
     ("apps/skills/booking/provider.py", "cancel_appointment"): (1, "id из записи каталога"),
+    # DRF-2885 — запись от шага плана: мастер и услуга приходят из ответа
+    # каталога о кандидатах шага, зеркало в этой ветке не участвует вовсе.
+    ("apps/orchestrator/plan_step_card.py", "create_appointment"): (
+        1,
+        "specialist_ref из ответа каталога о кандидатах шага",
+    ),
+    ("apps/orchestrator/plan_step_card.py", "get_available_times"): (
+        1,
+        "specialist_ref из ответа каталога о кандидатах шага",
+    ),
     ("apps/skills/booking/provider.py", "reschedule_appointment"): (1, "id из записи каталога"),
 }
 
@@ -154,8 +175,10 @@ def test_the_scan_sees_the_class():
     sites = _sites()
     assert len(sites) >= 43, len(sites)
     listed = sum(PENDING_1933B.values()) + sum(n for n, _ in NOT_A_MIRROR_ROW.values())
-    # 9: восьмёрка + перенос в Mini App (DRF-2561), та же строка зеркала, что у отмены.
-    assert listed == 9
+    # 11: восьмёрка + перенос в Mini App (DRF-2561), та же строка зеркала, что у
+    # отмены, + два вызова ветки шага плана (DRF-2885): слоты и запись на
+    # идентификаторах из ответа каталога о кандидатах.
+    assert listed == 11
 
 
 def test_every_catalog_call_sends_the_catalog_id_or_is_named():

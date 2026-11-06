@@ -7,7 +7,6 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-from django.conf import settings
 
 from apps.audit.models import AuditLog
 from apps.observability.models import ShadowDeltaSnapshot
@@ -19,7 +18,13 @@ pytestmark = pytest.mark.django_db
 
 
 @pytest.fixture(autouse=True)
-def _ground_truth_dir(tmp_path: Path) -> Path:
+def _ground_truth_dir(tmp_path: Path, settings) -> Path:
+    # The ``settings`` FIXTURE, here and in the tests below — it puts the
+    # value back. This file used to assign to ``django.conf.settings``
+    # itself, which nothing restores: ``MAX_BOT_TOKEN = "fake-token"`` from
+    # ``test_with_credentials_calls_post`` stayed set for the rest of the
+    # worker process, and the next test in this file to run the task sent a
+    # real ``POST botapi.max.ru/messages`` with it (DRF-2696).
     settings.SHADOW_GROUND_TRUTH_PATH = str(tmp_path)
     return tmp_path
 
@@ -92,6 +97,7 @@ class TestTelegramDigest:
         self,
         shadow_tenant: Tenant,
         _ground_truth_dir: Path,
+        settings,
     ) -> None:
         target = _dt.date(2026, 5, 12)
         _empty_csv(_ground_truth_dir, target)
@@ -107,6 +113,7 @@ class TestTelegramDigest:
         self,
         shadow_tenant: Tenant,
         _ground_truth_dir: Path,
+        settings,
     ) -> None:
         target = _dt.date(2026, 5, 12)
         _empty_csv(_ground_truth_dir, target)

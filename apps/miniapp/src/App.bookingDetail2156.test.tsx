@@ -148,6 +148,7 @@ const DETAIL: MasterBookingDetail = {
   status: "confirmed",
   temporal_state: "upcoming",
   minutes_until: 60,
+  appointment_version: 7,
   checked_at: `${TODAY}T09:00:00`,
 };
 

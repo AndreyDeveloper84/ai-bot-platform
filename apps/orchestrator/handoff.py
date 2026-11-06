@@ -61,14 +61,26 @@ _CALLBACK_BOOK_PICK_MASTER = "cb:book:pick_master:"
 # offers differ — one sentence covering both would have to be vague enough to
 # fit the weaker one.
 _UNAVAILABLE_REPLY = (
-    "К сожалению, запись к этому мастеру сейчас недоступна — "
-    "посмотрите, что ещё есть в этом салоне."
+    "К сожалению, запись к этому мастеру сейчас недоступна — посмотри, что ещё есть в этом салоне."
 )
 _UNAVAILABLE_REPLY_NO_TENANT = (
-    "К сожалению, запись к этому мастеру сейчас недоступна — посмотрите наши салоны."
+    "К сожалению, запись к этому мастеру сейчас недоступна — посмотри наши салоны."
 )
 
 _SALON_CATALOG_LABEL = "Что есть в этом салоне"
+
+# DRF-2708 — отказ «к этому мастеру записаться нельзя» словами владельца
+# (`docs/OPEN_DECISIONS.md` §47.4, слово 02.10: один текст на все поверхности
+# этого отказа). Та же фраза, что у мини-приложения
+# (`apps/miniapp/src/lib/refusal-canon.ts`, `MASTER_NOT_BOOKABLE_REFUSAL`);
+# две копии держит узел `test_master_refusal_one_text_2708.py`.
+#
+# Только для причины «мастер»: его нет в этом салоне или он не подключён к
+# записи. `_UNAVAILABLE_REPLY*` выше остаются у веток с другой причиной —
+# салон не найден, разговор не открылся.
+MASTER_NOT_BOOKABLE_REFUSAL = (
+    "К этому мастеру сейчас записаться нельзя. Посмотри других — подберём подходящий вариант."
+)
 
 
 def _salon_catalog_button(tenant_id: uuid.UUID) -> dict[str, str]:
@@ -88,6 +100,11 @@ def _salon_catalog_button(tenant_id: uuid.UUID) -> dict[str, str]:
 def _chips(text: str, buttons: list[dict[str, str]]) -> DiscoveryReply:
     """Reply + keyboard, through the one envelope builder this surface has."""
     return DiscoveryReply(text=text, action_data=keyboard_envelope(buttons))
+
+
+def _master_not_bookable_reply(tenant_id: uuid.UUID) -> DiscoveryReply:
+    """§47.4 — the owner's sentence, with the way out DRF-1492 attached to it."""
+    return _chips(MASTER_NOT_BOOKABLE_REFUSAL, [_salon_catalog_button(tenant_id)])
 
 
 def _unavailable_reply(tenant_id: uuid.UUID | None = None) -> DiscoveryReply:
@@ -118,25 +135,25 @@ def _unavailable_reply(tenant_id: uuid.UUID | None = None) -> DiscoveryReply:
 #
 # Never dispatch a serviceless pick_master: the booking skill will only answer
 # it with the stale-context text.
-_ASK_SERVICE_PICK = "Выберите услугу мастера {name}:"
+_ASK_SERVICE_PICK = "Выбери услугу мастера {name}:"
 # The tap named a service this master does not offer (no MasterService edge).
 # Saying so is the whole point: the old reply re-asked the same question, and
 # the user had no way to learn that the name was fine but the master was wrong.
 _ASK_SERVICE_NOT_OFFERED = "У мастера {name} нет услуги «{service}». Вот что можно выбрать:"
 _ASK_SERVICE_NOT_OFFERED_BARE = (
     "У мастера {name} нет услуги «{service}», а других доступных услуг у него сейчас нет — "
-    "посмотрите, что ещё есть в этом салоне."
+    "посмотри, что ещё есть в этом салоне."
 )
 _ASK_SERVICE_REPLY_BARE = (
-    "Чтобы записаться к мастеру {name}, напишите, какая услуга вас интересует — "
-    "или посмотрите, что есть в этом салоне."
+    "Чтобы записаться к мастеру {name}, напиши, какая услуга тебя интересует — "
+    "или посмотри, что есть в этом салоне."
 )
 # Shown when the master offers more services than the keyboard carries. Typing
 # stays available as the escape hatch — it is a worse path (that is this
 # ticket), but for a long roster it is the only one left, so the message says
 # plainly that the list is partial instead of pretending it is complete.
 _ASK_SERVICE_TRUNCATED_NOTE = (
-    "Показаны первые {shown} услуг — если нужной нет в списке, напишите её название."
+    "Показаны первые {shown} услуг — если нужной нет в списке, напиши её название."
 )
 # DRF-1324 — the menu was narrowed by the request that surfaced this master,
 # so it is NOT the master's whole roster and must not read as one. Live pilot
@@ -148,7 +165,7 @@ _ASK_SERVICE_TRUNCATED_NOTE = (
 # replaces the truncation note rather than joining it (the count of a filtered
 # list says nothing about a roster).
 _ASK_SERVICE_FILTERED_NOTE = (
-    "Показаны услуги по вашему запросу — если нужно другое, напишите название."
+    "Показаны услуги по твоему запросу — если нужно другое, напиши название."
 )
 # Keyboard budget for the service menu. MAX hard-caps an inline_keyboard at
 # ``apps.channels.max.outbound.MAX_KEYBOARD_ROWS`` (29) and silently clamps
@@ -334,7 +351,7 @@ def handoff_to_booking(
                 master_id,
                 trace_id,
             )
-            return _unavailable_reply(tenant_id)
+            return _master_not_bookable_reply(tenant_id)
 
         # Resolve the native master id the booking entrypoint expects, per the
         # BOOKING_VIA_AYLA_REST flag. yclients_staff_id is NULLABLE (master not
@@ -349,7 +366,7 @@ def handoff_to_booking(
                 master_id,
                 trace_id,
             )
-            return _unavailable_reply(tenant_id)
+            return _master_not_bookable_reply(tenant_id)
         else:
             native_master_id = str(master.yclients_staff_id)
 
@@ -624,7 +641,7 @@ def handoff_to_booking(
             )
 
     reply_text = (result.reply_text if result is not None else "") or (
-        f"Отлично! Записываю вас к мастеру {master_name}. Какая услуга интересует?"
+        f"Отлично! Записываю тебя к мастеру {master_name}. Какая услуга интересует?"
     )
     action_data = result.action_data if result is not None else None
     return DiscoveryReply(text=reply_text, action_data=action_data)
@@ -658,7 +675,7 @@ BOOKING_CALLBACK_PREFIXES = (
 # in the journal.
 _UNRESOLVED_BOOKING_CALLBACK_REPLY = (
     "Не нахожу этого мастера в каталоге — записаться по этой кнопке не получится. "
-    "Посмотрите наши салоны и выберите заново."
+    "Посмотри наши салоны и выбери заново."
 )
 
 # The skill ran but produced nothing to say. Never observed in the pilot; it
@@ -666,7 +683,7 @@ _UNRESOLVED_BOOKING_CALLBACK_REPLY = (
 # is logged (it used to be the one silent branch on this path).
 _EMPTY_BOOKING_CALLBACK_REPLY = (
     "Не получилось продолжить запись по этой кнопке. "
-    "Посмотрите, что есть в этом салоне, и выберите заново."
+    "Посмотри, что есть в этом салоне, и выбери заново."
 )
 
 
@@ -1123,11 +1140,24 @@ def try_continue_booking(
         AWAITING_SCHEDULE,
         AWAITING_SERVICE,
         load_booking_context,
+        save_booking_context,
     )
+    from apps.orchestrator.turn_commands import names_a_booking_stop
 
     try:
         ctx = load_booking_context(conversation)
         if ctx is None:
+            return None
+        if names_a_booking_stop(text):
+            # DRF-2981 — «отмени / удали запись на завтра» продолжала СОЗДАНИЕ
+            # записи на завтра: «завтра» читалось как ответ на «какой день».
+            # Ход уходит дальше, а контекст снимается: иначе следующая реплика
+            # («ту, что на завтра») продолжила бы запись на ход позже. Снимается
+            # на ЭТОМ экземпляре разговора — ``forget_pending_booking`` пишет в
+            # другой, и обработчик позже в том же ходу перезаписывает состояние.
+            # Глагол без записи («нет, отмени, лучше на послезавтра») — это
+            # исправление дня, запись продолжается.
+            save_booking_context(conversation, None)
             return None
         if ctx.awaiting == AWAITING_SERVICE:
             return _continue_pending_service(
@@ -1464,6 +1494,56 @@ def route_global_human_handoff(
         trace_id,
     )
     return DiscoveryReply(text=_HANDOFF_REPLY)
+
+
+#: DRF-2751 — ответ на обращение из двери поддержки. ЧЕРНОВИК, финал за
+#: владельцем. Только факт: ни срока, ни места ответа. «Ответят в течение
+#: 30 минут» ничем не держится ни на одном пути (DRF-2753); «ответит здесь,
+#: в этом чате» — тоже: пути, которым ответ оператора доходит до клиента в
+#: чате бота, в коде нет, а при единственном салоне задача обычной передачи
+#: ложится на разговор другого чата. Не обещаем то, что не доказано.
+SUPPORT_REQUEST_REPLY = "Передаю твой вопрос менеджеру."
+
+
+def route_support_request(
+    *,
+    global_conversation,
+    message_text: str,
+    trace_id: str | uuid.UUID | None = None,
+) -> DiscoveryReply:
+    """Обращение в поддержку Ayla из клиентского бота (DRF-2751).
+
+    Человек пришёл по ссылке поддержки и сделал второй шаг — нажал «Позвать
+    человека» или написал, что случилось. Задача ВСЕГДА ложится в очередь
+    платформы: GLOBAL-разговор под сентинел-тенантом.
+
+    Почему не :func:`route_global_human_handoff`: тот при единственном салоне
+    у личности кладёт задачу салону — «позовите администратора» там и
+    вправду про салон. Дверь поддержки открывается из шторок личных данных
+    мини-приложения (выгрузка, удаление): это обращение к Ayla, и салону
+    его видеть незачем — а его диалог с клиентом при этом замолчал бы.
+
+    Человеку — :data:`SUPPORT_REQUEST_REPLY`: факт передачи, без срока и без места.
+    """
+    from apps.handoff.models import AdminTask
+    from apps.handoff.services import create_admin_task
+    from apps.identity.services.global_tenant import get_global_bot_tenant
+    from apps.tenancy.context import tenant_scope
+
+    with tenant_scope(get_global_bot_tenant()):
+        task = create_admin_task(
+            global_conversation,
+            task_type=AdminTask.TaskType.HANDOFF,
+            reason=f"Support door (client bot): {message_text[:80]}",
+        )
+    logger.info(
+        "marketplace.support_request.routed task=%s tenant=%s global_conversation=%s trace=%s",
+        task.id,
+        task.tenant_id,
+        global_conversation.id,
+        trace_id,
+    )
+    return DiscoveryReply(text=SUPPORT_REQUEST_REPLY)
 
 
 def _unambiguous_tenant_conversation(global_bot_user):

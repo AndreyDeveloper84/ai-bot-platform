@@ -27,6 +27,7 @@ import {
 } from "../lib/booking-flow";
 import { getCatalogBrowse } from "../lib/customer-booking";
 import { backTo } from "../lib/screen-back";
+import { alignMaster, alignService } from "../state/booking";
 
 export function ProviderChoiceScreen() {
   const navigate = useNavigate();
@@ -57,6 +58,19 @@ export function ProviderChoiceScreen() {
   }, [navigate, allProviders]);
 
   const back = backTo(OPTION_ROUTE);
+
+  // DRF-2752 — мастер фиксируется на шаге мастера, с именем; услуга этого
+  // пути — та, что в адресе. До этого листа экран только собирал адрес, и
+  // экран времени открывался с пустым или чужим черновиком.
+  function chooseMaster(master: { id: string; name: string }) {
+    if (serviceId) alignService(serviceId);
+    alignMaster(master.id, master.name);
+    navigate(
+      serviceId
+        ? `/customer/masters/${master.id}/slots?service=${serviceId}`
+        : `/customer/masters/${master.id}/slots`,
+    );
+  }
 
   if (choice === null) {
     return (
@@ -91,13 +105,7 @@ export function ProviderChoiceScreen() {
       <button
         type="button"
         className="btn-primary"
-        onClick={() =>
-          navigate(
-            serviceId
-              ? `/customer/masters/${best.master.id}/slots?service=${serviceId}`
-              : `/customer/masters/${best.master.id}/slots`,
-          )
-        }
+        onClick={() => chooseMaster(best.master)}
       >
         {PROVIDER_CTA(best.master.name)}
       </button>
@@ -115,13 +123,7 @@ export function ProviderChoiceScreen() {
                 key={option.master.id}
                 type="button"
                 className="btn-secondary"
-                onClick={() =>
-                  navigate(
-                    serviceId
-                      ? `/customer/masters/${option.master.id}/slots?service=${serviceId}`
-                      : `/customer/masters/${option.master.id}/slots`,
-                  )
-                }
+                onClick={() => chooseMaster(option.master)}
               >
                 {meta ? `${option.master.name} · ${meta}` : option.master.name}
               </button>

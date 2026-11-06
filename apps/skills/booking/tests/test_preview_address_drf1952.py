@@ -42,4 +42,4 @@ def test_preview_names_the_salon_address() -> None:
 
 def test_preview_without_an_address_says_to_ask_the_salon() -> None:
     tenant = Tenant.objects.create(slug="pv-noaddr", name="Салон")
-    assert "• Адрес: Уточните адрес в салоне" in _preview(tenant)
+    assert "• Адрес: Уточни адрес в салоне" in _preview(tenant)

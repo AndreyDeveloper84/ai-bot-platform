@@ -61,6 +61,7 @@ from django.utils import timezone
 
 from apps.catalog.models import CatalogMaster
 from apps.identity.models import BotUser
+from apps.tenancy.billing_gate import MasterAddRefused, assert_can_add_master
 from apps.tenancy.models import StaffInvite, Tenant, TenantStaff
 
 logger = logging.getLogger(__name__)
@@ -134,6 +135,21 @@ class MasterAlreadyLinked(InviteError):
     """
 
     slug = "wrong_recipient"
+
+
+class MasterAddBlocked(InviteError):
+    """Подписка салона не пускает ещё одного активного мастера (DRF-2984 B2).
+
+    Обёртка :class:`apps.tenancy.billing_gate.MasterAddRefused` для дверей,
+    которые и так понимают ``InviteError``: slug — вердикт гейта
+    (``subscription_frozen`` / ``subscription_canceled`` /
+    ``plan_change_required``), текст — слова гейта. Связка откатывается
+    вместе с погашением кода: код остаётся годным, когда подписку оплатят.
+    """
+
+    def __init__(self, refused: Any) -> None:
+        super().__init__(refused.detail)
+        self.slug = refused.slug
 
 
 class PersonAlreadyMaster(InviteError):
@@ -854,6 +870,18 @@ def link_master_to_person(
             bot_user.id,
         )
         raise MasterAlreadyLinked("catalog master is linked to a different person")
+
+    # DRF-2984 B2 — до привязки: она делает мастера активным в салоне.
+    try:
+        assert_can_add_master(Tenant.all_objects.get(pk=master.tenant_id), master_id=master.id)
+    except MasterAddRefused as exc:
+        logger.warning(
+            "identity.staff_invite.master_add_blocked invite=%s master=%s slug=%s",
+            invite_id,
+            master.id,
+            exc.slug,
+        )
+        raise MasterAddBlocked(exc) from exc
 
     master.linked_bot_user = bot_user
     master.invite_status = CatalogMaster.InviteStatus.ACCEPTED

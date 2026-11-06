@@ -402,7 +402,10 @@ export function MasterProfileScreen() {
         setCropFile(null);
         setToast(PROFILE_COPY.toasts.photoSaved);
       } catch (e) {
-        setPhotoErr(PROFILE_COPY.states.photoNetwork);
+        // DRF-2881. Сервер ответил отказом — это не «проверьте интернет»:
+        // говорим фразой отказа сохранения (§6-кси п.4: подробность — в
+        // журнале, не на экране). «Интернет» — только когда ответа не было.
+        setPhotoErr(e instanceof ApiError ? saveRefusalText(e) : PROFILE_COPY.states.photoNetwork);
         hapticNotify("error");
       } finally {
         setPhotoUploading(false);
@@ -787,12 +790,17 @@ export function MasterProfileScreen() {
         <PhotoCropSheet
           file={cropFile}
           busy={photoUploading}
+          error={photoErr}
           onApply={(square) => void applyCrop(square)}
           onReplace={() => {
+            setPhotoErr("");
             setCropFile(null);
             galleryInputRef.current?.click();
           }}
-          onCancel={() => setCropFile(null)}
+          onCancel={() => {
+            setPhotoErr("");
+            setCropFile(null);
+          }}
         />
       ) : null}
 

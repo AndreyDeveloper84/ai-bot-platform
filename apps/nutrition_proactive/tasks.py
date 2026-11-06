@@ -338,7 +338,15 @@ def plan_daily_reports(
             decisions.append(decide("ayla_unavailable"))
             continue
 
-        text, blocked_by = vet_outbound(render.render_daily_report(summary, water, profile))
+        text, blocked_by = vet_outbound(
+            render.render_daily_report(
+                summary,
+                water,
+                profile,
+                # DRF-2766 — «Без чисел» действует и в вечернем отчёте.
+                hide_numbers=prefs.numbers_hidden(user_prefs),
+            )
+        )
         if blocked_by:
             # Not sent, and the idempotency key is NOT bumped: tomorrow is a
             # different report and deserves its own evaluation.

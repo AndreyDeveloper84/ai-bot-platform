@@ -42,6 +42,20 @@ const MEMORY = "/memory/";
 const MARKETING_SWITCH = "Получать акции и предложения от салонов";
 const HINTS_SWITCH = "Получать подсказки от Ayla";
 const REVOKE_ROW_BTN = "Отозвать согласие на хранение данных";
+const REGRANT_ROW_BTN = "Разрешить хранение данных";
+/**
+ * Текст приветственного согласия — литералом, а не импортом из lib: узел
+ * обязан поймать и расхождение копии в Mini App (`apps/skills/welcome/skill.py`
+ * S2_CONSENT_TEXT + S2A_DETAILS_TEXT, DRF-2709).
+ */
+const WELCOME_WORDS = [
+  "Прежде чем начать — короткое слово.",
+  "Я буду помнить о тебе только то, что поможет рекомендовать точнее. Хранится безопасно. Удалить можно в любой момент.",
+  "Продолжим?",
+  "Запоминаю: твои сообщения мне, выбранные цели, питание и вода если решишь логировать, записи к мастерам. Не делюсь с салонами без твоего разрешения. Подробнее в Профиле → «Данные обо мне» когда зайдёшь.",
+];
+/** Решение владельца §47.3, дословно (DRF-2709). Литералом: число слов — решение. */
+const HINTS_UNAVAILABLE = "Подсказки недоступны, пока согласие отозвано";
 
 function profileFixture(overrides: Partial<Profile> = {}): Profile {
   return {
@@ -67,6 +81,18 @@ interface DocOptions {
   marketing?: boolean;
   storageGranted?: boolean;
   hintsEnabled?: boolean;
+  /**
+   * Замок подсказок (`apps/consent/customer.py::proactive_hints_state`):
+   * сервер ставит его, когда согласие на хранение было и отозвано. В этом
+   * файле «согласия на хранение нет» всегда значит «отозвано», поэтому
+   * умолчание следует за `storageGranted`; «не давал никогда» — явным `false`.
+   */
+  hintsBlocked?: boolean;
+  /**
+   * `data_storage.regrant.document_version` (DRF-2709). Сервер отдаёт её
+   * всегда; умолчание — та версия, что сервер шлёт сегодня.
+   */
+  regrantVersion?: string;
   revocation?: { status: string; failed_steps?: string[] };
 }
 
@@ -89,7 +115,11 @@ function consentsDoc(o: DocOptions = {}): Record<string, unknown> {
       },
       health: { granted: false, granted_at: null, document_version: "" },
     },
-    proactive_hints: { enabled: o.hintsEnabled ?? true },
+    proactive_hints: {
+      enabled: o.hintsEnabled ?? true,
+      can_enable: !(o.hintsBlocked ?? !storageGranted),
+      blocked_reason: (o.hintsBlocked ?? !storageGranted) ? "consent_withdrawn" : "",
+    },
     data_storage: {
       granted: storageGranted,
       granted_at: at,
@@ -99,6 +129,7 @@ function consentsDoc(o: DocOptions = {}): Record<string, unknown> {
         consequences: ["ayla_delete", "memory_delete", "consent_withdraw"],
         retained: ["bookings", "payments"],
       },
+      regrant: { document_version: o.regrantVersion ?? "welcome-s2-v1" },
     },
   };
   if (o.revocation) doc.revocation = o.revocation;
@@ -462,7 +493,7 @@ describe("CustomerProfileScreen (настоящие ручки согласий)
     expect(within(dialog).queryByText(/revoked_something_new/)).toBeNull();
   }, 15000);
 
-  it("§35 п.9: подсказки после отзыва — то, что сказал сервер", async () => {
+  it("§35 п.9 + §47.3: после отзыва тумблера нет — есть объяснение", async () => {
     // Решение владельца требует, чтобы подсказки погасли, и теперь их
     // гасит сервер: `revoke_data_storage` ставит
     // `proactive_messages_opt_out` по всем оболочкам человека. Экран
@@ -491,10 +522,88 @@ describe("CustomerProfileScreen (настоящие ручки согласий)
     );
     await screen.findByText(/Согласие отозвано/);
     await user.click(screen.getByRole("button", { name: "Закрыть" }));
-    expect(
-      await screen.findByRole("switch", { name: HINTS_SWITCH }),
-    ).toHaveAttribute("aria-checked", "false");
+    // DRF-2709: сервер после отзыва говорит не только «выключено», но и
+    // «включить нельзя» — и экран показывает это словами владельца.
+    expect(await screen.findByText(HINTS_UNAVAILABLE)).toBeInTheDocument();
+    expect(screen.queryByRole("switch", { name: HINTS_SWITCH })).toBeNull();
   }, 15000);
+
+  describe("DRF-2709 — §47.3-б: объяснение вместо обычного включения", () => {
+    it("согласие отозвано: строка подсказок есть, тумблера нет, объяснение — дословно", async () => {
+      routeRequests({}, { storageGranted: false, hintsEnabled: false });
+      await renderFresh();
+      // Presence first: the section and its row are on screen.
+      const row = await screen.findByRole("group", { name: "Подсказки от Ayla" });
+      expect(within(row).getByText(HINTS_UNAVAILABLE)).toBeInTheDocument();
+      expect(within(row).getByText(/напишет первой/)).toBeInTheDocument();
+      expect(screen.queryByRole("switch", { name: HINTS_SWITCH })).toBeNull();
+    }, 15000);
+
+    it("согласия не давали никогда: замка нет, тумблер на месте", async () => {
+      routeRequests({}, { storageGranted: false, hintsBlocked: false, hintsEnabled: false });
+      await renderFresh();
+      expect(
+        await screen.findByRole("switch", { name: HINTS_SWITCH }),
+      ).toHaveAttribute("aria-checked", "false");
+      expect(screen.queryByText(HINTS_UNAVAILABLE)).toBeNull();
+    }, 15000);
+
+    it("включённые при замке (не должно быть): тумблер остаётся — выключить можно всегда", async () => {
+      routeRequests({}, { storageGranted: false, hintsEnabled: true });
+      await renderFresh();
+      expect(
+        await screen.findByRole("switch", { name: HINTS_SWITCH }),
+      ).toHaveAttribute("aria-checked", "true");
+    }, 15000);
+
+    it("экран устарел, сервер ответил 409 consent_withdrawn — объяснение, а не «попробуй ещё раз»", async () => {
+      const user = userEvent.setup();
+      routeRequests(
+        {
+          [HINTS]: () => {
+            throw new ApiError(
+              409,
+              "consent_withdrawn",
+              "proactive hints cannot be enabled while the data-storage consent is withdrawn",
+            );
+          },
+        },
+        { hintsEnabled: false },
+      );
+      await renderFresh();
+      const toggle = await screen.findByRole("switch", { name: HINTS_SWITCH });
+      await user.click(toggle);
+      await waitFor(() =>
+        expect(requestMock).toHaveBeenCalledWith(HINTS, {
+          method: "POST",
+          body: JSON.stringify({ enabled: true }),
+        }),
+      );
+      const row = await screen.findByRole("group", { name: "Подсказки от Ayla" });
+      await waitFor(() => expect(within(row).getByText(HINTS_UNAVAILABLE)).toBeInTheDocument());
+      expect(screen.queryByRole("switch", { name: HINTS_SWITCH })).toBeNull();
+      expect(screen.queryByText("Не получилось сохранить. Попробуй ещё раз.")).toBeNull();
+    }, 15000);
+
+    it("другой отказ сервера — прежний тост, тумблер на месте", async () => {
+      const user = userEvent.setup();
+      routeRequests(
+        {
+          [HINTS]: () => {
+            throw new ApiError(502, "", "");
+          },
+        },
+        { hintsEnabled: false },
+      );
+      await renderFresh();
+      await user.click(await screen.findByRole("switch", { name: HINTS_SWITCH }));
+      expect(
+        await screen.findByText("Не получилось сохранить. Попробуй ещё раз."),
+      ).toBeInTheDocument();
+      expect(screen.getByRole("switch", { name: HINTS_SWITCH })).toBeInTheDocument();
+      expect(screen.queryByText(HINTS_UNAVAILABLE)).toBeNull();
+    }, 15000);
+  });
 
   it("409 stale_disclosure: не дожимаем тело, а перечитываем раскрытие", async () => {
     const user = userEvent.setup();
@@ -565,16 +674,93 @@ describe("CustomerProfileScreen (настоящие ручки согласий)
     expect(screen.queryByText(/осталось действующим/)).toBeNull();
   }, 15000);
 
-  it("отозванное согласие: кнопки выдачи нет, потому что ручки нет", async () => {
-    routeRequests({}, { storageGranted: false });
+  it("отозванное согласие, а версию с известным экрану текстом сервер не предлагает — кнопки нет", async () => {
+    routeRequests({}, { storageGranted: false, regrantVersion: "welcome-s9-v9" });
     await renderFresh();
     await screen.findByText("Аня");
     // Положительная стража: строка на месте и говорит состояние.
     const row = screen.getByRole("group", { name: "Хранение данных" });
     expect(within(row).getByText("Не разрешено")).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /Разрешить хранение/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: REGRANT_ROW_BTN })).toBeNull();
     expect(screen.queryByRole("button", { name: REVOKE_ROW_BTN })).toBeNull();
   }, 15000);
+
+  describe("DRF-2709 — «Разрешить»: лист с текстом приветствия дословно (вариант А)", () => {
+    it("после отзыва в строке хранения есть «Разрешить»", async () => {
+      routeRequests({}, { storageGranted: false, hintsEnabled: false });
+      await renderFresh();
+      const row = await screen.findByRole("group", { name: "Хранение данных" });
+      expect(within(row).getByText("Не разрешено")).toBeInTheDocument();
+      expect(within(row).getByRole("button", { name: REGRANT_ROW_BTN })).toBeInTheDocument();
+    }, 15000);
+
+    it("согласия не давали никогда (замка нет) — «Разрешить» здесь не предлагается", async () => {
+      routeRequests({}, { storageGranted: false, hintsBlocked: false, hintsEnabled: false });
+      await renderFresh();
+      const row = await screen.findByRole("group", { name: "Хранение данных" });
+      expect(within(row).getByText("Не разрешено")).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: REGRANT_ROW_BTN })).toBeNull();
+    }, 15000);
+
+    it("лист показывает текст приветствия дословно; «Отмена» ничего не шлёт", async () => {
+      const user = userEvent.setup();
+      routeRequests({}, { storageGranted: false, hintsEnabled: false });
+      await renderFresh();
+      await user.click(await screen.findByRole("button", { name: REGRANT_ROW_BTN }));
+      const dialog = await screen.findByRole("dialog");
+      for (const paragraph of WELCOME_WORDS) {
+        expect(within(dialog).getByText(paragraph)).toBeInTheDocument();
+      }
+      await user.click(within(dialog).getByRole("button", { name: "Отмена" }));
+      expect(requestMock).not.toHaveBeenCalledWith(DATA_STORAGE, expect.anything());
+    }, 15000);
+
+    it("«Разрешить» в листе шлёт версию показанного текста — согласие действует, подсказки выключены, но включаемы", async () => {
+      const user = userEvent.setup();
+      routeRequests(
+        {
+          [DATA_STORAGE]: () => consentsDoc({ storageGranted: true, hintsEnabled: false, hintsBlocked: false }),
+        },
+        { storageGranted: false, hintsEnabled: false },
+      );
+      await renderFresh();
+      // До выдачи — объяснение §47.3 вместо тумблера.
+      expect(await screen.findByText(HINTS_UNAVAILABLE)).toBeInTheDocument();
+      await user.click(await screen.findByRole("button", { name: REGRANT_ROW_BTN }));
+      const dialog = await screen.findByRole("dialog");
+      await user.click(within(dialog).getByRole("button", { name: "Разрешить" }));
+      await waitFor(() =>
+        expect(requestMock).toHaveBeenCalledWith(DATA_STORAGE, {
+          method: "POST",
+          body: JSON.stringify({ document_version: "welcome-s2-v1" }),
+        }),
+      );
+      expect(await screen.findByText("Разрешено 14 мая 2026")).toBeInTheDocument();
+      // §47.3: возможность включить вернулась, само включение — нет.
+      expect(
+        await screen.findByRole("switch", { name: HINTS_SWITCH }),
+      ).toHaveAttribute("aria-checked", "false");
+      expect(screen.queryByText(HINTS_UNAVAILABLE)).toBeNull();
+    }, 15000);
+
+    it("сервер не принял версию (409) — лист говорит, что текст обновился, и ничего не меняется", async () => {
+      const user = userEvent.setup();
+      routeRequests(
+        {
+          [DATA_STORAGE]: () => {
+            throw new ApiError(409, "stale_document", "changed");
+          },
+        },
+        { storageGranted: false, hintsEnabled: false },
+      );
+      await renderFresh();
+      await user.click(await screen.findByRole("button", { name: REGRANT_ROW_BTN }));
+      const dialog = await screen.findByRole("dialog");
+      await user.click(within(dialog).getByRole("button", { name: "Разрешить" }));
+      expect(await within(dialog).findByText(/Текст про данные обновился/)).toBeInTheDocument();
+      expect(screen.queryByText(/Разрешено 14 мая/)).toBeNull();
+    }, 15000);
+  });
 
   it("телефон на экране не появляется (DRF-1039)", async () => {
     await renderFresh();
@@ -688,6 +874,105 @@ describe("CustomerProfileScreen (prod build)", () => {
           disclosure_version: "data-storage-revocation-v1",
         }),
       }),
+    );
+  }, 15000);
+});
+
+// ── DRF-2766 — «Без чисел»: добровольный выбор, а не признак анкеты ─────────
+describe("CustomerProfileScreen — «Без чисел» (DRF-2766)", () => {
+  const DISPLAY = "/me/nutrition-display/";
+  const SWITCH = "Без чисел: скрывать калории, БЖУ и цели";
+
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+    vi.clearAllMocks();
+    fetchProfileMock.mockResolvedValue(profileFixture());
+  }, 15000);
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("строка «Без чисел» показывает сохранённый выбор (по умолчанию выключено)", async () => {
+    routeRequests({ [DISPLAY]: () => ({ numbers_hidden: false }) });
+    await renderFresh();
+
+    const toggle = await screen.findByRole("switch", { name: SWITCH });
+    expect(toggle).toHaveAttribute("aria-checked", "false");
+    expect(screen.getByText("Без чисел")).toBeVisible();
+  }, 15000);
+
+  it("включённый на сервере выбор виден включённым", async () => {
+    routeRequests({ [DISPLAY]: () => ({ numbers_hidden: true }) });
+    await renderFresh();
+
+    expect(await screen.findByRole("switch", { name: SWITCH })).toHaveAttribute(
+      "aria-checked",
+      "true",
+    );
+  }, 15000);
+
+  it("нажатие сохраняет выбор на сервере и показывает новое состояние", async () => {
+    const posted: unknown[] = [];
+    routeRequests({
+      [DISPLAY]: (init?: RequestInit) => {
+        if (init?.method === "POST") {
+          const body = JSON.parse(String(init.body)) as { numbers_hidden: boolean };
+          posted.push(body);
+          return { numbers_hidden: body.numbers_hidden };
+        }
+        return { numbers_hidden: false };
+      },
+    });
+    const user = userEvent.setup();
+    await renderFresh();
+
+    await user.click(await screen.findByRole("switch", { name: SWITCH }));
+
+    await waitFor(() =>
+      expect(screen.getByRole("switch", { name: SWITCH })).toHaveAttribute(
+        "aria-checked",
+        "true",
+      ),
+    );
+    expect(posted).toEqual([{ numbers_hidden: true }]);
+    expect(await screen.findByText("Хорошо, числа скрыты. Записи дневника на месте.")).toBeVisible();
+  }, 15000);
+
+  it("отказ сервера — состояние прежнее и честная подпись", async () => {
+    routeRequests({
+      [DISPLAY]: (init?: RequestInit) => {
+        if (init?.method === "POST") throw new ApiError(409, "nutrition_display_unavailable", "нет");
+        return { numbers_hidden: false };
+      },
+    });
+    const user = userEvent.setup();
+    await renderFresh();
+
+    await user.click(await screen.findByRole("switch", { name: SWITCH }));
+
+    expect(await screen.findByText("Не получилось сохранить. Попробуй ещё раз.")).toBeVisible();
+    expect(screen.getByRole("switch", { name: SWITCH })).toHaveAttribute("aria-checked", "false");
+  }, 15000);
+
+  it("выбор не прочитался — строки нет, выдуманного «выключено» нет", async () => {
+    routeRequests();
+    await renderFresh();
+
+    // Положительная пара: соседняя строка раздела отрисована.
+    expect(await screen.findByRole("switch", { name: MARKETING_SWITCH })).toBeVisible();
+    expect(screen.queryByRole("switch", { name: SWITCH })).not.toBeInTheDocument();
+  }, 15000);
+
+  it("без сети тумблер закрыт", async () => {
+    goOffline();
+    routeRequests({ [DISPLAY]: () => ({ numbers_hidden: false }) });
+    await renderFresh();
+
+    expect(await screen.findByRole("switch", { name: SWITCH })).toHaveAttribute(
+      "aria-disabled",
+      "true",
     );
   }, 15000);
 });

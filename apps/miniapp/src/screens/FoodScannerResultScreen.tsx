@@ -10,8 +10,11 @@
  *
  * # ED-mode rendering (critical)
  *
- * If `health_flags.eating_disorder === true` OR `result.nutrition === null`
- * (Ayla omits numbers in ED mode), hide all numeric nutrition values.
+ * If the person chose «Без чисел» (`nutrition_numbers_hidden`, DRF-2766)
+ * OR `result.nutrition === null`, hide all numeric nutrition values. The
+ * name «ED mode» is historical: until the owner's decision of 04.10 the
+ * flag was derived from `health_flags.eating_disorder`; now it is the
+ * person's own choice.
  * Render text-only «Примерно». Portion ± buttons still functional but
  * suppress updated number display.
  *

@@ -79,6 +79,13 @@ export interface FoodDiaryEntry {
   /** DRF-2371 — `null`, когда каталог сохранил блюдо без чисел; не ноль. */
   calories: number | null;
   /**
+   * DRF-2761 — оценка калорий ИИ: справочник блюда не знает, число дала
+   * модель. `calories` при ней `null`. Не проверенное число: показывается
+   * только с пометкой «Оценка ИИ» (`aiKcalPhrase`) и ни в какие суммы не
+   * входит. Поля нет в старом ответе — читать как «оценки нет».
+   */
+  ai_calories?: number | null;
+  /**
    * DRF-2455 — макросы тоже бывают отсутствующими, и **по отдельности**:
    * каталог пишет их независимо, так что «калории есть, белка нет» —
    * не выдумка, а обычная запись. Тип это скрывал, и карточка напечатала
@@ -130,6 +137,13 @@ export interface WellnessToday {
    * way a zero can.
    */
   calories_eaten?: number;
+  /**
+   * DRF-2766 фаза 2 — сколько записей вошло в `calories_eaten` оценкой ИИ
+   * и сколько без какого-либо значения калорий. `calories_eaten` нет, а
+   * `calories_unscored > 0` — день прочитан, но итога нет (не сбой чтения).
+   */
+  calories_ai_included?: number;
+  calories_unscored?: number;
   /** User's target (kcal). Pulled from Layer 2 Goals or anketa. */
   calories_target?: number;
   /**

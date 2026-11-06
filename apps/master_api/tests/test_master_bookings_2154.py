@@ -252,6 +252,7 @@ class TestBookingDetail:
             "status",
             "temporal_state",
             "minutes_until",
+            "appointment_version",
             "checked_at",
         }
 

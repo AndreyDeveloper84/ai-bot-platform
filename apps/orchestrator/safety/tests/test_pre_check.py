@@ -269,6 +269,10 @@ class TestLatency:
         import time
 
         texts = ["normal text"] * 100
+        # Шаблоны компилируются лениво, при первом вызове; длинное правило
+        # «умираю» (DRF-2684) собирается ~40 мс. Замер — про вызовы, не про
+        # первую сборку: прогрев выносит её за таймер.
+        pre_check(texts[0])
         start = time.perf_counter()
         for t in texts:
             pre_check(t)

@@ -9,12 +9,24 @@
  *
  * The naive guard `master.rating ? …` does not catch it: "0.00" is a
  * non-empty STRING, i.e. truthy. Hence the explicit domain check here.
+ *
+ * DRF-2875 (решение владельца 07.10, п.20): оценка без отзывов — тоже не
+ * рейтинг. На пилоте у мастеров стояла импортированная «4.9» при нуле
+ * отзывов; клиенту она показывалась как рейтинг Ayla. Число отзывов —
+ * обязательный аргумент: спросить оценку, не назвав его, нельзя.
  */
-export function publicRating(raw: string | number | null | undefined): number | null {
+export function publicRating(
+  raw: string | number | null | undefined,
+  reviewCount: number | null | undefined,
+): number | null {
   if (raw === null || raw === undefined || raw === "") return null;
+  if (!reviewCount || !Number.isFinite(reviewCount) || reviewCount < 1) return null;
   const value = Number(raw);
   return Number.isFinite(value) && value >= 1 ? value : null;
 }
+
+/** Слова владельца (лист решений 07.10, п.20) — у мастера без отзывов. */
+export const NO_REVIEWS_LABEL = "Пока нет отзывов";
 
 /**
  * «(108 отзывов)» — только когда число известно и больше нуля (DRF-1778).

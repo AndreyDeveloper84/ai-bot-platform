@@ -74,6 +74,8 @@ _PUBLIC_KEYS = {
     "rating",
     "photo_url",
     "city",
+    # DRF-2875 — оценка уходит только вместе с числом отзывов за ней.
+    "review_count",
 }
 
 

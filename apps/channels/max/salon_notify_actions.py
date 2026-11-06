@@ -96,33 +96,10 @@ def _schedule(action: str, ref: str, tenant: Any, bot_user: Any) -> str:
 
 
 def _reject(ref: str, tenant: Any, bot_user: Any) -> str:
-    from apps.admin_api.services.availability import (
-        AvailabilityDecisionError,
-        reject_availability_request,
-    )
+    # DRF-2784: одна реализация на обе кнопки — уведомления и списка заявок.
+    from apps.channels.max import staff_actions
 
-    try:
-        parsed = UUID(str(ref))
-    except (ValueError, AttributeError):
-        return "Заявка не найдена."
-    try:
-        reject_availability_request(
-            request_id=parsed,
-            tenant_id=tenant.id,
-            actor=None,
-            actor_bot_user_id=getattr(bot_user, "id", None),
-            actor_role="admin",
-            rejection_reason=REJECT_REASON_BY_CODE["chat_declined"],
-        )
-    except AvailabilityDecisionError as exc:
-        slug = getattr(exc, "slug", "")
-        if slug == "already_decided":
-            return "Эту заявку уже рассмотрели."
-        if slug == "not_found":
-            return "Заявка не найдена."
-        logger.warning("channels.max.salon_notify.reject_failed slug=%s request=%s", slug, ref)
-        return "Не получилось отклонить заявку. Попробуйте из кабинета салона."
-    return "Заявка отклонена. Мастер получит уведомление."
+    return staff_actions.reject_request(tenant=tenant, request_id=ref, actor=bot_user)
 
 
 def _schedule_details(ref: str, tenant: Any) -> str:

@@ -17,6 +17,6 @@ app_name = "salon_knowledge_webhooks"
 urlpatterns = [
     # KB-SYNC — Shiro-Py salon-knowledge service POSTs ``knowledge.approved``
     # here. See ``apps/kb/webhooks.py`` module docstring + the architectural
-    # decision recorded in ``docs/design/2026-05-18-phase-5-architecture-comparison.md``.
+    # decision recorded in ``docs/design/legacy/2026-05-18-phase-5-architecture-comparison.md``.
     path("webhook/approved/", webhooks.knowledge_approved, name="approved"),
 ]

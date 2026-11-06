@@ -13,13 +13,22 @@ Only capabilities that actually work are shown. A button that opens a
 "скоро" message is worse than no button: it costs a tap, teaches the person
 the bot is unfinished, and hides the working entries among the dead ones.
 So the menu carries the day view, the pending-requests queue, and the door
-into the Mini App — and nothing else yet.
+into the Mini App.
 
-Manual booking, completing a visit and marking a no-show are absent for a
-harder reason: **Ayla has no endpoint where the actor is a salon employee.**
-The public create rejects everyone but the client, complete/no_show check
-`is_specialist` and row ownership. A button here would be a promise the
-backend cannot keep. That work is the salon-ops window's (DRF-1063/1064).
+The decisions live under the answers, not in the menu (DRF-2784): approve
+or reject under the request list; «состоялся» / «не пришёл» under the
+salon's day. They go through the salon surface where the actor IS a salon
+employee (``salon_client.complete_appointment`` / ``mark_no_show``, the same
+writes as the admin Mini App). An earlier version of this paragraph said
+Ayla had no such endpoint; that stopped being true with DRF-1063/1851, and
+the paragraph kept the bot from offering what the backend already did.
+
+Those writes are owner / administrator only — the salon surface admits
+``IsTenantAdmin`` and nobody else. A master acts on their OWN appointments
+through the catalog's specialist endpoints instead (DRF-2785,
+``master_actions``): «✅ Подтверждаю» / «❌ Не смогу» on «У вас новая
+запись», «состоялся» / «не пришёл» under «📅 Мой день». Manual booking in
+chat is the next phase.
 
 ### Callback convention
 
@@ -37,10 +46,20 @@ Mini App address per bot a global would send staff to the customer app.
 When neither is configured the button is omitted entirely — a dead button
 is worse than a missing one.
 
-The payload carries no route: the Mini App already routes by resolved role
-(admin → /admin/team, master → /master/dashboard), and the frontend's
-``_ROUTE_MAP`` knows only customer slugs today. Sending an unknown slug
-would land the person on the default anyway.
+The cabinet button's payload carries no route, by choice: «Кабинет» means
+«wherever my role lands», and the Mini App already routes by resolved role
+(admin → /admin/team, master → /master/dashboard).
+
+That is a choice, not a limit of the frontend. Its ``_ROUTE_MAP``
+(``apps/miniapp/src/lib/max-sdk.ts``) knows the staff slugs —
+``open_admin_today`` / ``_schedule`` / ``_ayla`` / ``_booking_new`` and
+``open_master_today`` / ``_schedule`` / ``_ayla`` — and the bot uses them
+where a button names a SCREEN: the greeting's row
+(``salon_greeting.ADMIN_SLUGS`` / ``MASTER_SLUGS``) and «Расписание» under
+a master's empty day (DRF-2759). An earlier version of this paragraph said
+the map «knows only customer slugs today»; that stopped being true when the
+staff slugs landed, and a reader who believed it would have built a second
+way to open a staff screen.
 
 It is also written in a DIFFERENT grammar from the callback buttons above,
 and that is not a slip. MAX validates an ``open_app`` payload against
@@ -62,10 +81,58 @@ CB_REQUESTS = "cb:staff:requests"
 #: администратора — поимённый список того, что мешает записи.
 CB_READINESS = "cb:staff:readiness"
 
+#: Labels of the chat buttons above — one place, so the menu and the morning
+#: digest (DRF-2769) cannot drift apart.
+LABEL_DAY_ADMIN = "📅 Сегодня"
+LABEL_DAY_MASTER = "📅 Мой день"
+LABEL_REQUESTS = "🗒 Заявки от мастеров"
+#: DRF-2786 — the chat booking; distinct from the Mini App's «＋ Новая запись».
+LABEL_BOOK = "✍️ Записать клиента"
+
 #: Approving one request. The request id rides in the 4th segment;
 #: `parse_callback` splits on the first three colons only, so a UUID
 #: survives intact.
 CB_APPROVE_PREFIX = "cb:staff:req_ok:"
+
+#: Rejecting one request (DRF-2784) — same shape as approval.
+CB_REJECT_PREFIX = "cb:staff:req_no:"
+
+#: One visit of the salon's day (DRF-2784): the tap reads the canonical
+#: version and asks «Визит состоялся?». Ref — the appointment id.
+CB_VISIT_PREFIX = "cb:staff:visit:"
+
+#: The answers to that question. Ref — ``<appointment_id>:<version>``, the
+#: version the question showed; ``staff_actions.settle`` splits on the LAST
+#: colon, so the id survives intact.
+CB_COMPLETE_PREFIX = "cb:staff:done:"
+CB_NOSHOW_PREFIX = "cb:staff:noshow:"
+
+#: The master's own appointment (DRF-2785) — ref ``<appointment_id>:<version>``
+#: (version 0 = not known; ``master_actions.parse_ref``).
+#: «✅ Подтверждаю» on «У вас новая запись».
+CB_ACK_PREFIX = "cb:staff:ack:"
+#: «❌ Не смогу» — asks first; the answer «Да, отменить» is ``CB_CANT_OK_PREFIX``.
+CB_CANT_PREFIX = "cb:staff:cant:"
+CB_CANT_OK_PREFIX = "cb:staff:cant_ok:"
+#: One visit of the master's own day → «Визит состоялся?» (ref — the id).
+CB_MVISIT_PREFIX = "cb:staff:mvisit:"
+#: Its answers, as the master (not the salon surface).
+CB_MDONE_PREFIX = "cb:staff:mdone:"
+CB_MNOSHOW_PREFIX = "cb:staff:mnoshow:"
+
+#: «✍️ Записать клиента» — a new booking in the chat (DRF-2786,
+#: ``staff_booking``). Every step's callback starts with ``cb:staff:bk_``;
+#: any OTHER staff button drops the draft.
+CB_BK_NEW = "cb:staff:bk_new"
+CB_BK_MASTER_PREFIX = "cb:staff:bk_m:"
+CB_BK_SERVICE_PREFIX = "cb:staff:bk_s:"
+CB_BK_DATE_PREFIX = "cb:staff:bk_d:"
+#: Ref — the index of the start in the draft (the timestamp stays server-side).
+CB_BK_SLOT_PREFIX = "cb:staff:bk_t:"
+CB_BK_CLIENT_PREFIX = "cb:staff:bk_c:"
+CB_BK_NEW_CLIENT = "cb:staff:bk_nc"
+CB_BK_CREATE = "cb:staff:bk_ok"
+BK_PREFIX = "cb:staff:bk_"
 
 #: Payload of the Mini App button — and the one identifier in this module
 #: that CANNOT use the ``cb:staff:*`` grammar above.
@@ -126,10 +193,14 @@ def menu_buttons(role_ctx, entry) -> list[dict[str, str]]:
     is_admin_side = role_ctx.is_owner or role_ctx.is_admin or role_ctx.is_receptionist
 
     if is_admin_side:
-        buttons.append({"label": "📅 Сегодня", "callback": CB_DAY})
-        buttons.append({"label": "🗒 Заявки от мастеров", "callback": CB_REQUESTS})
+        buttons.append({"label": LABEL_DAY_ADMIN, "callback": CB_DAY})
+        buttons.append({"label": LABEL_REQUESTS, "callback": CB_REQUESTS})
+        if role_ctx.is_owner or role_ctx.is_admin:
+            # DRF-2786 — the booking write is owner / administrator only, as
+            # `require_admin_role` on the Mini App's create; not the front desk.
+            buttons.append({"label": LABEL_BOOK, "callback": CB_BK_NEW})
     elif role_ctx.is_master:
-        buttons.append({"label": "📅 Мой день", "callback": CB_DAY})
+        buttons.append({"label": LABEL_DAY_MASTER, "callback": CB_DAY})
 
     label = "🏠 Кабинет салона" if is_admin_side else "🏠 Мой кабинет"
     app_button = _miniapp_button(entry, label)

@@ -7,9 +7,10 @@ cost stays well within budget.
 
 ### What's mocked
 
-- **OpenAIProvider.complete** — returns a pinned LLMResponse instantly
-  (no real LLM call). Simulates the "best case" — production p95 is
-  dominated by LLM round-trip; in-process work should be <50ms.
+- **``complete`` of every vendor class** (OpenAI and Anthropic) — returns a
+  pinned ``CompletionResult`` instantly (no real LLM call). Simulates the
+  "best case" — production p95 is dominated by LLM round-trip; in-process
+  work should be <50ms.
 - **send_message** (MAX outbound) — returns success instantly.
 
 ### What's measured
@@ -27,7 +28,24 @@ this test doesn't exercise. In-process p95 <100ms is the actual gate
 this test enforces; LLM/DB latency lives in service probes.
 
 If p95 exceeds 100ms, the regression is in pipeline glue code (not
-external services). Sprint 8 observability will hang Prometheus
+external services).
+
+### The thresholds below are NOT that gate — read before trusting them (DRF-2696)
+
+From 2026-06-02 to 2026-10-01 the LLM stub in this file intercepted nothing
+(see ``_stub_external_io``) and every number asserted here was a round-trip to
+``api.openai.com``. The asserted ceilings — p95 < 1000 ms, worst < 6000 ms —
+were therefore never a statement about in-process cost in that period, and the
+"<100ms" and "<50ms" figures above were not checked by anything.
+
+With the stub repaired the same ceilings are left in place on purpose: one
+measurement, on a developer machine that was busy with another test run,
+Postgres, gave p50 153–205 ms, p95 357–503 ms, max 708–1235 ms for 100 turns
+(the unrepaired file, same machine, same minute: p50 323, p95 556, max 4062).
+That is not a basis for a tighter number, and it does say the in-process cost
+is not under 100 ms on Postgres. An honest ceiling needs a quiet measurement
+on the CI runner; until it is taken these assertions catch only a gross
+regression. Sprint 8 observability will hang Prometheus
 histograms off the same instrumentation hooks this test exercises.
 """
 
@@ -36,13 +54,12 @@ from __future__ import annotations
 import json
 import statistics
 import time
-from typing import Any
 from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
 import pytest
 
-from apps.orchestrator.llm.openai_provider import LLMResponse
+from apps.llm.protocol import CompletionResult
 from apps.orchestrator.pipeline import ChannelMessage, turn
 from apps.tenancy.models import Tenant
 
@@ -68,16 +85,27 @@ _INTENT_JSON = json.dumps(
 )
 
 
-def _mock_provider() -> Any:
-    provider = AsyncMock()
-    provider.complete.return_value = LLMResponse(
-        content=_INTENT_JSON,
-        model="mock",
-        is_fallback=False,
-        tokens_in=10,
-        tokens_out=20,
+#: Every vendor class the router can hand out. All of them, not only the
+#: default one: with a single class stubbed, a run under another
+#: ``LLM_PROVIDER`` would reach the real SDK and the test would go back to
+#: timing a vendor without anybody noticing.
+_VENDOR_COMPLETE: tuple[str, ...] = (
+    "apps.llm.providers.openai_provider.OpenAIProvider.complete",
+    "apps.llm.providers.anthropic_provider.AnthropicProvider.complete",
+)
+
+
+def _instant_completion() -> AsyncMock:
+    """``complete`` of a vendor class: the pinned decision, no I/O."""
+    return AsyncMock(
+        return_value=CompletionResult(
+            text=_INTENT_JSON,
+            model="mock",
+            provider="mock",
+            prompt_tokens=10,
+            completion_tokens=20,
+        )
     )
-    return provider
 
 
 def _message(text: str = "когда работаете?") -> ChannelMessage:
@@ -99,12 +127,20 @@ def tenant():
 
 @pytest.fixture(autouse=True)
 def _stub_external_io():
-    """Mock LLM + outbound — measure in-process pipeline cost only."""
+    """Mock LLM + outbound — measure in-process pipeline cost only.
+
+    DRF-2696. The LLM is stubbed on the vendor classes themselves. It used to
+    be ``patch("apps.orchestrator.intent_router.OpenAIProvider")``, which
+    stopped intercepting anything on 2026-06-02 (#987): the intent router
+    moved to the production path and takes its provider from the LLM router,
+    not from that name. From then on every turn here was a real
+    ``POST api.openai.com/v1/chat/completions`` with the CI's placeholder key
+    — 254 per run of this file — and the numbers asserted below were the
+    round-trip to a vendor's 401.
+    """
     with (
-        patch(
-            "apps.orchestrator.intent_router.OpenAIProvider",
-            return_value=_mock_provider(),
-        ),
+        patch(_VENDOR_COMPLETE[0], new=_instant_completion()),
+        patch(_VENDOR_COMPLETE[1], new=_instant_completion()),
         patch(
             "apps.channels.max.outbound.send_message",
             return_value={"ok": True},

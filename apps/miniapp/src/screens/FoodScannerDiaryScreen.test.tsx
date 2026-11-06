@@ -671,3 +671,54 @@ describe("правка и удаление записи — края из рев
     ).toBeInTheDocument();
   });
 });
+
+// ── DRF-2766 фаза 2 — итог дня с оценками ИИ ────────────────────────────────
+describe("дневник: итог дня с оценками ИИ (DRF-2766)", () => {
+  it("с оценками — «≈ 530 / 2100 ккал, включая оценки ИИ»", async () => {
+    mockedLoad.mockResolvedValue({
+      state: "entries",
+      entries: [OATS, SOUP],
+      hideNumbers: false,
+      today: today({ calories_ai_included: 1, calories_unscored: 0 }),
+    });
+    renderScreen();
+
+    expect(await screen.findByTestId("day-kcal-total")).toHaveTextContent(
+      "≈ 530 / 2100 ккал, включая оценки ИИ",
+    );
+    expect(screen.queryByTestId("day-kcal-incomplete")).not.toBeInTheDocument();
+  });
+
+  it("с записью без калорий — «Итог неполный», без «≈»", async () => {
+    mockedLoad.mockResolvedValue({
+      state: "entries",
+      entries: [OATS, SOUP],
+      hideNumbers: false,
+      today: today({ calories_ai_included: 0, calories_unscored: 1 }),
+    });
+    renderScreen();
+
+    const total = await screen.findByTestId("day-kcal-total");
+    expect(total).toHaveTextContent("530 / 2100 ккал");
+    expect(total.textContent).not.toContain("≈");
+    expect(screen.getByTestId("day-kcal-incomplete")).toHaveTextContent(
+      "Итог неполный: не у всех записей есть калории.",
+    );
+  });
+
+  it("итога нет — «Калории пока не посчитаны.»", async () => {
+    const withoutTotal = today({ calories_unscored: 2 });
+    delete (withoutTotal as { calories_eaten?: number }).calories_eaten;
+    mockedLoad.mockResolvedValue({
+      state: "entries",
+      entries: [OATS, SOUP],
+      hideNumbers: false,
+      today: withoutTotal,
+    });
+    renderScreen();
+
+    expect(await screen.findByTestId("day-kcal-total")).toHaveTextContent(
+      "Калории пока не посчитаны.",
+    );
+  });
+});

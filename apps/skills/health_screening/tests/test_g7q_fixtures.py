@@ -51,6 +51,31 @@ pytestmark = pytest.mark.django_db(transaction=True)
 BOOKING_INTENT = "запишите меня на массаж в пятницу"
 
 
+@pytest.fixture(autouse=True)
+def _no_model_behind_the_registry(monkeypatch):
+    """A turn that is not G7 falls through to whichever skill answers it.
+
+    DRF-2696. For ``T-S1-G7Q-NOT-05`` that skill is FAQ, and FAQ asks a model:
+    the fixture made a real ``POST api.openai.com/v1/chat/completions``. What
+    these fixtures assert is the screening state after the turn, not the
+    reply — so the model is unavailable here, which is also what the vendor's
+    401 amounted to. FAQ answers with its own fallback line.
+    """
+    from apps.llm.protocol import LLMError
+
+    class _NoModel:
+        default_completion_model = ""
+
+        async def complete(self, *args, **kwargs):
+            raise LLMError("no model behind the G7 fixtures")
+
+    class _Router:
+        def get_provider(self, *args, **kwargs):
+            return _NoModel()
+
+    monkeypatch.setattr("apps.llm.router.get_router", lambda: _Router())
+
+
 def _fresh(conversation: Conversation) -> Conversation:
     return Conversation.all_tenants.get(pk=conversation.pk)
 

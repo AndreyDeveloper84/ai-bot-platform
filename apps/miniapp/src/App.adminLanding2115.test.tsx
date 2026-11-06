@@ -216,12 +216,13 @@ describe("аватар → лист (DRF-2115)", () => {
 });
 
 describe("состав листа по роли (DRF-2115)", () => {
-  const ALLOWED = new Set(["profile", "team", "services", "staffChats", "settings"]);
+  // DRF-2988: «Подписка» — единственный финансовый пункт; экран есть.
+  const ALLOWED = new Set(["profile", "team", "services", "staffChats", "billing", "settings"]);
 
-  it("у владельца и администратора — управление, чаты, настройки; ничего финансового", () => {
+  it("у владельца и администратора — управление, чаты, подписка, настройки", () => {
     for (const me of [OWNER_ME, ADMIN_ME]) {
       const keys = avatarSheetItemsFor(me).map((i) => i.key);
-      expect(keys).toEqual(["team", "services", "staffChats", "settings"]);
+      expect(keys).toEqual(["team", "services", "staffChats", "billing", "settings"]);
       for (const k of keys) expect(ALLOWED.has(k)).toBe(true);
     }
   });
@@ -232,6 +233,7 @@ describe("состав листа по роли (DRF-2115)", () => {
       "team",
       "services",
       "staffChats",
+      "billing",
       "settings",
     ]);
     expect(avatarSheetItemsFor(OWNER_MASTER_ME)[0]?.to).toBe("/master/profile");

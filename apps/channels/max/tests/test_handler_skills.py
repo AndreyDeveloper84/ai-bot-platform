@@ -58,6 +58,41 @@ def mock_send(monkeypatch):
     return calls
 
 
+@pytest.fixture(autouse=True)
+def _no_chat_indicator(monkeypatch):
+    """«Прочитано» and «печатает…» are not sent: no call to MAX (DRF-2696).
+
+    ``send_chat_action`` goes to the network whenever a bot token is set, and
+    swallows its own failures — every turn in this file made two real
+    ``POST botapi.max.ru/chats/<id>/actions`` and stayed green.
+    """
+    from apps.channels.max import outbound
+
+    monkeypatch.setattr(outbound, "send_chat_action", lambda **kwargs: None)
+
+
+@pytest.fixture(autouse=True)
+def silence_notices(monkeypatch):
+    """What the handoff silence notice sends — through its own door.
+
+    DRF-2696. ``apps.handoff.silence`` imports ``send_message`` from the
+    outbound module at call time, so ``mock_send`` (which replaces the name
+    in the handler) never saw it: a follow-up during a handoff made a real
+    ``POST botapi.max.ru/messages``. Captured separately, on purpose —
+    ``mock_send`` keeps meaning «what the handler itself sent».
+    """
+    from apps.channels.max import outbound
+
+    calls: list[dict] = []
+
+    def fake_send(**kwargs):
+        calls.append(kwargs)
+        return {"ok": True}
+
+    monkeypatch.setattr(outbound, "send_message", fake_send)
+    return calls
+
+
 @pytest.fixture
 def fake_redis(monkeypatch):
     from apps.orchestrator.memory.tests.test_short_term import _FakeRedis
@@ -91,8 +126,21 @@ class TestHandoffTrigger:
 
 class TestSilenceUnderHandoff:
     def test_followup_message_in_handoff_state_silent(
-        self, tenant, mock_send, fake_redis, settings, mark_welcomed
+        self, tenant, mock_send, silence_notices, fake_redis, settings, mark_welcomed
     ):
+        """A follow-up during a handoff gets no ANSWER — and one notice of why.
+
+        DRF-2696. This test asserted three messages and one assistant turn,
+        i.e. that the bot says nothing at all. It has not been true of the
+        product since DRF-1558: the first follow-up of an episode is answered
+        with the silence notice, which is also written to the transcript
+        (``apps/handoff/silence.py``; its own tests are
+        ``apps/channels/tests/test_handoff_silence_notice.py``). The old
+        numbers held only because the notice went out through a door this
+        file did not stub — a real ``POST botapi.max.ru/messages`` — and MAX
+        refused the test token; a notice that fails to send is not recorded.
+        With the door stubbed the notice is delivered, as it is for a person.
+        """
         settings.STRICT_TENANT_SCOPE = "strict"
         with tenant_scope(tenant), trace_id_scope(str(uuid4())):
             mark_welcomed(user_id=10001, chat_id=20001)  # isolate from #85 auto-welcome
@@ -105,18 +153,17 @@ class TestSilenceUnderHandoff:
 
         bu = BotUser.all_tenants.get(channel="max", channel_user_id="10001")
         conv = Conversation.all_tenants.get(bot_user=bu)
-        # 3 messages from the first turn (user + assistant — handoff reply),
-        # PLUS the second turn's user message (recorded BEFORE the silent
-        # short-circuit in the handler) — but NO assistant for the second.
         msgs = list(Message.all_tenants.filter(conversation=conv).order_by("created_at"))
         # turn 1: user("оператор") + assistant(handoff reply) = 2
-        # turn 2: user("есть кто живой?") only = 1 → total 3
-        assert len(msgs) == 3
-        roles = [m.role for m in msgs]
-        # Only one assistant message — the handoff reply.
-        assert roles.count("assistant") == 1
-        # Send was called exactly once (handoff reply, not the silent followup).
+        # turn 2: user("есть кто живой?") + assistant(the silence notice) = 2
+        assert [m.role for m in msgs] == ["user", "assistant", "user", "assistant"]
+        # The handler itself sent exactly once — the handoff reply. The
+        # follow-up was not answered by a skill.
         assert len(mock_send) == 1
+        # What the person did get for the follow-up: one notice, to their chat.
+        assert len(silence_notices) == 1
+        assert silence_notices[0]["chat_id"] == "20001"
+        assert silence_notices[0]["text"] == msgs[3].content
 
 
 class TestResumeAfterResolve:

@@ -44,6 +44,7 @@ from django.conf import settings
 
 from apps.integrations.ayla.url_builder import AylaUrlBuilder, AylaUrlError
 from apps.integrations.ayla.request_id import with_request_id
+from apps.integrations.ayla.log_ref import external_user_log_ref
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +72,12 @@ logger = logging.getLogger(__name__)
 CONNECT_TIMEOUT_S: Final[float] = 6.0
 READ_TIMEOUT_S: Final[float] = 5.0
 RECONCILE_READ_TIMEOUT_S: Final[float] = 3.0
+#: Чтение документа ради ПОДСКАЗКИ цели в анкете питания (DRF-2187). Подсказка —
+#: необязательная строка под вопросом: без неё шаг полноценен, и ждать её полный
+#: бюджет чтения (5 s, а с соединением — 11 s) человеку незачем. Источник числа —
+#: замер выше: тёплое чтение 0.05–0.57 s; 2 s — это худшее измеренное с запасом
+#: ~3.5×, и короче и общего чтения, и сверки. Истёк — шаг рисуется без подсказки.
+GOAL_HINT_READ_TIMEOUT_S: Final[float] = 2.0
 
 #: Ключ финального шага анкеты (DRF-1451) — единственный шаг, ответ на
 #: который создаёт ``ClientGoal``, а значит единственный примиримый.
@@ -260,8 +267,8 @@ def _request(
     except (httpx.TimeoutException, httpx.NetworkError) as exc:
         _circuit.record_failure(now=time.monotonic())
         logger.warning(
-            "goals_client.network_failure ext_user=%s exc=%s",
-            external_user_id,
+            "goals_client.network_failure ext_ref=%s exc=%s",
+            external_user_log_ref(external_user_id),
             type(exc).__name__,
         )
         raise GoalsUnavailable(f"network: {type(exc).__name__}", cause=exc) from exc
@@ -269,8 +276,8 @@ def _request(
     if resp.status_code >= 500:
         _circuit.record_failure(now=time.monotonic())
         logger.warning(
-            "goals_client.server_error ext_user=%s status=%d",
-            external_user_id,
+            "goals_client.server_error ext_ref=%s status=%d",
+            external_user_log_ref(external_user_id),
             resp.status_code,
         )
         raise GoalsUnavailable(f"server: HTTP {resp.status_code}")
@@ -283,8 +290,8 @@ def _request(
         except ValueError:
             body = {"detail": resp.text[:500]}
         logger.warning(
-            "goals_client.client_error ext_user=%s status=%d",
-            external_user_id,
+            "goals_client.client_error ext_ref=%s status=%d",
+            external_user_log_ref(external_user_id),
             resp.status_code,
         )
         raise GoalsBadRequest(resp.status_code, body)
@@ -336,17 +343,23 @@ def _request(
     return document
 
 
-def fetch_decision_context(*, external_user_id: str) -> dict[str, Any]:
+def fetch_decision_context(
+    *, external_user_id: str, read_timeout_s: float | None = None
+) -> dict[str, Any]:
     """GET ``/internal/me/decision-context/`` — документ состояния.
 
     Возвращает САМ документ (``version`` / ``known`` / ``missing`` /
     ``suggestions`` / ``intents`` / ``next``), а не конверт ``{"data": …}``,
     в котором его присылает Ayla: конверт снимается в :func:`_request`.
+
+    ``read_timeout_s`` — свой бюджет чтения для вызывающего, которому документ
+    не обязателен (:data:`GOAL_HINT_READ_TIMEOUT_S`). По умолчанию — общий.
     """
     return _request(
         "GET",
         "internal/me/decision-context/",
         external_user_id=external_user_id,
+        read_timeout_s=read_timeout_s,
     )
 
 
@@ -473,8 +486,8 @@ def _reconcile_goal_select(
         )
     except (GoalsUnavailable, GoalsBadRequest, GoalsConfigError):
         logger.warning(
-            "goals_client.reconcile_failed ext_user=%s reason=%s",
-            external_user_id,
+            "goals_client.reconcile_failed ext_ref=%s reason=%s",
+            external_user_log_ref(external_user_id),
             exc.reason,
         )
         return None
@@ -483,15 +496,15 @@ def _reconcile_goal_select(
     goal = known.get("goal") if isinstance(known, dict) else None
     if not _selected_goal_matches(goal, payload):
         logger.warning(
-            "goals_client.reconcile_miss ext_user=%s reason=%s",
-            external_user_id,
+            "goals_client.reconcile_miss ext_ref=%s reason=%s",
+            external_user_log_ref(external_user_id),
             exc.reason,
         )
         return None
 
     logger.info(
-        "goals_client.reconciled ext_user=%s reason=%s",
-        external_user_id,
+        "goals_client.reconciled ext_ref=%s reason=%s",
+        external_user_log_ref(external_user_id),
         exc.reason,
     )
     return document

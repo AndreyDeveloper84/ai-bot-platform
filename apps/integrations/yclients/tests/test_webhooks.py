@@ -15,16 +15,25 @@ Coverage matrix — every leaf in :mod:`apps.integrations.yclients.webhooks`:
 * Unknown status → 200 + ignored
 * Missing tenant slug config → 200 + audit row (dormant receiver)
 * Unhandled exception inside handler → 200 + audit row (always-200 rule)
+* Shared secret (``YCLIENTS_WEBHOOK_SECRET`` / ``X-Webhook-Secret``):
+  unset → 404 for everyone (fail-closed, one warning per process);
+  header missing or wrong → 403 + audit row, nothing parsed or written;
+  match → processed. The body is ``{"status": "ok"}`` for every
+  authenticated request, so it cannot say whether a phone matched a
+  BotUser — the outcome is asserted on the DB and the audit log instead.
 
-The receiver MUST always answer 200 — YClients retries any non-2xx
-indefinitely. Every failure-path test asserts ``status_code == 200``.
+Once authenticated the receiver MUST always answer 200 — YClients retries
+any non-2xx indefinitely. Every failure-path test asserts
+``status_code == 200``.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Generator
 from datetime import timedelta
+from typing import Any
 from unittest.mock import patch
 
 import pytest
@@ -34,11 +43,14 @@ from django.test.utils import override_settings
 from apps.audit.models import AuditLog
 from apps.booking.models import BookingReminder, BookingRequest
 from apps.identity.models import BotUser
+from apps.integrations.yclients import webhooks as webhooks_module
 from apps.tenancy.models import Tenant
 
 
 _URL = "/api/v1/yclients/webhook/"
 _TENANT_SLUG = "salon-a"
+_SECRET = "yclients-webhook-test-secret"  # pragma: allowlist secret
+_OK = {"status": "ok"}
 
 
 # `transaction.on_commit` only fires when the surrounding atomic block
@@ -51,7 +63,10 @@ pytestmark = pytest.mark.django_db(transaction=True)
 
 @pytest.fixture(autouse=True)
 def _yclients_tenant_setting() -> Generator[None, None, None]:
-    with override_settings(YCLIENTS_WEBHOOK_TENANT_SLUG=_TENANT_SLUG):
+    with override_settings(
+        YCLIENTS_WEBHOOK_TENANT_SLUG=_TENANT_SLUG,
+        YCLIENTS_WEBHOOK_SECRET=_SECRET,
+    ):
         # Webhook resolves tenant per-request — no need for tenant_scope
         # at fixture level. The view enters its own tenant_scope.
         yield
@@ -113,20 +128,28 @@ def _payload_create(
     }
 
 
-def _post(client: Client, payload: object):
+def _post(client: Client, payload: object, *, secret: str | None = _SECRET):
     """Helper for posting to the webhook. Return type is intentionally
     inferred — django-stubs returns ``_MonkeyPatchedWSGIResponse`` (with
     ``.json()``) which is private API. Annotating it explicitly would
-    couple us to a stub internal."""
+    couple us to a stub internal.
+
+    ``secret=None`` sends no ``X-Webhook-Secret`` header at all."""
+    headers = {} if secret is None else {"X-Webhook-Secret": secret}
     return client.post(
         _URL,
         data=json.dumps(payload),
         content_type="application/json",
+        headers=headers,
     )
 
 
 def _audit_actions() -> list[str]:
     return list(AuditLog.all_tenants.values_list("action", flat=True))
+
+
+def _audit_payloads(action: str) -> list[dict[str, Any]]:
+    return list(AuditLog.all_tenants.filter(action=action).values_list("payload", flat=True))
 
 
 # ─── happy path ──────────────────────────────────────────────────────────
@@ -140,9 +163,9 @@ class TestCreateEvent:
             resp = _post(client, _payload_create())
 
         assert resp.status_code == 200
-        body = resp.json()
-        assert body["status"] == "created"
-        assert body["yclients_record_id"] == "12345"
+        # Uniform body — the outcome is read from the DB below, not from
+        # the response (module docstring "Response body is uniform").
+        assert resp.json() == _OK
 
         # One BookingRequest with the yclients marker in comment.
         reqs = list(BookingRequest.all_tenants.all())
@@ -200,8 +223,7 @@ class TestCreateEvent:
         resp = _post(client, _payload_create(phone="+78889999999"))
 
         assert resp.status_code == 200
-        assert resp.json()["status"] == "skipped"
-        assert resp.json()["reason"] == "no_bot_user_match"
+        assert resp.json() == _OK
         assert BookingRequest.all_tenants.count() == 0
         assert BookingReminder.all_tenants.count() == 0
         assert "yclients.webhook.no_bot_user_match" in _audit_actions()
@@ -220,7 +242,7 @@ class TestCreateEvent:
         resp = _post(client, _payload_create(phone="+79998887766"))
 
         assert resp.status_code == 200
-        assert resp.json()["reason"] == "bot_user_no_chat_id"
+        assert resp.json() == _OK
         assert BookingReminder.all_tenants.count() == 0
         assert "yclients.webhook.bot_user_no_chat_id" in _audit_actions()
 
@@ -241,7 +263,8 @@ class TestUpdateEvent:
 
         resp = _post(client, update_payload)
         assert resp.status_code == 200
-        assert resp.json()["status"] == "updated"
+        assert resp.json() == _OK
+        assert "yclients.webhook.update_processed" in _audit_actions()
 
         # Old rows: now CANCELLED. New rows: PENDING with new visit_at.
         all_rems = list(BookingReminder.all_tenants.all())
@@ -273,8 +296,9 @@ class TestUpdateEvent:
             resp = _post(client, update_payload)
 
         assert resp.status_code == 200
-        # Falls through to _handle_create → returns "created".
-        assert resp.json()["status"] == "created"
+        assert resp.json() == _OK
+        # Falls through to _handle_create → the create audit row, not update.
+        assert "yclients.webhook.create_processed" in _audit_actions()
         assert BookingReminder.all_tenants.count() == 2
 
 
@@ -296,8 +320,10 @@ class TestDeleteEvent:
         resp = _post(client, delete_payload)
 
         assert resp.status_code == 200
-        assert resp.json()["status"] == "deleted"
-        assert resp.json()["cancelled"] == 2
+        assert resp.json() == _OK
+        # The count lives in the audit row now, not in the body.
+        deletes = _audit_payloads("yclients.webhook.delete_processed")
+        assert [p["cancelled"] for p in deletes] == [2]
 
         # Rows still exist (audit trail) — just CANCELLED.
         assert BookingReminder.all_tenants.count() == 2
@@ -317,8 +343,11 @@ class TestDeleteEvent:
         _post(client, delete_payload)
         resp2 = _post(client, delete_payload)
         assert resp2.status_code == 200
-        # Second delete: no rows transitioned (already CANCELLED).
-        assert resp2.json()["cancelled"] == 0
+        assert resp2.json() == _OK
+        # Second delete: no rows transitioned (already CANCELLED). Two
+        # delete audit rows — the first cancelled 2, the second 0.
+        deletes = _audit_payloads("yclients.webhook.delete_processed")
+        assert sorted(p["cancelled"] for p in deletes) == [0, 2]
 
 
 # ─── error paths (always 200) ────────────────────────────────────────────
@@ -332,10 +361,12 @@ class TestAlwaysReturns200:
             _URL,
             data="not-a-json{",
             content_type="application/json",
+            HTTP_X_WEBHOOK_SECRET=_SECRET,
         )
         assert resp.status_code == 200
-        assert resp.json()["reason"] == "malformed_json"
-        assert "yclients.webhook.rejected" in _audit_actions()
+        assert resp.json() == _OK
+        rejected = _audit_payloads("yclients.webhook.rejected")
+        assert [p["reason"] for p in rejected] == ["malformed_json"]
 
     def test_wrong_content_type_still_parsed_or_audited(
         self, client: Client, tenant: Tenant
@@ -350,13 +381,17 @@ class TestAlwaysReturns200:
             _URL,
             data=body,
             content_type="application/x-www-form-urlencoded",
+            HTTP_X_WEBHOOK_SECRET=_SECRET,
         )
         assert resp.status_code == 200
 
     def test_unknown_resource_returns_200_ignored(self, client: Client, tenant: Tenant) -> None:
         resp = _post(client, {"resource": "client", "status": "create"})
         assert resp.status_code == 200
-        assert resp.json()["status"] == "ignored"
+        assert resp.json() == _OK
+        # Ignored quietly: no audit row, no write.
+        assert _audit_actions() == []
+        assert BookingReminder.all_tenants.count() == 0
 
     def test_unknown_status_returns_200_ignored(
         self, client: Client, tenant: Tenant, bot_user: BotUser
@@ -365,7 +400,8 @@ class TestAlwaysReturns200:
         payload["status"] = "weirdo"
         resp = _post(client, payload)
         assert resp.status_code == 200
-        assert resp.json()["status"] == "ignored"
+        assert resp.json() == _OK
+        assert BookingReminder.all_tenants.count() == 0
 
     def test_missing_tenant_setting_returns_200_with_audit(
         self, client: Client, tenant: Tenant
@@ -373,8 +409,9 @@ class TestAlwaysReturns200:
         with override_settings(YCLIENTS_WEBHOOK_TENANT_SLUG=""):
             resp = _post(client, _payload_create())
         assert resp.status_code == 200
-        assert resp.json()["reason"] == "tenant_unresolved"
-        assert "yclients.webhook.rejected" in _audit_actions()
+        assert resp.json() == _OK
+        rejected = _audit_payloads("yclients.webhook.rejected")
+        assert [p["reason"] for p in rejected] == ["tenant_unresolved"]
 
     def test_unhandled_exception_in_handler_returns_200_with_audit(
         self, client: Client, tenant: Tenant, bot_user: BotUser
@@ -386,7 +423,7 @@ class TestAlwaysReturns200:
         ):
             resp = _post(client, _payload_create())
         assert resp.status_code == 200
-        assert resp.json()["reason"] == "handler_exception"
+        assert resp.json() == _OK
         assert "yclients.webhook.handler_exception" in _audit_actions()
 
 
@@ -412,7 +449,7 @@ class TestBookingViaAylaRestGate:
                 resp = _post(client, _payload_create())
 
         assert resp.status_code == 200
-        assert resp.json() == {"status": "skipped", "reason": "ayla_native_active"}
+        assert resp.json() == _OK
         assert BookingRequest.all_tenants.count() == 0
         assert BookingReminder.all_tenants.count() == 0
         assert "yclients.webhook.skipped_ayla_native" in _audit_actions()
@@ -432,8 +469,10 @@ class TestBookingViaAylaRestGate:
 
         for resp in (create_resp, update_resp, delete_resp):
             assert resp.status_code == 200
-            assert resp.json()["status"] == "skipped"
+            assert resp.json() == _OK
         assert BookingReminder.all_tenants.count() == 0
+        skipped = [a for a in _audit_actions() if a == "yclients.webhook.skipped_ayla_native"]
+        assert len(skipped) == 3
 
     def test_flag_off_still_creates_as_before(
         self, client: Client, tenant: Tenant, bot_user: BotUser
@@ -446,7 +485,7 @@ class TestBookingViaAylaRestGate:
                 resp = _post(client, _payload_create())
 
         assert resp.status_code == 200
-        assert resp.json()["status"] == "created"
+        assert resp.json() == _OK
         assert BookingRequest.all_tenants.count() == 1
         assert BookingReminder.all_tenants.count() == 2
 
@@ -474,7 +513,7 @@ class TestPhoneNormalisation:
                     _payload_create(yc_id=999, phone=incoming),
                 )
             assert resp.status_code == 200
-            assert resp.json()["status"] == "created", incoming
+            assert resp.json() == _OK, incoming
             assert BookingReminder.all_tenants.count() == 2, incoming
 
 
@@ -534,7 +573,7 @@ class TestRetroB4PhoneAmbiguity:
                 _payload_create(yc_id=77777, phone="+79991234567"),
             )
         assert resp.status_code == 200
-        assert resp.json()["status"] == "created"
+        assert resp.json() == _OK
 
         # Booking linked to the MORE RECENT BotUser deterministically.
         booking = BookingRequest.all_tenants.get(comment__contains="yclients_record_id=77777")
@@ -561,3 +600,119 @@ class TestRetroB4PhoneAmbiguity:
         assert resp.status_code == 200
         ambiguity_audits = [a for a in _audit_actions() if "phone_match_ambiguous" in a]
         assert len(ambiguity_audits) == 0
+
+
+# ---------------------------------------------------------------------------
+# Shared-secret authentication + uniform body
+# ---------------------------------------------------------------------------
+
+
+class TestSharedSecretAuthentication:
+    """``YCLIENTS_WEBHOOK_SECRET`` / ``X-Webhook-Secret`` (module docstring
+    "Authentication — shared secret").
+
+    Before this the receiver was ``@csrf_exempt`` with no authentication:
+    anyone who knew the URL could write BookingRequest / BookingReminder
+    rows for a tenant, and the body said whether the phone in the payload
+    belongs to one of our BotUsers.
+    """
+
+    def test_unset_secret_is_dormant_404_even_with_a_header(
+        self, client: Client, tenant: Tenant, bot_user: BotUser
+    ) -> None:
+        """Fail-closed: no secret configured → nothing is accepted."""
+        with override_settings(YCLIENTS_WEBHOOK_SECRET=""):
+            with patch("apps.integrations.yclients.webhooks.emit") as emit_mock:
+                resp = _post(client, _payload_create(), secret="anything")
+                resp_no_header = _post(client, _payload_create(), secret=None)
+
+        assert resp.status_code == 404
+        assert resp_no_header.status_code == 404
+        assert BookingRequest.all_tenants.count() == 0
+        assert BookingReminder.all_tenants.count() == 0
+        # Dormant is silent on the audit side too — nothing was parsed.
+        assert _audit_actions() == []
+        emit_mock.assert_not_called()
+
+    def test_unset_secret_warns_once_per_process(
+        self, client: Client, tenant: Tenant, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        webhooks_module._warn_dormant_once.cache_clear()
+        caplog.set_level(logging.WARNING, logger="apps.integrations.yclients.webhooks")
+        with override_settings(YCLIENTS_WEBHOOK_SECRET=""):
+            _post(client, _payload_create())
+            _post(client, _payload_create())
+            _post(client, _payload_create())
+        dormant = [r for r in caplog.records if "dormant" in r.getMessage()]
+        assert len(dormant) == 1
+
+    def test_missing_header_is_403_with_audit_and_no_write(
+        self, client: Client, tenant: Tenant, bot_user: BotUser
+    ) -> None:
+        with patch("apps.integrations.yclients.webhooks.emit") as emit_mock:
+            resp = _post(client, _payload_create(), secret=None)
+
+        assert resp.status_code == 403
+        assert resp.json() == {"detail": "forbidden"}
+        assert BookingRequest.all_tenants.count() == 0
+        assert BookingReminder.all_tenants.count() == 0
+        rejected = _audit_payloads("yclients.webhook.rejected")
+        assert [(p["reason"], p["header_present"]) for p in rejected] == [
+            ("secret_mismatch", False)
+        ]
+        emit_mock.assert_not_called()
+
+    def test_wrong_header_is_403_with_audit_and_no_write(
+        self, client: Client, tenant: Tenant, bot_user: BotUser
+    ) -> None:
+        with patch("apps.integrations.yclients.webhooks.emit") as emit_mock:
+            resp = _post(client, _payload_create(), secret=_SECRET + "x")
+
+        assert resp.status_code == 403
+        assert BookingRequest.all_tenants.count() == 0
+        rejected = _audit_payloads("yclients.webhook.rejected")
+        assert [(p["reason"], p["header_present"]) for p in rejected] == [("secret_mismatch", True)]
+        emit_mock.assert_not_called()
+
+    def test_secret_never_lands_in_audit_or_log(
+        self, client: Client, tenant: Tenant, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        caplog.set_level(logging.WARNING, logger="apps.integrations.yclients.webhooks")
+        near_miss = _SECRET + "x"
+        _post(client, _payload_create(), secret=near_miss)
+
+        rejected = _audit_payloads("yclients.webhook.rejected")
+        assert len(rejected) == 1
+        assert near_miss not in json.dumps(rejected)
+        assert _SECRET not in json.dumps(rejected)
+        warnings = [r.getMessage() for r in caplog.records if "rejected" in r.getMessage()]
+        assert len(warnings) == 1
+        assert near_miss not in warnings[0]
+
+    def test_matching_header_is_accepted(
+        self, client: Client, tenant: Tenant, bot_user: BotUser
+    ) -> None:
+        """The positive half of every other test in this module, stated once."""
+        with patch("apps.integrations.yclients.webhooks.emit"):
+            resp = _post(client, _payload_create(), secret=_SECRET)
+
+        assert resp.status_code == 200
+        assert BookingReminder.all_tenants.count() == 2
+
+    def test_body_does_not_say_whether_the_phone_matched(
+        self, client: Client, tenant: Tenant, bot_user: BotUser
+    ) -> None:
+        """Phone-enumeration oracle closed: matched and unmatched phones
+        get byte-identical 200 bodies. The difference is in the DB and the
+        audit log only."""
+        with patch("apps.integrations.yclients.webhooks.emit"):
+            matched = _post(client, _payload_create(yc_id=1, phone="+79991234567"))
+            unmatched = _post(client, _payload_create(yc_id=2, phone="+78889999999"))
+
+        assert matched.status_code == unmatched.status_code == 200
+        assert matched.content == unmatched.content
+        assert matched.json() == _OK
+        # Presence: the two deliveries really did take different paths.
+        assert BookingReminder.all_tenants.filter(yclients_record_id="1").count() == 2
+        assert BookingReminder.all_tenants.filter(yclients_record_id="2").count() == 0
+        assert "yclients.webhook.no_bot_user_match" in _audit_actions()

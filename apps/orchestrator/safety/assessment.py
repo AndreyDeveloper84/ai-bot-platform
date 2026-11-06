@@ -109,10 +109,13 @@ def policy_version() -> str:
     remembers to change it would say a stored verdict came from a policy it
     did not. This changes by itself, which is the only way it stays true.
     """
+    from apps.orchestrator.safety.normalize import NORMALIZATION_VERSION
     from apps.orchestrator.safety.pre_check import _verdict_patterns
 
     patterns = _verdict_patterns()
-    material = "\n".join(
+    # DRF-2922: the gate also reads a copy of the text without in-sentence
+    # marks, so the same patterns under another copy rule are another policy.
+    material = f"normalize:{NORMALIZATION_VERSION}\n" + "\n".join(
         f"{verdict}:{pattern}"
         for verdict in sorted(patterns)
         for pattern in sorted(patterns[verdict])

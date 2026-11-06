@@ -145,6 +145,11 @@ class TenantRequiredButMissing(Exception):
     issue for the XAUTOCLAIM-based reaper. **PEL retention is the
     contract**; do not rely on automatic DLQ retry.
 
+    DRF-1943 is the one exception: an entry whose body carries a voice
+    attachment is moved by the consumer to ``<stream>:dlq`` at once, as a
+    copy without the link («голос не храним»), and leaves the PEL. Such an
+    entry cannot be replayed into a voice turn.
+
     Gated by ``settings.STRICT_TENANT_REFUSE`` (default False during
     Phase 0 rollout — log-only mode; flip to True after the dev-side
     soak proves no legitimate handler misses its tenant). The flip

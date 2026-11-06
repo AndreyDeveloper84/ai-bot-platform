@@ -73,6 +73,7 @@ class TestInferredWrite:
         uid = uuid.uuid4()
         bu = _bot_user(tenant, uid)
         _grant(bu, CT.PERSONAL_DATA)  # green basis per ADR-0011 §11
+        _grant(bu, CT.PREFERENCE_INFERENCE)  # DRF-2779: inference has its own consent
 
         assert record_inferred_green_facts(bu, [_fact()]) == 1
 
@@ -86,6 +87,7 @@ class TestInferredWrite:
         uid = uuid.uuid4()
         bu = _bot_user(tenant, uid)
         _grant(bu, CT.PERSONAL_DATA)
+        _grant(bu, CT.PREFERENCE_INFERENCE)
 
         assert record_inferred_green_facts(bu, [_fact()]) == 1
         assert record_inferred_green_facts(bu, [_fact()]) == 0  # re-inferred same value
@@ -95,10 +97,52 @@ class TestInferredWrite:
         uid = uuid.uuid4()
         bu = _bot_user(tenant, uid)
         _grant(bu, CT.PERSONAL_DATA)
+        _grant(bu, CT.PREFERENCE_INFERENCE)
 
         assert record_inferred_green_facts(bu, [_fact()]) == 1
         assert record_inferred_green_facts(bu, [_fact(value="keto")]) == 1
         assert MemoryEntry.objects.count() == 2
+
+    def test_personal_data_alone_does_not_open_inference(self, tenant) -> None:
+        """DRF-2779 — основание зелёной зоны разрешает хранить сказанное, не выводить.
+
+        Положительный контроль в том же узле: тот же человек с согласием Ф4
+        получает запись, — так ноль выше не доказывает лишь сломанный писатель.
+        """
+        bu = _bot_user(tenant, uuid.uuid4())
+        _grant(bu, CT.PERSONAL_DATA)
+
+        assert record_inferred_green_facts(bu, [_fact()]) == 0
+        assert MemoryEntry.objects.count() == 0
+
+        _grant(bu, CT.PREFERENCE_INFERENCE)
+        assert record_inferred_green_facts(bu, [_fact()]) == 1
+
+    def test_withdrawn_inference_consent_closes_the_writer(self, tenant) -> None:
+        from apps.consent.preference_inference import withdraw
+
+        bu = _bot_user(tenant, uuid.uuid4())
+        _grant(bu, CT.PERSONAL_DATA)
+        _grant(bu, CT.PREFERENCE_INFERENCE)
+        assert record_inferred_green_facts(bu, [_fact()]) == 1
+
+        withdraw(bu)
+
+        assert record_inferred_green_facts(bu, [_fact(value="keto")]) == 0
+        assert MemoryEntry.objects.count() == 1
+
+    def test_a_failed_consent_read_keeps_the_writer_closed(self, tenant, monkeypatch) -> None:
+        bu = _bot_user(tenant, uuid.uuid4())
+        _grant(bu, CT.PERSONAL_DATA)
+        _grant(bu, CT.PREFERENCE_INFERENCE)
+
+        def boom(_bot_user):
+            raise RuntimeError("consent store down")
+
+        monkeypatch.setattr("apps.consent.preference_inference.is_granted", boom)
+
+        assert record_inferred_green_facts(bu, [_fact()]) == 0
+        assert MemoryEntry.objects.count() == 0
 
     def test_no_ayla_user_id_no_write(self, tenant) -> None:
         bu = _bot_user(tenant, None)

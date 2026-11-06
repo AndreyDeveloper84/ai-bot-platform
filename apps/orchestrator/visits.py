@@ -25,6 +25,7 @@ from apps.booking.services.records import (
     DEFAULT_VISIT_LIMIT,
     RepeatResult,
     Visit,
+    VisitsResult,
     list_upcoming,
     list_visits,
     prepare_repeat,
@@ -43,6 +44,7 @@ from apps.orchestrator.discovery import (
     keyboard_envelope,
     show_salons_button,
 )
+from apps.orchestrator.next_steps import menu_button
 
 
 logger = logging.getLogger(__name__)
@@ -135,7 +137,7 @@ _MONTHS_GENITIVE = (
 
 # Honest, temporary, and never backfilled from the mirror (§30): when the
 # backend is unreachable the customer is told so, not shown yesterday's truth.
-_UNAVAILABLE_TEXT = "Не смогла получить ваши записи — попробуйте, пожалуйста, чуть позже."
+_UNAVAILABLE_TEXT = "Не смогла получить твои записи — попробуй, пожалуйста, чуть позже."
 
 # DRF-1492 — «Могу подобрать мастера и записать вас» named an action and gave
 # the reader nothing to press. The offer stands; it is now a chip, and the
@@ -143,8 +145,8 @@ _UNAVAILABLE_TEXT = "Не смогла получить ваши записи �
 # услуги → мастер → запись). Typing still works and is still invited — the
 # button is the floor, not the ceiling.
 _EMPTY_TEXT = (
-    "У вас пока нет завершённых визитов. "
-    "Скажите, что вам нужно, — или посмотрите наши салоны, оттуда можно записаться."
+    "У тебя пока нет завершённых визитов. "
+    "Скажи, что тебе нужно, — или посмотри наши салоны, оттуда можно записаться."
 )
 
 # §62 / OD-UI-1 — половина ответа, которая раньше молчала.
@@ -193,19 +195,26 @@ _MOVE_UNAVAILABLE_TEXT = (
 #: устройство наших очередей.
 _CANCEL_GONE_TEXT = "Этой записи уже нет — отменять нечего."
 
+#: «Отмени запись», а впереди ничего — утверждено владельцем 19.10 дословно.
+_CANCEL_NOTHING_TEXT = "У тебя нет активных записей — отменять нечего."
+
+#: «Отмени запись», а впереди несколько — утверждено владельцем 19.10
+#: дословно; записи называют кнопки под ним.
+_CANCEL_WHICH_TEXT = "У тебя несколько записей. Какую отменить?"
+
 #: Бэкенд отказал по состоянию записи (слишком поздно, визит идёт,
 #: запись уже закрыта). Что именно — знает салон, и звать его честнее,
 #: чем пересказывать чужое правило своими словами.
 _CANCEL_REFUSED_TEXT = (
     "Эту запись отменить не получилось — салон её уже не отдаёт. "
-    "Напишите «оператор», и с ней разберётся человек."
+    "Напиши «оператор», и с ней разберётся человек."
 )
 
 #: Сервис недоступен. Отдельно от отказа: здесь ПОВТОРИТЬ имеет смысл, а
 #: там нет, и сказать «попробуйте позже» про окончательный отказ значило
 #: бы отправить человека ждать напрасно.
 _CANCEL_UNAVAILABLE_TEXT = (
-    "Не смогла отменить запись — сервис не отвечает. Попробуйте, пожалуйста, чуть позже."
+    "Не смогла отменить запись — сервис не отвечает. Попробуй, пожалуйста, чуть позже."
 )
 
 #: Префикс полезной нагрузки, открывающей экран переноса КОНКРЕТНОЙ
@@ -235,6 +244,7 @@ def route_visits(
     *,
     global_bot_user,
     trace_id: str | uuid.UUID | None = None,
+    upcoming: VisitsResult | None = None,
 ) -> DiscoveryReply:
     """Answer «покажи мои записи» / «мои визиты» from the backend.
 
@@ -249,7 +259,8 @@ def route_visits(
     пустое прошлое названо вслух, а приложение предлагается ровно тогда,
     когда список длиннее одной реплики.
     """
-    upcoming = list_upcoming(bot_user=global_bot_user, limit=DEFAULT_VISIT_LIMIT)
+    if upcoming is None:
+        upcoming = list_upcoming(bot_user=global_bot_user, limit=DEFAULT_VISIT_LIMIT)
     # На один больше, чем показываем. Шестой визит нужен не человеку, а
     # ответу: он и есть признак «история длиннее чата», и узнать его
     # иначе неоткуда — ``VisitsResult`` не несёт общего счётчика, а
@@ -304,6 +315,51 @@ def route_visits(
         text="\n\n".join(blocks),
         action_data=_records_buttons(upcoming.visits, past_shown, tail=tail_buttons),
     )
+
+
+def route_visits_to_cancel(
+    *,
+    global_bot_user,
+    trace_id: str | uuid.UUID | None = None,
+) -> DiscoveryReply | None:
+    """«Отмени запись на завтра» → путь к «Отменить» на карточке (DRF-2982).
+
+    Отмена — на карточке визита (§37 п.1: сначала запись, потом действие).
+    Тексты ниже — утверждённые владельцем 19.10 строки:
+
+    * впереди ничего — :data:`_CANCEL_NOTHING_TEXT` и «Меню» (§72). Список
+      «Мои записи» здесь не ответ: он про прошлые визиты и салоны;
+    * одна запись — тот же список, что на «покажи мои записи», с её
+      «Отменить»;
+    * несколько — :data:`_CANCEL_WHICH_TEXT` и по кнопке на запись, ведущей в
+      подтверждение отмены, которое называет услугу и время. Без прошлых
+      визитов и «Подробнее»: вопрос — какую отменить, не что посмотреть.
+
+    Бэкенд недоступен — честное «не смогла получить записи».
+    """
+    upcoming = list_upcoming(bot_user=global_bot_user, limit=DEFAULT_VISIT_LIMIT)
+    if upcoming.status != "backend_unavailable":
+        if not upcoming.visits:
+            return DiscoveryReply(
+                text=_CANCEL_NOTHING_TEXT, action_data=keyboard_envelope([menu_button()])
+            )
+        if len(upcoming.visits) > 1:
+            return DiscoveryReply(
+                text=_CANCEL_WHICH_TEXT,
+                action_data=keyboard_envelope(
+                    [
+                        {
+                            "label": (
+                                f"{v.service_name or 'Запись'} — "
+                                f"{_format_when(v.start_at, v.salon_tz)}"
+                            ),
+                            "callback": f"{CALLBACK_VISIT_CANCEL_PREFIX}{v.appointment_id}",
+                        }
+                        for v in upcoming.visits
+                    ]
+                ),
+            )
+    return route_visits(global_bot_user=global_bot_user, trace_id=trace_id, upcoming=upcoming)
 
 
 def route_visit_callback(
@@ -444,7 +500,7 @@ def route_visit_cancel_ask(*, global_bot_user, appointment_id: str) -> Discovery
         return DiscoveryReply(text=_CANCEL_GONE_TEXT)
     what = f"{visit.service_name or 'запись'} — {_format_when(visit.start_at, visit.salon_tz)}"
     return DiscoveryReply(
-        text=f"Отменяю запись: {what}.\nПодтвердите — отменить её?",
+        text=f"Отменяю запись: {what}.\nПодтверди — отменить её?",
         action_data=keyboard_envelope(
             [
                 {
@@ -597,7 +653,7 @@ def route_repeat(
 
 
 def _render_upcoming(visits: tuple[Visit, ...]) -> str:
-    lines = ["Ваши предстоящие записи:"]
+    lines = ["Твои предстоящие записи:"]
     lines += [f"• {_visit_line(v)}" for v in visits]
     return "\n".join(lines)
 
@@ -610,7 +666,7 @@ def _render_visits(visits: tuple[Visit, ...]) -> str:
     результат значило бы перечислить словами больше, чем есть кнопок под
     текстом.
     """
-    lines = ["Ваши последние визиты:"]
+    lines = ["Твои последние визиты:"]
     lines += [f"• {_visit_line(v)}" for v in visits]
     return "\n".join(lines)
 
@@ -620,7 +676,7 @@ def _visit_line(visit: Visit) -> str:
 
     «Массаж — мастер Марина · Формула тела, 19.08.2026 в 14:00 — 3 200 ₽».
     Форма одна с навыком записи (дом — ``booking.visit_words``): та же шапка
-    «Ваши предстоящие записи:» не может давать две разные строки. «мастер
+    «Твои предстоящие записи:» не может давать две разные строки. «мастер
     {Имя}» без склонения — падеж по имени не угадывается. Цена остаётся в
     конце: владелец её не снимал, его образец — про предстоящую запись.
 
@@ -768,7 +824,7 @@ def _repeat_intro(result: RepeatResult) -> str:
     text = f"Повторим: {what}."
     if result.master_name:
         text += f"\nМастер: {result.master_name}."
-    text += "\nКогда вам удобно?"
+    text += "\nКогда тебе удобно?"
     # Never let the old number pass for the current one (OD-H4). Showing both
     # is the honest form when they differ.
     if result.price_changed:
@@ -814,13 +870,13 @@ def _repeat_refusal(result: RepeatResult) -> tuple[str, list[dict[str, str]]]:
         )
         if service:
             return (
-                f"{gone} Нажмите на услугу — покажу, кто ещё её делает.",
+                f"{gone} Нажми на услугу — покажу, кто ещё её делает.",
                 [{"label": service[:_MAX_CHIP_LABEL_CHARS], "callback": service}],
             )
         # No service name to press. The offer is withdrawn from the wording
         # rather than left standing over a button that cannot be built.
         return (
-            f"{gone} Посмотрите наши салоны — подберём другого мастера.",
+            f"{gone} Посмотри наши салоны — подберём другого мастера.",
             [show_salons_button()],
         )
     if result.status == OFFER_NOT_SELLABLE_SLUG:
@@ -830,14 +886,14 @@ def _repeat_refusal(result: RepeatResult) -> tuple[str, list[dict[str, str]]]:
         return (client_text_for(result.details.get("reason")), [])
     if result.status == "service_unavailable":
         return (
-            "Эту услугу сейчас не оказывают. Посмотрите, что есть в наших салонах.",
+            "Эту услугу сейчас не оказывают. Посмотри, что есть в наших салонах.",
             [show_salons_button()],
         )
     if result.status == "prefill_unusable":
         return (
             "Не смогла разобрать эту запись, чтобы повторить её. "
-            "Давайте подберём заново — скажите, что вам нужно, "
-            "или посмотрите наши салоны.",
+            "Давай подберём заново — скажи, что тебе нужно, "
+            "или посмотри наши салоны.",
             [show_salons_button()],
         )
     # backend_unavailable and anything new: an outage is not a menu. There is

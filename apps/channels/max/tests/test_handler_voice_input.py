@@ -118,6 +118,7 @@ def fake_redis(monkeypatch):
 def _voice_on(settings):
     settings.STRICT_TENANT_SCOPE = "strict"
     settings.VOICE_INPUT_ENABLED = True
+    settings.VOICE_ALLOWED_USER_IDS = "*"  # DRF-2424 — список допуска: всем
     settings.VOICE_CROSS_BORDER_ALLOWED = True
     settings.VOICE_STT_PROVIDER = "fake"
     settings.VOICE_GATE_STRIP_PUNCT = True
@@ -163,6 +164,27 @@ def _rows_by_user(tenant) -> dict[str, list[dict]]:
         key: sorted(value, key=lambda r: (r["role"], r["content"], r["action_type"]))
         for key, value in by_user.items()
     }
+
+
+class TestAllowlist:
+    def test_only_the_listed_person_is_recognised(self, tenant, mock_send, fake_redis, settings):
+        """DRF-2424 — флаги глобальны; распознаётся только список допуска."""
+        settings.VOICE_ALLOWED_USER_IDS = "1001"
+        provider = _provider("привет")
+        with patch(_DOWNLOAD, return_value=ogg_of(2)):
+            _run(tenant, _payload(attachments=[AUDIO], user_id=1001, chat_id=2001, mid="a-1"))
+        assert len(provider.calls) == 1
+        assert mock_send
+        assert VOICE_NOT_SUPPORTED_TEXT not in [c["text"] for c in mock_send]
+        mock_send.clear()
+
+        with patch(_DOWNLOAD) as dl:
+            _run(tenant, _payload(attachments=[AUDIO], user_id=1002, chat_id=2002, mid="a-2"))
+        assert [c["text"] for c in mock_send] == [VOICE_NOT_SUPPORTED_TEXT]
+        dl.assert_not_called()
+        assert len(provider.calls) == 1
+        user = sorted((m.content, m.input_channel) for m in _messages(tenant, "user"))
+        assert user == [("", "text"), ("привет", "voice")]
 
 
 class TestFlagOff:
@@ -257,14 +279,29 @@ class TestSafety:
         assert assistant[0].action_type != "safety_pre_check"
         assert [m.content for m in _messages(tenant, "user")] == ["Умираю, хочу кофе."]
 
-    def test_k19_same_transcript_stops_when_strip_is_off(
+    def test_k19_a_typed_comma_stops_without_the_copy(
         self, tenant, mock_send, fake_redis, settings
     ):
+        # DRF-2684 (B, решение владельца): знак сразу после «умираю» снова даёт
+        # кризис. С выключенным флагом (без копии) гейт видит сырой знак — и эта
+        # расшифровка с запятой получает кризисный ответ. Копия (флаг включён) знак
+        # снимает и пропускает — см. test_k19_comma_hyperbole_passes_the_gate_with_strip.
         settings.VOICE_GATE_STRIP_PUNCT = False
         _provider("Умираю, хочу кофе.")
         with patch(_DOWNLOAD, return_value=ogg_of(2)):
             _run(tenant, _payload(attachments=[AUDIO]))
         assert [m.action_type for m in _messages(tenant, "assistant")] == ["safety_pre_check"]
+        assert [c["text"] for c in mock_send] == [CRISIS_REPLY_TEXT]
+
+    def test_k19_a_crisis_behind_the_hyperbole_stops_without_the_copy(
+        self, tenant, mock_send, fake_redis, settings
+    ):
+        settings.VOICE_GATE_STRIP_PUNCT = False
+        _provider("Умираю, хочу просто умереть.")
+        with patch(_DOWNLOAD, return_value=ogg_of(2)):
+            _run(tenant, _payload(attachments=[AUDIO]))
+        assert [m.action_type for m in _messages(tenant, "assistant")] == ["safety_pre_check"]
+        assert [c["text"] for c in mock_send] == [CRISIS_REPLY_TEXT]
 
 
 class TestRefusalsReachThePerson:
@@ -360,6 +397,43 @@ class TestEchoAndLogs:
         assert len(mock_send) == 1
         assert mock_send[0]["text"].startswith("Я услышала: «привет»\n\n")
         assert _messages(tenant, "assistant")[0].content == mock_send[0]["text"]
+
+    def test_the_guard_checks_the_reply_not_the_echo(
+        self, tenant, mock_send, fake_redis, settings, monkeypatch
+    ):
+        """DRF-2702 — на салонном пути эхо приклеивается после гарда исходящего."""
+        settings.VOICE_ECHO_MODE = "always"
+        seen: list[str] = []
+        real = max_handler.guard_outbound
+
+        def spy(text, **kwargs):
+            seen.append(text)
+            return real(text, **kwargs)
+
+        monkeypatch.setattr(max_handler, "guard_outbound", spy)
+        _provider("привет")
+        with patch(_DOWNLOAD, return_value=ogg_of(2)):
+            _run(tenant, _payload(attachments=[AUDIO]))
+        assert len(seen) == 1
+        assert mock_send[0]["text"] == f"Я услышала: «привет»\n\n{seen[0]}"
+        assert [t for t in seen if "Я услышала" in t] == []
+
+    def test_a_blocked_reply_goes_out_without_the_echo(
+        self, tenant, mock_send, fake_redis, settings, monkeypatch
+    ):
+        from apps.orchestrator.safety.outbound import OutboundVerdict
+
+        settings.VOICE_ECHO_MODE = "always"
+        monkeypatch.setattr(
+            max_handler,
+            "guard_outbound",
+            lambda text, **kwargs: OutboundVerdict(allowed=False, text="Тут нужен человек."),
+        )
+        _provider("привет")
+        with patch(_DOWNLOAD, return_value=ogg_of(2)):
+            _run(tenant, _payload(attachments=[AUDIO]))
+        assert [c["text"] for c in mock_send] == ["Тут нужен человек."]
+        assert _messages(tenant, "assistant")[0].content == "Тут нужен человек."
 
     def test_logs_carry_neither_transcript_nor_url(self, tenant, mock_send, fake_redis, caplog):
         _provider("СЕКРЕТНОЕ СЛОВО ксилофон")

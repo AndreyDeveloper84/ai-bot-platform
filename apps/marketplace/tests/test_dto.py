@@ -24,6 +24,8 @@ _PUBLIC_FIELDS = {
     # name), carried so the booking handoff keeps the service context.
     "service_id",
     "service_name",
+    # DRF-2875 — число отзывов: оценка без него клиенту не показывается.
+    "review_count",
 }
 
 # Names that must NEVER appear on the public card.

@@ -34,7 +34,7 @@ from typing import Any, cast
 import pytest
 
 from apps.catalog.models import CatalogMaster
-from apps.integrations.ayla.booking_client import AylaBookingRecord
+from apps.integrations.ayla.booking_client import AylaBookingRecord, AylaMaster
 from apps.skills.booking.provider import AylaYClientsAdapter, YClientsSpecialistUnavailableError
 from apps.tenancy.models import Tenant
 
@@ -157,11 +157,30 @@ class TestIdsTheBotDidNotMintPassUnchanged:
         assert [sid for _name, sid in fake.sent] == [str(catalog_id)]
 
     def test_an_id_no_mirror_row_knows_is_sent_as_is(self, tenant):
+        """DRF-2677: без строки зеркала «наш ли мастер» отвечает каталог —
+        профиль со штампом этого салона; id уходит как есть в оба чтения."""
         unknown = str(uuid.uuid4())
         fake = _Fake()
+        asked: list[str] = []
+
+        def _profile(*, specialist_id: str) -> list[AylaMaster]:
+            asked.append(specialist_id)
+            return [
+                AylaMaster(
+                    id=specialist_id,
+                    name="Анна",
+                    specialization="",
+                    rating=0.0,
+                    position="",
+                    raw={"id": specialist_id, "tenant": str(tenant.id)},
+                )
+            ]
+
+        fake.get_masters = _profile  # type: ignore[attr-defined]
 
         CALLS["times"](_adapter(fake, tenant), unknown)
 
+        assert asked == [unknown]
         assert fake.sent == [("get_available_times", unknown)]
 
 

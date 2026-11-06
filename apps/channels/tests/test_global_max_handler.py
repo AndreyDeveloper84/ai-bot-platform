@@ -135,7 +135,7 @@ def test_booking_callback_routes_to_booking_pipeline_not_concierge(
 
     def fake_route(**kwargs):
         seen["routed"] = kwargs.get("callback_text")
-        return DiscoveryReply(text="Выберите время:")
+        return DiscoveryReply(text="Выбери время:")
 
     def fake_concierge(*args, **kwargs):
         seen["concierge"] = True
@@ -152,7 +152,7 @@ def test_booking_callback_routes_to_booking_pipeline_not_concierge(
 
     assert seen.get("routed") == "cb:book:pick_date:abc:2026-08-11:def"
     assert "concierge" not in seen
-    assert mock_send[-1]["text"] == "Выберите время:"
+    assert mock_send[-1]["text"] == "Выбери время:"
     assert current_tenant() is None
 
     # Routed callbacks must NOT be persisted as global user messages — the

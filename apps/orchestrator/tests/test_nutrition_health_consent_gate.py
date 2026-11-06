@@ -68,12 +68,15 @@ def _flag_on(settings):
 def ayla(monkeypatch) -> Mock:
     """Единственный мок в файле — сеть до Ayla. Согласия настоящие.
 
-    Дверей две (DRF-1467): недельный агрегат и сегодняшние строки дневника.
-    Закрыты обе, иначе ``assert_not_called`` говорил бы правду про одну и
-    молчал про вторую.
+    Дверей три: профиль (DRF-2760 — в нём чувствительный периметр §7.1; здесь
+    он обычный), недельный агрегат и сегодняшние строки дневника (DRF-1467).
+    Закрыты все, иначе ``assert_not_called`` говорил бы правду про одну и
+    молчал про остальные.
     """
+    from apps.nutrition_proactive.tests.test_remarks_suppressed_2222 import profile
     from apps.orchestrator import food_history
 
+    monkeypatch.setattr(nutrition_context, "_fetch_profile", Mock(return_value=profile()))
     fetch = Mock(return_value=_deficits())
     monkeypatch.setattr(nutrition_context, "_fetch_deficits", fetch)
     monkeypatch.setattr(food_history, "read_today", Mock(return_value=food_history.UNKNOWN))

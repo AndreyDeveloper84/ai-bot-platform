@@ -489,8 +489,14 @@ def apply(spec: str, mode_name: str) -> Report:
             removed.update(per_model)
 
         if p.memory.rows:
-            _, per_model = UserPersonalContext.objects.filter(user_id__in=p.ayla_user_ids).delete()
-            removed.update(per_model)
+            # DRF-2542 §7 — под GUC красной зоны: без него политика RLS прячет
+            # красные строки от каскада, и сброс под обычной ролью падает на
+            # внешнем ключе, отчитавшись «чисто».
+            from apps.identity.services.memory_deleter import (
+                hard_delete_memory_for_account_reset,
+            )
+
+            removed.update(hard_delete_memory_for_account_reset(p.ayla_user_ids))
 
         if p.mode.unlinks_master_card and p.master_cards.rows:
             from apps.catalog.models import CatalogMaster

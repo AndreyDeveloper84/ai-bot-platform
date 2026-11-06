@@ -62,9 +62,14 @@ from django.views.decorators.http import require_http_methods
 
 from apps.admin_api.auth import require_admin_or_reception_read, require_admin_role
 from apps.catalog.models import CatalogMaster
+from apps.catalog.specialist_ref import CatalogSpecialistUnresolved, catalog_specialist_id
 from apps.catalog.services import schedule_confirmation as sc
 from apps.identity.services.role_resolver import RoleContext
-from apps.integrations.ayla.salon_client import SalonNotConfigured, SalonUnavailable
+from apps.integrations.ayla.salon_client import (
+    SalonAPIError,
+    SalonNotConfigured,
+    SalonUnavailable,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -128,6 +133,25 @@ def _schedule_payload(master: CatalogMaster, template: sc.WeeklyTemplate) -> dic
     }
 
 
+def _unresolved_or_none(master: CatalogMaster) -> JsonResponse | None:
+    """DRF-2638: мастер не заведён в каталоге — это ЕГО причина, а не источника.
+
+    Ниже по пути (``schedule_confirmation`` / ``schedule_frame``) незаведённый
+    мастер превращается в ``SalonNotConfigured`` — класс, который разбирают
+    другие вызывающие, — и здесь читался бы как «источник расписания не
+    настроен»: человек шёл бы настраивать то, что настраивать не нужно.
+    Причина снимается до вызова, как у соседней ручки исключений
+    (``views_master_exceptions``) и записи (``services/booking``): 409
+    ``catalog_profile_unresolved``.
+    """
+
+    try:
+        catalog_specialist_id(master)
+    except CatalogSpecialistUnresolved:
+        return _error("catalog_profile_unresolved", "master is not set up in the catalog yet", 409)
+    return None
+
+
 def _read_or_error(master: CatalogMaster) -> tuple[sc.WeeklyTemplate | None, JsonResponse | None]:
     """Читает недельный шаблон и переводит отказы источника в ответ.
 
@@ -136,6 +160,9 @@ def _read_or_error(master: CatalogMaster) -> tuple[sc.WeeklyTemplate | None, Jso
     пошла бы чинить график, с которым всё в порядке.
     """
 
+    unresolved = _unresolved_or_none(master)
+    if unresolved is not None:
+        return None, unresolved
     try:
         return sc.read_weekly_template(master), None
     except sc.ScheduleConfirmationError as exc:
@@ -145,6 +172,14 @@ def _read_or_error(master: CatalogMaster) -> tuple[sc.WeeklyTemplate | None, Jso
         return None, _error("schedule_source_not_configured", str(exc), 503)
     except SalonUnavailable as exc:
         return None, _error("schedule_unavailable", str(exc), 503)
+    except SalonAPIError as exc:
+        # DRF-2902 — см. master_day_schedule ниже: прочий отказ каталога — не 500.
+        logger.warning(
+            "admin_api.master_schedule.template_unreadable master=%s reason=%s",
+            master.id,
+            type(exc).__name__,
+        )
+        return None, _error("schedule_unavailable", type(exc).__name__, 503)
 
 
 @csrf_exempt
@@ -351,12 +386,25 @@ def master_day_schedule(request: HttpRequest, master_id: str) -> HttpResponse:
     if (to_date - from_date).days >= MAX_RANGE_DAYS:
         return _error("bad_request", f"range exceeds {MAX_RANGE_DAYS} days", 400)
 
+    unresolved = _unresolved_or_none(master)
+    if unresolved is not None:
+        return unresolved
     try:
         payload = build_schedule(master, from_date=from_date, to_date=to_date)
     except SalonNotConfigured as exc:
         return _error("schedule_source_not_configured", str(exc), 503)
     except SalonUnavailable as exc:
         return _error("schedule_unavailable", str(exc), 503)
+    except SalonAPIError as exc:
+        # DRF-2902 — прочие отказы каталога (403 «не администратор этого
+        # салона», 404, 401) раньше уходили наружу как 500. Текст отказа
+        # каталога наружу не отдаём: причина — в журнал, наружу имя класса.
+        logger.warning(
+            "admin_api.master_day_schedule.frame_unreadable master=%s reason=%s",
+            master.id,
+            type(exc).__name__,
+        )
+        return _error("schedule_unavailable", type(exc).__name__, 503)
 
     return JsonResponse(_in_salon_zone(payload.to_dict(), _schedule_zone(master)))
 

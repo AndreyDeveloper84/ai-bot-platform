@@ -36,8 +36,8 @@ from apps.identity.models import BotUser
 from apps.tenancy.models import Tenant
 
 # Числа из живого замера §55/§56: один человек, один салонный бот.
-MEASURED_USER_ID = "260237491"
-MEASURED_CHAT_ID = "518410834"
+MEASURED_USER_ID = "200000001"
+MEASURED_CHAT_ID = "500000004"
 
 
 @pytest.fixture(autouse=True)

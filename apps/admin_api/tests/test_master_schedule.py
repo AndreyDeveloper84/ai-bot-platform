@@ -589,3 +589,43 @@ class TestTheFrontDeskSeesTheMastersDay:
         )
 
         assert resp.status_code in (403, 405), resp.status_code
+
+
+class TestACatalogRefusalIsNotA500:
+    """DRF-2902 — каталог отказал в чтении графика (403, 404): вид ловил только
+    «не настроен» и «недоступен», остальное уходило наружу как 500."""
+
+    WORDS = "Изменять график может только администратор салона"
+
+    def test_the_day_view_answers_503_by_name(
+        self, client: Client, owner_bot_user: BotUser, synced_master: CatalogMaster, ayla
+    ) -> None:
+        from unittest.mock import patch
+
+        from apps.integrations.ayla.salon_client import SalonForbidden
+
+        ayla(_wire_week())
+        assert _get_day(client, synced_master).status_code == 200  # положительная пара
+
+        with patch(
+            "apps.master_api.services.schedule.build_schedule",
+            side_effect=SalonForbidden(self.WORDS),
+        ):
+            answer = _get_day(client, synced_master)
+
+        assert answer.status_code == 503, answer.content[:200]
+        assert answer.json()["error"] == "schedule_unavailable"
+        assert self.WORDS not in str(answer.json())
+
+    def test_the_week_view_answers_503_by_name(
+        self, client: Client, owner_bot_user: BotUser, synced_master: CatalogMaster, ayla
+    ) -> None:
+        from apps.integrations.ayla.salon_client import SalonForbidden
+
+        ayla([], exc=SalonForbidden(self.WORDS))
+
+        answer = _get(client, synced_master)
+
+        assert answer.status_code == 503, answer.content[:200]
+        assert answer.json()["error"] == "schedule_unavailable"
+        assert self.WORDS not in str(answer.json())

@@ -131,6 +131,8 @@ function mountedScreens(): string[] {
  */
 const EXPECTED_SCREENS = [
   "BookingWhenScreen",
+  // DRF-2799 — разговор с Ayla внутри Mini App (`/customer/ayla`).
+  "CustomerAylaScreen",
   "CustomerBookingConfirmScreen",
   "CustomerBookingDetailScreen",
   "CustomerBookingSuccessScreen",
@@ -281,6 +283,7 @@ function adminScreensWithoutTabBar(): string[] {
 const EXPECTED_ADMIN_SCREENS = [
   "AddPersonAccessCodeSection",
   "AddPersonNewMasterSection",
+  "AdminBookingDetailScreen",
   "AdminDeactivationFlowScreen",
   "AdminHandoffQueueScreen",
   "AdminInternalChatThreadScreen",

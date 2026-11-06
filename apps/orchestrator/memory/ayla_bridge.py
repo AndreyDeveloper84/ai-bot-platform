@@ -26,13 +26,20 @@ is the mapping + orchestration that calls them.
     Stored bot-side only; logged here on every attempt.
   - ``skin_sensitivities``: field exists in Ayla, but the owner ruling
     (DRF-1290) forbids activating it as green memory — never written.
-  - Clearing ``price_range_min/max`` on a DOMAIN forget («забудь про
-    бюджет»): the contract's ``value`` JSONField rejects null and
-    empty-string would break the Decimal column — no honest clear value
-    exists on the PATCH contract. This is why the owning side grew an
-    erasure verb rather than another field list; the whole-profile
-    «забудь всё» goes through it (:func:`erase_declared_profile`) and
-    clears the price with the rest.
+
+# Clearing the price on a DOMAIN forget («забудь про бюджет»)
+
+Until DRF-2886 the contract had no honest clear value for
+``price_range_min/max``: null was rejected and an empty string broke the
+Decimal column. Measured 07.10 (DRF-2700): the bot answered «забыла» while
+the price stayed in the profile and kept reaching the model.
+
+Since DRF-2886 the catalog accepts ``value: null`` as «reset this field».
+:func:`clear_declared_fields` sends it — in a request of its own — and, when
+the catalog refuses (an older deploy), falls back to NOT READING the field
+(``personal_context.withhold_declared_fields``). Either way «забыла» is true
+for the model and for the show list. The whole-profile «забудь всё» still
+goes through :func:`erase_declared_profile`.
 
 # Consent
 
@@ -56,6 +63,8 @@ from apps.identity.services.personal_context import (
     erase_declared_prefs,
     get_declared_prefs,
     patch_declared_prefs,
+    unwithhold_declared_fields,
+    withhold_declared_fields,
 )
 from apps.integrations.ayla.diet_types import CATALOG_DIET_TYPES
 from apps.persona.memory_extract import GreenFactCandidate
@@ -63,9 +72,10 @@ from apps.persona.memory_extract import GreenFactCandidate
 logger = logging.getLogger(__name__)
 
 # Fields this bridge writes — and therefore the only ones a DOMAIN forget
-# («забудь про питание») may clear. favorite_masters is Ayla-engine-owned
-# (rebook>=3 semantics) and price has no clear encoding (see the module
-# docstring) — neither is touched on a domain forget.
+# («забудь про питание») may clear with an EMPTY value. favorite_masters is
+# Ayla-engine-owned (rebook>=3 semantics) and is not touched on a domain
+# forget. The price is cleared too, but by ``null`` and in its own request —
+# see the module docstring and ``_WITHHELD_ON_FORGET``.
 #
 # This table is NOT the «забудь всё» path and must never become it: naming
 # fields is exactly the defect DRF-1367 describes (three named against twelve
@@ -77,6 +87,12 @@ _CLEARABLE_FIELDS: dict[str, list[tuple[str, Any]]] = {
 }
 
 _ALL_BRIDGE_KEYS = frozenset(_CLEARABLE_FIELDS) | {"price_range", "favorite_masters"}
+
+#: DRF-2700 — поля анкеты, которые при «забудь» нельзя очистить и потому
+#: перестают читаться (``personal_context.withhold_declared_fields``).
+_WITHHELD_ON_FORGET: dict[str, tuple[str, ...]] = {
+    "price_range": ("price_range_min", "price_range_max"),
+}
 
 
 def _key(candidate: GreenFactCandidate) -> str | None:
@@ -211,31 +227,56 @@ def clear_declared_fields(
     «Забыть» must be real, not a mark: when the user forgets a domain, the
     Ayla-side declared value goes back to its empty default in the same
     best-effort spirit. Only bridge-owned fields are cleared (see
-    ``_CLEARABLE_FIELDS``); ``price_range`` has no clear encoding in the
-    frozen contract — logged as a gap, never guessed.
+    ``_CLEARABLE_FIELDS``).
+
+    ``price_range`` (DRF-2700 / DRF-2886): каталог принимает ``value: null``
+    как «очистить поле». Цена очищается ОТДЕЛЬНЫМ запросом: каталог до выкладки
+    DRF-2886 отвечает на ``null`` отказом, и общий запрос унёс бы с собой
+    очистку питания и района. Отказ — не тупик: поле перестаёт ЧИТАТЬСЯ
+    (``withhold_declared_fields``), и «забыла» остаётся правдой для модели и
+    для показа. Очистка удалась — отметка «не читать» снимается.
     """
 
+    user_id = getattr(bot_user, "ayla_user_id", None)
+    cleared_price = 0
     updates: list[dict[str, Any]] = []
     for key in dict.fromkeys(memory_keys):
-        if key in ("price_range", "favorite_masters"):
-            # price: null is rejected by the contract serializer, "" breaks
-            # the Decimal column — no honest clear encoding (contract gap).
-            # favorite_masters: never bridge-written; Ayla-engine-owned.
+        if key == "favorite_masters":
+            # Never bridge-written; Ayla-engine-owned.
             logger.warning(
-                "orchestrator.memory_bridge.clear_skipped key=%s — no clear "
-                "encoding in the frozen contract (contract gap)",
+                "orchestrator.memory_bridge.clear_skipped key=%s — not a bridge-owned field",
                 key,
             )
+            continue
+        if key == "price_range":
+            fields = list(_WITHHELD_ON_FORGET[key])
+            nulled = patch_declared_prefs(
+                bot_user,
+                [{"field": field, "value": None, "source": "explicit"} for field in fields],
+                client=client,
+            )
+            if nulled.status is GateStatus.OK:
+                unwithhold_declared_fields(user_id, fields)
+                cleared_price = len(fields)
+            else:
+                # Очистить не вышло — значит не читать: иначе «забыла» было бы
+                # неправдой, а цена продолжала бы уходить модели.
+                logger.warning(
+                    "orchestrator.memory_bridge.price_clear_refused reason=%s — "
+                    "поле не читается, пока человек не назовёт бюджет заново",
+                    nulled.status.value,
+                )
+                withhold_declared_fields(user_id, fields)
             continue
         for field, empty in _CLEARABLE_FIELDS.get(key, []):
             updates.append({"field": field, "value": empty, "source": "explicit"})
     if not updates:
-        return 0
+        return cleared_price
     result = patch_declared_prefs(bot_user, updates, client=client)
     if result.status is not GateStatus.OK:
         logger.info("orchestrator.memory_bridge.clear_blocked reason=%s", result.status.value)
-        return 0
-    return len(updates)
+        return cleared_price
+    return len(updates) + cleared_price
 
 
 def erase_declared_profile_status(bot_user: Any, *, client: Any = None) -> GateStatus:

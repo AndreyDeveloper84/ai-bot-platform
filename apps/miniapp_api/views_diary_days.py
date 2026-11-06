@@ -17,10 +17,10 @@
 согласие ПДн (``_diary_entry_gate``, ``needs_consent=True``) — чтение
 личных записей.
 
-``nutrition_numbers_hidden`` — тот же производный булев, что у сводки, и с
-тем же умолчанием: наружу уходит ОДИН булев, а не ``health_flags``; когда
-анкета не прочиталась, ключа нет и экран прячет числа (fail-closed). Анкеты
-нет вовсе — не отказ чтения: флага нет, числа показываются.
+``nutrition_numbers_hidden`` — тот же булев, что у сводки: с DRF-2766 это
+выбор самого человека «Без чисел» (настройка в боте), а не флаг анкеты.
+Ключ в ответе есть всегда; экран на его отсутствие (старые ответы)
+по-прежнему прячет числа.
 
 Прошлые дни здесь только читаются: правка и удаление записей за прошлые
 дни — предел этой поверхности (не в DRF-2099).
@@ -41,6 +41,8 @@ from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 
 from apps.identity.models import BotUser
+from apps.nutrition_proactive.prefs import numbers_hidden_for
+from apps.miniapp_api.per_person_quota import over_quota, rate_limited
 from apps.miniapp_api.views import (
     _diary_entry_gate,
     _error,
@@ -52,17 +54,19 @@ logger = logging.getLogger(__name__)
 
 
 def _numbers_hidden(profile_res: Any, *, bot_user: BotUser) -> bool | None:
-    """Как в ``customer_wellness_today``: ``None`` — анкета не прочиталась."""
+    """Как в ``customer_wellness_today``: выбор человека «Без чисел» (DRF-2766).
+
+    Прежде признак выводился из флага расстройства пищевого поведения в
+    анкете; владелец 04.10 это автоматическое скрытие снял. Отказ чтения
+    анкеты на признак больше не влияет — только пишется в журнал.
+    """
     if isinstance(profile_res, Exception):
         logger.warning(
             "diary_days.profile_unavailable bot_user=%s err=%s",
             bot_user.pk,
             type(profile_res).__name__,
         )
-        return None
-    if profile_res is None:
-        return False
-    return bool((profile_res.health_flags or {}).get("eating_disorder"))
+    return numbers_hidden_for(bot_user)
 
 
 def _day_payload(row: Any) -> dict[str, Any]:
@@ -71,6 +75,9 @@ def _day_payload(row: Any) -> dict[str, Any]:
         "meals_count": row.meals_count,
         "kcal": row.kcal,
         "has_entries": row.has_entries,
+        # DRF-2766 (фаза 2) — итог дня неполный / с оценками ИИ.
+        "uncounted_meals": int(getattr(row, "uncounted_meals", 0) or 0),
+        "kcal_ai_included": int(getattr(row, "kcal_ai_included", 0) or 0),
     }
 
 
@@ -139,6 +146,16 @@ def customer_diary_days(request: HttpRequest) -> HttpResponse:
 #: уезжает как поток байтов: см. про один источник в ``customer_food_photo``.
 _PHOTO_TYPES_SHOWN = frozenset({"image/jpeg", "image/png", "image/webp"})
 
+#: DRF-2629 — снимков в минуту на человека, до похода в каталог.
+#:
+#: Выведено от честного пика: самый тяжёлый экран — неделя дневника, 7 дней
+#: по 4–8 записей (``apps/miniapp/src/lib/diary-photo.ts``, ``MAX_CACHED_PHOTOS``
+#: = 64 рассчитан на то же), то есть до 56 снимков. Повтор в пределах 5 минут
+#: бесплатен (``Cache-Control: private, max-age=300`` ниже + аренда Mini App).
+#: 120 ≈ 2× пика — то же отношение, что у фото мастера (DRF-2618): листающий
+#: человек не упрётся, зациклившийся клиент остановится на двух в секунду.
+FOOD_PHOTO_PER_PERSON_PER_MINUTE = 120
+
 
 @csrf_exempt
 @require_http_methods(["GET"])
@@ -171,6 +188,10 @@ def customer_food_photo(request: HttpRequest, log_id: str) -> HttpResponse:
         # Тот же отказ, что на чужую запись: по ответу нельзя отличить
         # «не то имя» от «не твоя запись».
         return _error("not_found", "photo not found", 404)
+    # DRF-2629 — квота на человека до каталога: сверх неё каталог не спрошен.
+    if over_quota("food_photo", str(bot_user.pk), per_minute=FOOD_PHOTO_PER_PERSON_PER_MINUTE):
+        logger.warning("miniapp_api.food_photo.person_rate_limited")
+        return rate_limited("photo_rate_limited", "too many photos, retry in a minute")
     external_id = external_user_id_for(bot_user)
 
     try:
@@ -244,6 +265,10 @@ def customer_diary_day(request: HttpRequest) -> HttpResponse:
     payload: dict[str, Any] = {
         "date": summary_res.date or date,
         "calories_total": summary_res.calories_total,
+        # DRF-2766 (фаза 2) — итог включает оценки ИИ: сколько вошло
+        # оценкой и сколько записей без калорий (итог неполный).
+        "calories_ai_included": int(getattr(summary_res, "calories_ai_included", 0) or 0),
+        "calories_unscored": int(getattr(summary_res, "calories_unscored", 0) or 0),
         "entries": list(summary_res.entries or []),
     }
     hidden = _numbers_hidden(profile_res, bot_user=bot_user)

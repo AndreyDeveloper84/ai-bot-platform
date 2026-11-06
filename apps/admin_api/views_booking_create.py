@@ -41,7 +41,7 @@ from django.http import HttpRequest, HttpResponse, JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 
-from apps.admin_api.auth import require_admin_role
+from apps.admin_api.auth import require_booking_desk
 from apps.admin_api.services.booking import (
     Refusal,
     bookable_service,
@@ -75,7 +75,7 @@ def _outcome(outcome: str, detail: str, status: int, **extra: Any) -> JsonRespon
 
 @csrf_exempt
 @require_http_methods(["POST"])
-@require_admin_role
+@require_booking_desk
 def create_booking(request: HttpRequest) -> HttpResponse:
     """Create an appointment on behalf of the calling administrator."""
 
@@ -89,6 +89,11 @@ def create_booking(request: HttpRequest) -> HttpResponse:
     if not isinstance(body, dict):
         return _error("bad_request", "body must be a JSON object", 400)
 
+    # DRF-2666: свободный текст из тела хранится или уходит наружу — нестроковое
+    # значение получает отказ этой двери, а не становится текстом "{'a': 1}".
+    for field in ("client_name", "client_phone", "idempotency_key"):
+        if body.get(field) is not None and not isinstance(body.get(field), str):
+            return _error("bad_request", f"{field} must be a string", 400)
     master_id = str(body.get("master_id") or "").strip()
     service_id = str(body.get("service_id") or "").strip()
     start_at = str(body.get("start_at") or "").strip()

@@ -285,6 +285,12 @@ def verify_init_data(
         raise InitDataMalformed("invalid user JSON") from exc
     if not user or "id" not in user:
         raise InitDataMalformed("user.id missing")
+    # DRF-2661: presence is not validity. ``{"id": null}`` passes the check
+    # above and ``str(None)`` is ``"None"`` — every such launch would be ONE
+    # person (``user_id`` is the channel key). Integer or non-blank string.
+    uid = user["id"]
+    if isinstance(uid, bool) or not isinstance(uid, int | str) or not str(uid).strip():
+        raise InitDataMalformed("user.id is not a usable id")
 
     chat: dict[str, Any] | None = None
     if "chat" in params:

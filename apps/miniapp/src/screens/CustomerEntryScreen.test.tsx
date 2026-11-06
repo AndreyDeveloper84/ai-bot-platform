@@ -129,7 +129,7 @@ describe("первый вход клиента", () => {
     ).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Лицо и кожа" })).toBeInTheDocument();
     // Приветствия на первом экране больше нет.
-    expect(screen.queryByText(/Здравствуйте/)).toBeNull();
+    expect(screen.queryByText(/Привет,/)).toBeNull();
     expect(screen.queryByText("ДОМАШНИЙ ЭКРАН")).toBeNull();
   });
 
@@ -164,7 +164,7 @@ describe("первый вход клиента", () => {
     mockedFetch.mockRejectedValue(new Error("502"));
     renderEntry();
 
-    expect(await screen.findByText(/Здравствуйте/)).toBeInTheDocument();
+    expect(await screen.findByText(/Привет,/)).toBeInTheDocument();
   });
 
   it("MAX получает ready на первом экране в любой ветке", async () => {
@@ -249,7 +249,7 @@ describe("анкета на корне — одна для всех (DRF-1469)",
     expect(
       await screen.findByText("Что сейчас хочется привести в порядок?"),
     ).toBeInTheDocument();
-    expect(screen.queryByText(/Здравствуйте/)).toBeNull();
+    expect(screen.queryByText(/Привет,/)).toBeNull();
   });
 
   it("многоролевой может уйти с анкеты, не создавая цели", async () => {

@@ -329,6 +329,24 @@ class TestDailyReportSchedule:
         assert decision.send is True
         assert "Итоги дня" in decision.text
 
+    def test_drf2766_the_evening_report_honours_numbers_hidden(self, tenant: Tenant) -> None:
+        """«Без чисел» действует и в вечернем отчёте; соседу без выбора — с числами."""
+        hidden = make_user(
+            tenant, suffix="2766a", report="19:00", extra_prefs={"numbers_hidden": True}
+        )
+        shown = make_user(tenant, suffix="2766b", report="19:00")
+
+        decisions = tasks.plan_daily_reports(now_utc=at_msk(19), fetch=summary_reader())
+
+        with_numbers = only(decisions, shown)
+        without = only(decisions, hidden)
+        assert with_numbers.send is True
+        assert "Калории: 1500" in with_numbers.text
+        assert without.send is True
+        assert "Итоги дня" in without.text
+        assert "ккал" not in without.text
+        assert "Калории" not in without.text
+
     def test_silent_at_every_other_hour(self, tenant: Tenant) -> None:
         user = make_user(tenant, report="19:00")
         for hour in range(9, 22):
@@ -722,7 +740,9 @@ class TestConsentGate:
 
         Asserted against a row that would fail a *later* condition too:
         the reason must be ``opt_out``, which is only true if the veto is
-        evaluated before consent is even looked at.
+        decided before any other condition. (Since DRF-2708 a WITHDRAWN
+        consent is the one fact allowed to name the block instead — this
+        person never consented, so the opt-out still names it.)
         """
         user = make_user(tenant, opt_out=True, consented=False)
         assert selection.check_common(user) == "opt_out"

@@ -46,6 +46,7 @@ behaviour.
 
 from __future__ import annotations
 
+import logging
 import os
 import socket
 import uuid
@@ -61,6 +62,8 @@ from apps.identity.services.exceptions import (
     MinorProtectionLookupFailed,
     ZonePromotionRequiresConsent,
 )
+
+logger = logging.getLogger(__name__)
 
 
 #: DRF-2542 — условия, которые обязаны быть закрыты ДО первого писателя жёлтой
@@ -80,9 +83,53 @@ ZONE_WRITER_CONDITIONS: dict[str, str] = {
 }
 
 #: Закрытые условия: исполнены или названы решением владельца как сознательно
-#: отложенные. ПУСТО по построению — закрывает их не сторож и не исполнитель
-#: сторожа. Имя, которого нет в ``ZONE_WRITER_CONDITIONS``, — ошибка записи.
-ZONE_WRITER_CONDITIONS_CLOSED: frozenset[str] = frozenset()
+#: отложенные. Закрывает их не сторож и не исполнитель сторожа. Имя, которого
+#: нет в ``ZONE_WRITER_CONDITIONS``, — ошибка записи.
+#:
+#: 07.10.2026, слово главного окна по замеру исполнением на ``d62e07bd``
+#: (запись в листе DRF-2542): §2 — отказ базы по согласию назван строкой аудита;
+#: §4 — красная строка с истёкшим сроком снята свипом с причиной ``ttl_purge``,
+#: задача стоит в расписании.
+#:
+#: 07.10.2026, подпись главного окна после слияния и сверки узлами: §1 —
+#: писатель читает журнал согласий зоны (#2343); §5 — отзыв согласия зоны
+#: ставит её строкам надгробие ``withdrawal`` (#2343); §7 — сброс аккаунта
+#: снимает красную зону под GUC, узел идёт под ролью без SUPERUSER и
+#: BYPASSRLS (#2341).
+#:
+#: Открыты два, оба — решения владельца: §3 (состав выгрузки 152-ФЗ для
+#: жёлтой и красной зоны) и §6 (``minor_lock`` и уже лежащие строки). Общий
+#: гейт ждёт всех семи: заглушка #597 не снимается, пока они открыты.
+ZONE_WRITER_CONDITIONS_CLOSED: frozenset[str] = frozenset(
+    {
+        "consent_check_in_write_entry",
+        "targeted_integrity_error",
+        "ttl_purge_sweep",
+        "withdrawal_deletes_zone_rows",
+        "account_reset_red_zone_rls",
+    }
+)
+
+
+def _zone_consent_active(user_id: uuid.UUID, zone: str) -> bool:
+    """Действует ли у человека согласие этой зоны — по журналу согласий.
+
+    DRF-2542 §1. ``consent_at`` — параметр вызывающего: он говорит «согласие
+    было», и до этой проверки писатель верил ему на слово — красная строка
+    ложилась и без единой записи согласия ``memory_red``. Читатель красной зоны
+    спрашивает тот же журнал в точке использования (DRF-2132), так что строка,
+    записанная без него, была бы ещё и непригодной.
+
+    Сбой чтения согласия — отказ: запись особой категории не открывается
+    ошибкой.
+    """
+    try:
+        from apps.consent.services import has_memory_consent
+
+        return has_memory_consent(user_id, zone)
+    except Exception:  # noqa: BLE001 — a failed consent read must not open the gate
+        logger.exception("identity.memory_writer.zone_consent_read_failed zone=%s", zone)
+        return False
 
 
 def _check_minor_protection(user_id: uuid.UUID) -> None:
@@ -174,6 +221,18 @@ def _is_consent_violation(exc: IntegrityError) -> bool:
     return _CONSENT_CONSTRAINT in str(exc)
 
 
+#: Умная память Ф4 (решение владельца 05.10.2026, DRF-2780): срок
+#: НЕподтверждённого предположения — 30 дней. PENDING — ждёт ратификации
+#: владельцем; подтверждённое живёт 180 дней (поток подтверждения, DRF-2781),
+#: свип сроков — DRF-2782. Число литералом и здесь, и в узле.
+INFERRED_UNCONFIRMED_TERM_DAYS = 30
+
+#: Основание, под которым пишется выводимое (``MemoryEntry.consent_scope``):
+#: добровольное согласие на предположения (DRF-2779). Значение равно типу
+#: согласия — чтобы атрибут записи и запись реестра называли одно и то же.
+INFERRED_CONSENT_SCOPE = "preference_inference"
+
+
 def write_entry(
     *,
     user_id: uuid.UUID,
@@ -188,6 +247,8 @@ def write_entry(
     source_tenant_id: Optional[uuid.UUID] = None,
     last_inferred_at: Optional[Any] = None,
     ttl_days: Optional[int] = None,
+    derivation_method: Optional[str] = None,
+    evidence_refs: Optional[list[Any]] = None,
 ) -> Optional[MemoryEntry]:
     """Create a new MemoryEntry with all spec §11 guards.
 
@@ -208,6 +269,13 @@ def write_entry(
         last_inferred_at: REQUIRED when source IN ('inferred','signal'),
             MUST be NULL when source='explicit' (CHECK 1 enforces it).
         ttl_days: per-zone retention cap. None = no auto-TTL (green).
+        derivation_method / evidence_refs: provenance of an INFERRED fact
+            (DRF-2780, owner 05.10: «каждое предположение — источник, дата,
+            статус, срок»). Stored as given — the writer never fabricates them;
+            ignored for explicit rows (a user_stated fact is its own source).
+            ``source_event_id`` is deliberately NOT a parameter: «nobody writes
+            the event key» is a guarded zero (``test_memory_reach_sql_2513``),
+            and the first producer (F4b) changes it together with that guard.
 
     Returns:
         The created MemoryEntry on success, OR None when the write was
@@ -230,16 +298,31 @@ def write_entry(
             _audit_write_rejected(user_id, request_id, purpose)
             return None
 
+        # DRF-2542 §1 — согласие зоны по журналу, а не по параметру. После
+        # возраста: сначала «можно ли этому человеку вообще», потом «согласен
+        # ли он»; строка аудита называет причину отказа.
+        if not _zone_consent_active(user_id, sensitivity_zone):
+            _audit_write_rejected(
+                user_id,
+                request_id,
+                purpose,
+                access_type=RedZoneAccessLog.ACCESS_WRITE_REJECTED_NO_CONSENT,
+            )
+            return None
+
     # Canonical §3.1 fields at write time (Migration Plan Step 3.5): stop
     # NEW schema drift after the Step-3 backfill. EXPLICIT persistent
     # writes are canonical user_stated facts — stamped here, in the single
     # sanctioned write path, so every explicit caller is covered. ONE
     # timestamp per write operation (no auto_now semantics): effective_from
-    # == updated_at == the expiry base. inferred/signal rows are NOT
-    # stamped — provenance=user_confirmed_inference may only come from the
-    # proposal flow (Step 4+), never silently from the writer. consent_scope
-    # / source_event_id / evidence_refs / derivation_method are never
-    # fabricated here; purpose_tags stays [] (no category policy yet).
+    # == updated_at == the expiry base. INFERRED rows are stamped too since
+    # DRF-2780 (smart memory F4, owner 05.10) — lifecycle, a 30-day
+    # unconfirmed term and the consent scope, but provenance stays NULL:
+    # user_confirmed_inference may only come from the confirmation flow
+    # (DRF-2781), never silently from the writer. Signal rows are not
+    # stamped (no writer). evidence_refs / derivation_method are stored as
+    # the caller gives them, never fabricated; source_event_id is not
+    # written at all; purpose_tags stays [] (no category policy yet).
     canonical: dict[str, Any] = {}
     if source == MemoryEntry.SOURCE_EXPLICIT:
         write_ts = timezone.now()
@@ -249,6 +332,27 @@ def write_entry(
             "effective_from": write_ts,
             "updated_at": write_ts,
             "expires_at": (write_ts + timedelta(days=ttl_days) if ttl_days is not None else None),
+        }
+    elif source == MemoryEntry.SOURCE_INFERRED:
+        # DRF-2780 (умная память Ф4): предположение — не факт. Оно живое
+        # (``status=active``), но ``provenance`` остаётся NULL: стать
+        # ``user_confirmed_inference`` оно может только подтверждением
+        # человека (DRF-2781), никогда — молча здесь. Срок — 30 дней
+        # неподтверждённого, либо короче, если вызывающий назвал меньший.
+        # Основание записи — добровольное согласие на предположения.
+        write_ts = timezone.now()
+        term = INFERRED_UNCONFIRMED_TERM_DAYS
+        if ttl_days is not None:
+            term = min(term, ttl_days)
+        canonical = {
+            "status": MemoryEntry.STATUS_ACTIVE,
+            "provenance": None,
+            "effective_from": write_ts,
+            "updated_at": write_ts,
+            "expires_at": write_ts + timedelta(days=term),
+            "consent_scope": INFERRED_CONSENT_SCOPE,
+            "derivation_method": derivation_method,
+            "evidence_refs": list(evidence_refs or []),
         }
 
     # DRF-2544 — происхождение решается в момент записи и в одном месте:
@@ -443,6 +547,20 @@ def promote_zone(
             request_id=request_id,
             purpose=purpose,
         )
+        # DRF-2542 §1 — тот же журнал согласий, что у `write_entry`: токен
+        # говорит «человек согласился сейчас», но строка зоны без действующего
+        # согласия зоны непригодна и неотзываема. Отказ назван строкой аудита.
+        if not _zone_consent_active(entry.user_id, new_zone):
+            _audit_write_rejected(
+                entry.user_id,
+                request_id,
+                purpose,
+                access_type=RedZoneAccessLog.ACCESS_WRITE_REJECTED_NO_CONSENT,
+            )
+            raise ZonePromotionRequiresConsent(
+                f"Cannot promote entry {entry.id} to {new_zone!r}: no active "
+                f"{new_zone}-zone memory consent on record (DRF-2542 §1)."
+            )
         # Same UPDATE — satisfies CHECK 2 (yellow/red require
         # consent_at NOT NULL).
         entry.sensitivity_zone = new_zone

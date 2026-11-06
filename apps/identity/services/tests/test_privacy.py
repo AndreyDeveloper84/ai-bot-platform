@@ -125,6 +125,7 @@ def _seed_memory(bu: BotUser, ayla_user_id: uuid.UUID) -> None:
     BotUser.all_tenants.filter(pk=bu.pk).update(customer_status=BotUser.CustomerStatus.LINKED)
     bu.refresh_from_db(fields=["customer_status"])
     _grant(bu, CT.PERSONAL_DATA)
+    _grant(bu, CT.PREFERENCE_INFERENCE)  # DRF-2779: the inferred writer needs it
     record_inferred_green_facts(
         bu,
         [InferredGreenFact(kind="diet", content={"key": "diet_type", "value": "vegan"})],

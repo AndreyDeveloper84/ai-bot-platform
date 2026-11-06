@@ -49,6 +49,7 @@ def _card_to_dict(card: MasterCard) -> dict[str, Any]:
         "name": card.name,
         "specialization": card.specialization,
         "rating": str(card.rating) if card.rating is not None else None,
+        "review_count": card.review_count,
         "photo_url": master_photo_path(card.master_id, card.photo_url),
         "city": card.city,
     }

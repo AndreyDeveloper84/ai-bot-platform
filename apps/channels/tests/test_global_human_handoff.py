@@ -117,7 +117,7 @@ class TestGlobalHandoffTrigger:
 
         task = AdminTask.all_tenants.get()
         assert task.task_type == AdminTask.TaskType.HANDOFF
-        assert mock_send[-1]["text"] == ("Передаю менеджеру — ответят в течение 30 минут.")
+        assert mock_send[-1]["text"] == ("Передаю твой вопрос менеджеру.")
         # The concierge LLM must NOT have answered this turn.
         spy_concierge.assert_not_called()
 
@@ -195,7 +195,7 @@ class TestQueueAddressing:
         assert newer.state != Conversation.State.HUMAN_HANDOFF
         assert older.state != Conversation.State.HUMAN_HANDOFF
         # …and the user gets the same handoff reply on the global chat.
-        assert mock_send[-1]["text"] == ("Передаю менеджеру — ответят в течение 30 минут.")
+        assert mock_send[-1]["text"] == ("Передаю твой вопрос менеджеру.")
 
     def test_global_dialog_muted_when_task_went_to_tenant(
         self, mock_send, fake_redis, spy_concierge, settings
@@ -252,7 +252,7 @@ class TestRussianKeywordsOnGlobalPath:
         _run_global("позовите менеджера", mid="g1")
 
         assert AdminTask.all_tenants.count() == 1
-        assert mock_send[-1]["text"] == ("Передаю менеджеру — ответят в течение 30 минут.")
+        assert mock_send[-1]["text"] == ("Передаю твой вопрос менеджеру.")
         spy_concierge.assert_not_called()
 
     def test_administrator_escalates(self, mock_send, fake_redis, spy_concierge):

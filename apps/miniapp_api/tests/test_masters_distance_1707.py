@@ -83,9 +83,10 @@ def bot_user(tenant) -> BotUser:
 
 
 def _master(tenant, name: str) -> CatalogMaster:
+    """Строка синка: id каталога в колонке равен pk (DRF-1933, DRF-2764)."""
     from django.utils import timezone as tz
 
-    return CatalogMaster.all_tenants.create(
+    master = CatalogMaster.all_tenants.create(
         tenant=tenant,
         external_updated_at=tz.now(),
         name=name,
@@ -94,6 +95,9 @@ def _master(tenant, name: str) -> CatalogMaster:
         invite_status=CatalogMaster.InviteStatus.ACCEPTED,
         ayla_user_id=uuid.uuid4(),
     )
+    master.catalog_specialist_id = master.id
+    master.save(update_fields=["catalog_specialist_id"])
+    return master
 
 
 @pytest.fixture

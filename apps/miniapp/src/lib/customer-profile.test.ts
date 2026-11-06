@@ -23,10 +23,12 @@ import {
   fetchMe,
   fetchProactivePrefs,
   formatConsentDate,
+  regrantDataStorage,
   revokeDataStorage,
   setMarketingConsent,
   setProactiveOptOut,
   StaleDisclosureError,
+  StaleRegrantDocumentError,
 } from "./customer-profile";
 import { ApiError, fetchProfile, request, type Profile } from "./api";
 
@@ -68,6 +70,8 @@ interface DocOptions {
   storageGranted?: boolean;
   storageAt?: string | null;
   hintsEnabled?: boolean;
+  /** `proactive_hints.can_enable` сервера (DRF-2709): `false` — после отзыва. */
+  hintsCanEnable?: boolean;
   disclosureVersion?: string;
   revocation?: {
     status: string;
@@ -100,7 +104,11 @@ function consentsDoc(o: DocOptions = {}): Record<string, unknown> {
       memory_yellow: { granted: false, granted_at: null, document_version: "" },
       memory_red: { granted: false, granted_at: null, document_version: "" },
     },
-    proactive_hints: { enabled: o.hintsEnabled ?? true },
+    proactive_hints: {
+      enabled: o.hintsEnabled ?? true,
+      can_enable: o.hintsCanEnable ?? true,
+      blocked_reason: (o.hintsCanEnable ?? true) ? "" : "consent_withdrawn",
+    },
     data_storage: {
       granted: storageGranted,
       granted_at: storageGranted ? storageAt : null,
@@ -191,8 +199,29 @@ describe("fetchConsents (реальный GET me/consents/)", () => {
       "data-storage-revocation-v1",
     );
     expect(consents.proactive_hints_enabled).toBe(true);
+    expect(consents.proactive_hints_can_enable).toBe(true);
     expect(consents.is_booking_pii_locked).toBe(true);
     expect(consents.is_master_data_locked).toBe(true);
+  });
+
+  it("DRF-2709: замок подсказок доезжает до экрана как есть", async () => {
+    requestMock.mockResolvedValue(
+      consentsDoc({ storageGranted: false, hintsEnabled: false, hintsCanEnable: false }),
+    );
+    const consents = await fetchConsents();
+    // Presence first: the document was read and mapped.
+    expect(consents.data_storage_granted).toBe(false);
+    expect(consents.proactive_hints_can_enable).toBe(false);
+    expect(consents.proactive_hints_enabled).toBe(false);
+  });
+
+  it("DRF-2709: прежний сервер без can_enable — экран как раньше, включать можно", async () => {
+    const doc = consentsDoc({ hintsEnabled: false });
+    (doc.proactive_hints as Record<string, unknown>) = { enabled: false };
+    requestMock.mockResolvedValue(doc);
+    const consents = await fetchConsents();
+    expect(consents.proactive_hints_enabled).toBe(false);
+    expect(consents.proactive_hints_can_enable).toBe(true);
   });
 
   it("отозванное согласие: даты нет, и она не выдумывается", async () => {
@@ -366,6 +395,53 @@ describe("revokeDataStorage (DELETE me/consents/data-storage/)", () => {
 });
 
 // --- customer-profile pure helpers -----------------------------------------
+
+describe("regrantDataStorage (POST me/consents/data-storage/, DRF-2709)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("шлёт версию документа и раскладывает перечитанное состояние", async () => {
+    const doc = consentsDoc({ storageGranted: true, hintsEnabled: false });
+    (doc.data_storage as Record<string, unknown>).regrant = {
+      document_version: "welcome-s2-v1",
+    };
+    requestMock.mockResolvedValue(doc);
+
+    const consents = await regrantDataStorage("welcome-s2-v1");
+
+    expect(requestMock).toHaveBeenCalledWith("/me/consents/data-storage/", {
+      method: "POST",
+      body: JSON.stringify({ document_version: "welcome-s2-v1" }),
+    });
+    expect(consents.data_storage_granted).toBe(true);
+    expect(consents.proactive_hints_enabled).toBe(false);
+    expect(consents.data_storage_regrant_version).toBe("welcome-s2-v1");
+  });
+
+  it("409 — версия устарела: отдельная ошибка, ничего не дожимаем", async () => {
+    requestMock.mockRejectedValue(new ApiError(409, "stale_document", "changed"));
+
+    await expect(regrantDataStorage("welcome-s1-v0")).rejects.toBeInstanceOf(
+      StaleRegrantDocumentError,
+    );
+    expect(requestMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("прочий отказ пробрасывается как есть", async () => {
+    requestMock.mockRejectedValue(new ApiError(502, "", ""));
+
+    await expect(regrantDataStorage("welcome-s2-v1")).rejects.toBeInstanceOf(ApiError);
+  });
+
+  it("версию документа экран берёт только из ответа сервера", async () => {
+    requestMock.mockResolvedValue(consentsDoc());
+    const without = await fetchConsents();
+    // Presence first: the document was read — the empty version is the server's silence.
+    expect(without.data_storage_granted).toBe(true);
+    expect(without.data_storage_regrant_version).toBe("");
+  });
+});
 
 describe("additionalSalonsLabel (Russian plural rules)", () => {
   it("returns empty string for zero / negative counts", () => {

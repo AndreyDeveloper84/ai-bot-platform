@@ -25,8 +25,8 @@ DRF-1558 перевёл на ``user_id`` все отправки, чей адр�
 404 ``dialog.not.found``. Замер 07.09.2026, один человек и один салонный бот
 (`docs/OPEN_DECISIONS.md` §55, §56)::
 
-    POST /messages?user_id=260237491   → 200, доставлено
-    POST /messages?chat_id=518410834   → 404 dialog.not.found
+    POST /messages?user_id=260…   → 200, доставлено
+    POST /messages?chat_id=518…   → 404 dialog.not.found
 
 ### Почему новые поля, а не переосмысление старых
 

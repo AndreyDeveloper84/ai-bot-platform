@@ -77,7 +77,7 @@ class TestC2TheBreakerStaysClosed:
         for _ in range(6):  # порог breaker — 5 отказов за 60 с
             with pytest.raises(nc.ScanProviderDownError):
                 await client.scan_photo(external_user_id="bot:1", image_bytes=b"...")
-        assert client._circuit.is_open(now=time.monotonic()) is False
+        assert client._breaker(nc.BreakerPurpose.NUTRITION).is_open(now=time.monotonic()) is False
 
 
 class TestC3PositivePairTemporaryStaysUnavailable:
@@ -88,4 +88,4 @@ class TestC3PositivePairTemporaryStaysUnavailable:
         for _ in range(5):
             with pytest.raises(nc.NutritionUnavailableError):
                 await client.scan_photo(external_user_id="bot:1", image_bytes=b"...")
-        assert client._circuit.is_open(now=time.monotonic()) is True
+        assert client._breaker(nc.BreakerPurpose.NUTRITION).is_open(now=time.monotonic()) is True

@@ -54,7 +54,7 @@ from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 
-from apps.admin_api.auth import RoleContext, require_admin_role
+from apps.admin_api.auth import RoleContext, require_admin_role, require_booking_desk
 from apps.admin_api.views_salon_schedule_writes import salon_person_write
 from apps.audit.models import AuditLog
 from apps.audit.services import write_audit
@@ -66,6 +66,11 @@ from apps.events.vocabulary import (
 )
 from apps.identity.models import BotUser
 from apps.miniapp_api.master_media import master_photo_path
+from apps.tenancy.billing_gate import (
+    MasterAddRefused,
+    assert_can_add_master,
+    master_add_refusal_response,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -295,7 +300,7 @@ def _detail_payload(master: CatalogMaster, *, include_audit: bool = False) -> di
 
 
 @require_http_methods(["GET"])
-@require_admin_role
+@require_booking_desk
 def masters_list(request: HttpRequest) -> HttpResponse:
     """Roster list — filters, search, opaque cursor pagination.
 
@@ -565,6 +570,12 @@ def _master_update(request: HttpRequest, master_id: str) -> HttpResponse:
                 "only the salon owner can deactivate a master",
                 403,
             )
+        # DRF-2984 B2 — включение делает мастера активным в салоне.
+        if is_active is True and not master.is_active:
+            try:
+                assert_can_add_master(master.tenant, master_id=master.id)
+            except MasterAddRefused as exc:
+                return master_add_refusal_response(exc)
 
     # --- compute diff for audit + apply ---
     fields_changed: list[str] = []

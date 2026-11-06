@@ -49,6 +49,7 @@ import { DisclosureSheet } from "../components/DisclosureSheet";
 import { TimezoneSheet, zoneLabel } from "../components/TimezoneSheet";
 import { NotificationCard } from "../components/NotificationCard";
 import {
+  DataStorageRegrantSheet,
   DataStorageRevokeSheet,
   DeletionRequestStatus,
   HealthConsentSheet,
@@ -70,15 +71,72 @@ import {
   type ConsentsResponse,
   type MeProfileResponse,
 } from "../lib/customer-profile";
+import { ApiError } from "../lib/api";
 import { DELETE_CONFIRMATION_TOKEN } from "../lib/personal-data";
+import { WELCOME_CONSENT_DOCUMENT_VERSION } from "../lib/welcome-consent";
 import {
   fetchHealthConsent,
   type HealthConsentState,
 } from "../lib/health-consent";
+import { fetchNutritionDisplay, setNumbersHidden } from "../lib/nutrition-display";
 import { SurfaceSwitchButton } from "../components/SurfaceSwitch";
 import { CustomerTabBar } from "../components/CustomerTabBar";
 import { useScreenBack } from "../hooks/useScreenBack";
 import { screenRoot } from "../lib/screen-back";
+
+// DRF-2766 — «Без чисел». Название — слово владельца (решение 04.10, п.2);
+// описание и подтверждения — [confirmable]: построены по смыслу решения
+// («скрытие калорий, БЖУ и числовых целей на всех экранах; записи дневника
+// сохраняются») и ждут финальной вычитки владельцем.
+export const NUMBERS_HIDDEN_TITLE = "Без чисел";
+export const NUMBERS_HIDDEN_ARIA = "Без чисел: скрывать калории, БЖУ и цели";
+export const NUMBERS_HIDDEN_DESCRIPTION =
+  "Скрывает калории, белки, жиры, углеводы и цели на всех экранах. Записи в дневнике остаются как есть. По умолчанию выключено.";
+export const NUMBERS_HIDDEN_ON = "Хорошо, числа скрыты. Записи дневника на месте.";
+export const NUMBERS_HIDDEN_OFF = "Хорошо, снова показываю числа.";
+
+/**
+ * DRF-2709 — решение владельца §47.3, дословно: «Подсказки недоступны, пока
+ * согласие отозвано». Без местоимений — от регистра обращения не зависит.
+ * Действия на восстановление здесь нет: выдать согласие заново из
+ * приложения сегодня нельзя (у `me/consents/data-storage/` только отзыв), а
+ * §47.3 просит действие, «если UX его допускает». Путь восстановления —
+ * вопрос владельцу.
+ */
+const HINTS_UNAVAILABLE = "Подсказки недоступны, пока согласие отозвано";
+
+/** Слаг отказа сервера — `apps/consent/customer.py::PROACTIVE_HINTS_BLOCKED_REASON`. */
+const HINTS_BLOCKED_SLUG = "consent_withdrawn";
+
+/** Описание строки «Хранение данных», когда согласие не действует — прежний текст. */
+const storageOffDescription = (
+  <>
+    Согласие на хранение данных сейчас не действует.{" "}
+    <span lang="en">Ayla</span> не сохраняет и не использует данные по нему.
+    Аккаунт и доступ к записям при этом остались.
+  </>
+);
+
+/**
+ * DRF-2709: «Разрешить» в строке хранения — только после ОТЗЫВА (так решено:
+ * замок подсказок §47.3 и есть признак отзыва) и только если сервер
+ * принимает выдачу под версией, текст которой экран покажет дословно.
+ */
+function canRegrant(consents: ConsentsResponse): boolean {
+  return (
+    !consents.data_storage_granted &&
+    !consents.proactive_hints_can_enable &&
+    consents.data_storage_regrant_version === WELCOME_CONSENT_DOCUMENT_VERSION
+  );
+}
+
+const hintsDescription = (
+  <>
+    Иногда <span lang="en">Ayla</span> напишет первой — напомнит про уход или
+    подскажет, когда пора повторить. Напоминания о твоих записях приходят
+    отдельно и от этого тумблера не зависят.
+  </>
+);
 
 // ---------------------------------------------------------------------------
 // Реальные данные (DRF-1475 §24, DRF-1520). Экран целиком стоит на
@@ -160,9 +218,15 @@ export function CustomerProfileScreen() {
   const [toast, setToast] = useState<ToastState>(EMPTY_TOAST);
   const [marketingBusy, setMarketingBusy] = useState(false);
   const [hintsBusy, setHintsBusy] = useState(false);
+  // DRF-2766 — «Без чисел». `null` — ещё не прочитано или чтение не
+  // удалось: строка тогда не рисуется, чтобы не показать выдуманное «выкл».
+  const [numbersHidden, setNumbersHiddenState] = useState<boolean | null>(null);
+  const [numbersBusy, setNumbersBusy] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [storageOpen, setStorageOpen] = useState(false);
+  const [regrantOpen, setRegrantOpen] = useState(false);
+  const regrantTriggerRef = useRef<HTMLButtonElement | null>(null);
   const exportTriggerRef = useRef<HTMLButtonElement | null>(null);
   const deleteTriggerRef = useRef<HTMLButtonElement | null>(null);
   const storageTriggerRef = useRef<HTMLButtonElement | null>(null);
@@ -207,6 +271,36 @@ export function CustomerProfileScreen() {
   useEffect(() => {
     loadHealthConsent();
   }, [loadHealthConsent]);
+
+  useEffect(() => {
+    let alive = true;
+    fetchNutritionDisplay()
+      .then(({ numbers_hidden }) => {
+        if (alive) setNumbersHiddenState(numbers_hidden);
+      })
+      .catch(() => {
+        if (alive) setNumbersHiddenState(null);
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  const onNumbersToggle = useCallback(async (next: boolean) => {
+    setNumbersBusy(true);
+    try {
+      const updated = await setNumbersHidden(next);
+      setNumbersHiddenState(updated.numbers_hidden);
+      setToast({ visible: true, message: next ? NUMBERS_HIDDEN_ON : NUMBERS_HIDDEN_OFF });
+    } catch {
+      setToast({
+        visible: true,
+        message: "Не получилось сохранить. Попробуй ещё раз.",
+      });
+    } finally {
+      setNumbersBusy(false);
+    }
+  }, []);
 
   // Состояние словами. Три исхода, и ни один не притворяется другим:
   // неизвестно / не смогли прочитать / известное да-нет с датой выдачи.
@@ -308,6 +402,11 @@ export function CustomerProfileScreen() {
 
   // «Подсказки от Ayla». Контракт клиента говорит в терминах opt-out,
   // экран — в терминах «включено»; инверсия одна и лежит в lib.
+  //
+  // DRF-2709: экран мог устареть — согласие отозвали в боте или в другой
+  // вкладке, а здесь ещё тумблер. Тогда сервер откажет 409
+  // `consent_withdrawn`, и «Попробуй ещё раз» было бы неправдой: повтор не
+  // поможет. Экран переходит к объяснению §47.3-б.
   const onHintsToggle = useCallback(async (next: boolean) => {
     setHintsBusy(true);
     try {
@@ -324,7 +423,23 @@ export function CustomerProfileScreen() {
           ? "Хорошо, иногда буду писать первой."
           : "Поняла, первой писать не буду.",
       });
-    } catch {
+    } catch (e) {
+      if (e instanceof ApiError && e.slug === HINTS_BLOCKED_SLUG) {
+        setStatus((s) =>
+          s.kind === "ready"
+            ? {
+                ...s,
+                consents: {
+                  ...s.consents,
+                  proactive_hints_enabled: false,
+                  proactive_hints_can_enable: false,
+                },
+              }
+            : s,
+        );
+        setToast({ visible: true, message: HINTS_UNAVAILABLE });
+        return;
+      }
       setToast({
         visible: true,
         message: "Не получилось сохранить. Попробуй ещё раз.",
@@ -470,23 +585,34 @@ export function CustomerProfileScreen() {
                       </>
                     }
                   />
+                ) : canRegrant(status.consents) ? (
+                  /* DRF-2709 — согласие отозвано, и сервер принимает
+                     повторную выдачу под той версией документа, текст
+                     которой экран может показать: «Разрешить» ведёт в лист
+                     с текстом приветствия дословно (решение владельца,
+                     вариант А). Сама строка не всплывает и не напоминает —
+                     «показываться только один раз». */
+                  <ConsentRow
+                    variant="action"
+                    title="Хранение данных"
+                    statusText="Не разрешено"
+                    actionLabel="Разрешить"
+                    actionAriaLabel="Разрешить хранение данных"
+                    busy={offline}
+                    triggerRef={regrantTriggerRef}
+                    onAction={() => setRegrantOpen(true)}
+                    description={storageOffDescription}
+                  />
                 ) : (
-                  /* Согласия нет — и кнопки нет: выдача через эту ручку
-                     не проходит (сервер принимает только отзыв), а
-                     кнопка «Разрешить» обещала бы то, чего экран
+                  /* Согласия нет, а выдать его отсюда нельзя: сервер не
+                     предложил версию, текст которой экран умеет показать, —
+                     и кнопка «Разрешить» обещала бы то, чего экран
                      сделать не может. */
                   <ConsentRow
                     variant="info"
                     title="Хранение данных"
                     statusText="Не разрешено"
-                    description={
-                      <>
-                        Согласие на хранение данных сейчас не действует.{" "}
-                        <span lang="en">Ayla</span> не сохраняет и не
-                        использует данные по нему. Аккаунт и доступ к
-                        записям при этом остались.
-                      </>
-                    }
+                    description={storageOffDescription}
                   />
                 )}
                 {/* Медданные — реальный эндпоинт, видно во всех сборках.
@@ -515,6 +641,18 @@ export function CustomerProfileScreen() {
                     </>
                   }
                 />
+                {/* DRF-2766 — «Без чисел»: выбор человека, не признак анкеты. */}
+                {numbersHidden !== null && (
+                  <ConsentRow
+                    variant="toggle"
+                    title={NUMBERS_HIDDEN_TITLE}
+                    ariaLabel={NUMBERS_HIDDEN_ARIA}
+                    checked={numbersHidden}
+                    busy={numbersBusy || offline}
+                    onChange={onNumbersToggle}
+                    description={<>{NUMBERS_HIDDEN_DESCRIPTION}</>}
+                  />
+                )}
               </dl>
               <p className="profile-section__caption">
                 Твои данные защищены. Здесь можно посмотреть, что хранится,
@@ -612,22 +750,30 @@ export function CustomerProfileScreen() {
                 Подсказки от <span lang="en">Ayla</span>
               </h2>
               <dl className="profile-consent-list">
-                <ConsentRow
-                  variant="toggle"
-                  title="Подсказки от Ayla"
-                  ariaLabel="Получать подсказки от Ayla"
-                  checked={status.consents.proactive_hints_enabled}
-                  busy={hintsBusy || offline}
-                  onChange={onHintsToggle}
-                  description={
-                    <>
-                      Иногда <span lang="en">Ayla</span> напишет первой —
-                      напомнит про уход или подскажет, когда пора
-                      повторить. Напоминания о твоих записях приходят
-                      отдельно и от этого тумблера не зависят.
-                    </>
-                  }
-                />
+                {/* DRF-2709, решение владельца §47.3: после отзыва
+                    согласия — не серый тумблер, а объяснение вместо
+                    обычного включения. Включённые подсказки (так быть не
+                    должно: отзыв их гасит) оставляют тумблер — выключить
+                    можно всегда. */}
+                {!status.consents.proactive_hints_can_enable &&
+                !status.consents.proactive_hints_enabled ? (
+                  <ConsentRow
+                    variant="info"
+                    title="Подсказки от Ayla"
+                    statusText={HINTS_UNAVAILABLE}
+                    description={hintsDescription}
+                  />
+                ) : (
+                  <ConsentRow
+                    variant="toggle"
+                    title="Подсказки от Ayla"
+                    ariaLabel="Получать подсказки от Ayla"
+                    checked={status.consents.proactive_hints_enabled}
+                    busy={hintsBusy || offline}
+                    onChange={onHintsToggle}
+                    description={hintsDescription}
+                  />
+                )}
               </dl>
             </section>
 
@@ -691,6 +837,12 @@ export function CustomerProfileScreen() {
       />
       {/* Отзыв согласия на хранение данных (§35 п.6-п.9, п.16). Версия
           раскрытия — из ответа сервера, токен — общий с C5-удалением. */}
+      <DataStorageRegrantSheet
+        open={regrantOpen && status.kind === "ready"}
+        triggerRef={regrantTriggerRef}
+        onClose={() => setRegrantOpen(false)}
+        onRegranted={onStorageRevoked}
+      />
       <DataStorageRevokeSheet
         open={storageOpen && status.kind === "ready"}
         triggerRef={storageTriggerRef}

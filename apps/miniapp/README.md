@@ -6,7 +6,7 @@ shell only, no business screens. Talks to `/api/v1/customer/*`
 
 ## Stack
 
-- Vite 5 + React 18 + TypeScript strict
+- Vite 6 + React 18 + TypeScript strict
 - React Router 6 (BrowserRouter)
 - CSS variables design tokens (no Tailwind, no CSS-in-JS)
 - MAX UI React library — **not yet** added (Phase 1); adapter layer
@@ -58,6 +58,7 @@ is empty. To still exercise the auth flow:
 
    ```python
    import hashlib, hmac, json, time, urllib.parse
+
    token = "test-bot-token-xyz"  # = settings.MAX_BOT_TOKEN
    params = {
        "user": json.dumps({"id": 12345, "first_name": "Мария"}),
@@ -81,9 +82,16 @@ is empty. To still exercise the auth flow:
 ## Runtime env vars
 
 - `VITE_SUPPORT_DEEPLINK` — support channel URL used by the profile
-  privacy sheets (#949). Falls back to the pilot placeholder
-  `https://max.me/aylasupport` when unset. Set it at deploy time once
-  ops decides the real support channel handle.
+  privacy sheets (#949): export, account deletion, health consent, storage
+  revoke. It is the person's route to their 152-ФЗ rights when the in-app
+  action fails and an operator does it by hand, so it must open a live
+  channel. **Production builds refuse without it** (DRF-2654):
+  `npm run build` / `vite build` with the variable unset or empty fails with
+  `DRF-2654: production build needs VITE_SUPPORT_DEEPLINK`. Before that
+  refusal the pilot shipped the placeholder `https://max.me/aylasupport`
+  (measured 29.09). `npm run dev` still falls back to the placeholder. Where
+  it is set for the deploy and how to check the bundle —
+  `docs/runbooks/miniapp-build-env.md`.
 
 ## What's deferred (swap later in one PR)
 

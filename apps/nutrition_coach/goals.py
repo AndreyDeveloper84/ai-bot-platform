@@ -53,10 +53,16 @@ class Goal:
     ``key`` is the curated slug, ``""`` for a free-text goal. ``text`` is
     the person's own wording (sanitized), ``None`` when the goal exists
     only as a key.
+
+    ``label`` (DRF-2808, вариант Б владельца) — подпись курируемой опции
+    (``GoalOption.label``) для цели, выбранной кнопкой: наша формулировка,
+    НЕ слова человека. ``None``, когда подписи нет или каталог вернул вместо
+    неё сам ключ или слова человека.
     """
 
     key: str
     text: str | None
+    label: str | None = None
 
 
 def active_goal(
@@ -138,7 +144,23 @@ def _goal_from_document(document: Any) -> Goal | None:
     if not key and text is None:
         # A row with neither key nor text proves nothing.
         return None
-    return Goal(key=key, text=text)
+    return Goal(key=key, text=text, label=_curated_label(goal.get("label"), key=key, text=text))
+
+
+def _curated_label(raw: Any, *, key: str, text: str | None) -> str | None:
+    """Подпись курируемой опции — или ``None``.
+
+    Каталог (``goals/decision_context._goal_label``) кладёт в ``label`` слова
+    человека, иначе подпись опции, иначе сам ключ. Подписью опции здесь
+    считается только последнее среднее: без ключа подписи нет, совпадение со
+    словами — это слова, совпадение с ключом — наш идентификатор, а не подпись.
+    """
+    if not key:
+        return None
+    cleaned = _clean_text(raw)
+    if cleaned is None or cleaned == key or cleaned == text:
+        return None
+    return cleaned
 
 
 def _clean_key(raw: Any) -> str:

@@ -107,11 +107,11 @@ class TestP2ClientTimeoutDoesNotFeedTheBreaker:
         client = self._client(handler)
         with pytest.raises(nc.NutritionUnavailableError):
             await client.get_profile(external_user_id="bot:1", timeout_s=0.5, feeds_circuit=False)
-        assert client._circuit.failures == []
+        assert client._breaker(nc.BreakerPurpose.NUTRITION).failures == []
         # Присутствие рядом: обычный вызов тот же таймаут считает.
         with pytest.raises(nc.NutritionUnavailableError):
             await client.get_profile(external_user_id="bot:1")
-        assert len(client._circuit.failures) == 1
+        assert len(client._breaker(nc.BreakerPurpose.NUTRITION).failures) == 1
 
     @pytest.mark.asyncio
     async def test_the_short_timeout_reaches_httpx(self) -> None:

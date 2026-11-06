@@ -136,7 +136,7 @@ concurrency:
 jobs:
   drift:
     name: served bundle matches sources
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     # A deploy that did not happen must not produce a red guard. `deploy-dev`
     # ends in exactly three ways and only one of them published anything:
@@ -168,7 +168,7 @@ jobs:
       # wrong: it replaces the whole working tree, including
       # tools/ci/miniapp_bundle_drift.py. The checkout action's `ref` selects the
       # commit without ever discarding the code being run.
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           ref: >-
             ${{ github.event_name == 'workflow_dispatch' && github.ref || 'dev' }}
@@ -182,9 +182,12 @@ jobs:
       # This is safe from false alarms because CSS output is deterministic
       # given the lockfile — `npm ci` pins the esbuild that minifies it, and a
       # Node 24 build and the pilot's Node 20 build were verified to emit a
-      # byte-identical index-foET4UYR.css.
+      # byte-identical index-foET4UYR.css. Since DRF-2692 the comparison no
+      # longer leans on that: `deploy-dev` reads the same .nvmrc as this step,
+      # so the published bundle and this reference are built on one Node line
+      # (held by tests/test_node_version_single_source_2692.py).
       - name: Set up Node (from apps/miniapp/.nvmrc)
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
         with:
           node-version-file: apps/miniapp/.nvmrc
           cache: npm
@@ -196,6 +199,10 @@ jobs:
 
       - name: vite build (reference bundle for the stylesheet comparison)
         working-directory: apps/miniapp
+        # DRF-2654: эталон для сравнения стилей и исходников; значение ссылки на
+        # них не влияет, но без переменной production-сборка отказывает.
+        env:
+          VITE_SUPPORT_DEEPLINK: ${{ vars.VITE_SUPPORT_DEEPLINK || 'https://example.invalid/drift-build-support' }}
         run: npx vite build
 
       # DRF-2621. The deploy does not ship `*.map` to the host (deploy-dev.yml:

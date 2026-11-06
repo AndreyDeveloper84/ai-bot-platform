@@ -232,10 +232,13 @@ class TestRestore:
             )
 
         assert resp.status_code == 200, resp.content
+        # DRF-2761 — у записи своё поле оценки калорий ИИ; при проверенных
+        # калориях оно пустое.
         assert resp.json() == {
             "id": ENTRY_ID,
             "dish_name": "Гречка",
             "calories": 300.0,
+            "ai_calories": None,
             "meal_type": "other",
         }
         assert fake.restore_meal.await_args.kwargs["log_id"] == ENTRY_ID

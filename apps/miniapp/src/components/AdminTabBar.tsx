@@ -2,7 +2,8 @@
  * Admin bottom tab bar — mirrors MasterTabBar pattern for the
  * admin / owner Mini App surface.
  *
- * Tabs (per master-management-handoff §MM0 overview):
+ * Tabs (no spec: master-management-handoff has no section MM0 — its
+ * screens are MM1–MM5 — and no admin-shell spec exists, see DRF-2679):
  *   [📅 День] [👥 Команда] [💈 Услуги] [💬 Чаты] [⚙ Настройки]
  *
  * Пять разделов — решение владельца 05.09.2026 (DRF-1522):

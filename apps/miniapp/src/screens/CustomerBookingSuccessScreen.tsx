@@ -52,7 +52,7 @@ interface SuccessState {
   service_name?: string;
   master_name?: string;
   visit_at?: string;
-  /** DRF-1952 — адрес салона записи; `null`/нет ключа → «Уточните адрес в салоне». */
+  /** DRF-1952 — адрес салона записи; `null`/нет ключа → «Уточни адрес в салоне». */
   address?: string | null;
   /** C7.4 — booking created but the payment create failed right after. */
   payment_start_failed?: boolean;

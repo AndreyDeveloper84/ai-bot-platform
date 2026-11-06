@@ -271,7 +271,8 @@ class TestP3PrepareBookingWritesNothing:
             "start_at=2026-09-22T11%3A00" in d["open_url"]
             or "start_at=2026-09-22T11:00" in d["open_url"]
         )
-        assert "client_name=" in d["open_url"]
+        assert "client_query=" in d["open_url"]
+        assert "client_name=" not in d["open_url"]
         assert "Анна" in d["summary"] and master_with_service.name in d["summary"]
         after = (
             BookingRequest.all_tenants.filter(tenant=tenant).count(),

@@ -22,11 +22,18 @@ prompt-поверхность памяти (первая — ai-core memory bloc
 
 from __future__ import annotations
 
-import uuid
+import logging
+from typing import TYPE_CHECKING
 
+from apps.consent.memory import can_store_green_memory
 from apps.identity.models import MemoryEntry
 from apps.identity.services.memory_key_policy import read_current_view
 from apps.identity.services.memory_reader import GreenFact, PersonalContextView
+
+if TYPE_CHECKING:
+    from apps.identity.models import BotUser
+
+logger = logging.getLogger(__name__)
 
 # Known green (key, value) → natural Russian phrase. Other keys have
 # content-based renderers below; keys without either fall back to a stored
@@ -276,7 +283,7 @@ def render_personal_context(view: PersonalContextView) -> str | None:
     return block
 
 
-def render_current_personal_context(user_id: uuid.UUID) -> str | None:
+def render_current_personal_context(bot_user: "BotUser") -> str | None:
     """Read live green memory, resolve key conflicts, render the prompt paragraph.
 
     Conflict-aware counterpart to ``read_personal_context`` +
@@ -284,6 +291,24 @@ def render_current_personal_context(user_id: uuid.UUID) -> str | None:
     policy first (a single-value key surfaces ONE current value — an
     explicit correction beats a fresher inferred row), so the model never
     sees mutually exclusive facts (vegan + keto) in one block.
+
+    Consent is checked HERE, at the moment of use (DRF-2697): a fact being in
+    storage is not permission to put it into a prompt. The reader takes the
+    person, not a bare id, so a caller cannot reach the paragraph past the
+    gate — the same :func:`can_store_green_memory` its siblings ask
+    (``said_facts``, ``memory_block._merge_inferred``). «Could not check» is
+    «no»: a failing consent read yields ``None``, never the paragraph.
     """
 
+    try:
+        allowed = can_store_green_memory(bot_user)
+    except Exception:  # noqa: BLE001 — an unverifiable consent is a closed gate
+        logger.exception(
+            "persona.memory_surface.consent_check_failed bot_user=%s",
+            getattr(bot_user, "id", None),
+        )
+        return None
+    user_id = getattr(bot_user, "ayla_user_id", None)
+    if not allowed or not user_id:
+        return None
     return render_personal_context(read_current_view(user_id))

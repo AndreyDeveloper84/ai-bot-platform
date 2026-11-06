@@ -49,6 +49,11 @@ Operational notes
   source convention. Operators can XRANGE the DLQ stream to triage,
   XADD back to the source after fixing ingress, or just XDEL after
   manual review.
+* **DLQ copies carry no voice links (DRF-1943).** The reaper is not the
+  only writer any more: the consumer moves a failed entry with a voice
+  attachment to the DLQ at once (see ``apps.workers.consumer``). Such a
+  copy cannot be replayed into a voice turn — the link is gone, and MAX
+  serves it for 24 h only anyway.
 
 The reaper itself runs as a single consumer named ``reaper`` against
 the same ``consumers`` group; no extra consumer-group setup required.
@@ -89,6 +94,10 @@ _FORENSIC_FROM = f"{_FORENSIC_NAMESPACE}.from"
 _FORENSIC_ENTRY_ID = f"{_FORENSIC_NAMESPACE}.entry_id"
 _FORENSIC_CLASSIFICATION = f"{_FORENSIC_NAMESPACE}.classification"
 _FORENSIC_SHADOWED_PREFIX = f"{_FORENSIC_NAMESPACE}.shadowed."
+#: DRF-1943 — «голосовая ссылка из тела вырезана» (значение ``"1"``). Отдельное
+#: поле, а не классификация: причина сбоя (``tenant_required_missing`` …)
+#: остаётся видна.
+_FORENSIC_VOICE_REDACTED = f"{_FORENSIC_NAMESPACE}.voice_redacted"
 
 # D-3 (adversarial-pass): MAXLEN cap on DLQ stream XADD so a misbehaving
 # ingress can't produce unbounded `<stream>:dlq` growth (Redis memory).
@@ -206,10 +215,27 @@ def _build_dlq_fields(
     dict-spread. Now we explicitly preserve any colliding original
     value under ``__reaper.shadowed.__reaper.from`` so the spoof is
     visible at triage time.
+
+    DRF-1943: ``data`` goes in without voice links («голос не храним») — a
+    copy that lives up to ``INGRESS_RAW_RETENTION_HOURS`` must not carry a
+    link MAX serves without authorisation. When something was cut, the
+    copy says so in ``__reaper.voice_redacted``. A missing ``data`` stays
+    missing (drill canaries have none).
     """
 
+    from apps.ingress.redaction import stream_data_without_voice
+
+    voice_redacted = False
+    if "data" in fields:
+        data, voice_redacted = stream_data_without_voice(fields["data"])
+        fields = {**fields, "data": data}
     out: dict[str, Any] = {}
-    reserved = {_FORENSIC_FROM, _FORENSIC_ENTRY_ID, _FORENSIC_CLASSIFICATION}
+    reserved = {
+        _FORENSIC_FROM,
+        _FORENSIC_ENTRY_ID,
+        _FORENSIC_CLASSIFICATION,
+        _FORENSIC_VOICE_REDACTED,
+    }
     for key, value in fields.items():
         if key in reserved:
             out[f"{_FORENSIC_SHADOWED_PREFIX}{key}"] = value
@@ -218,6 +244,8 @@ def _build_dlq_fields(
     out[_FORENSIC_FROM] = stream
     out[_FORENSIC_ENTRY_ID] = entry_id
     out[_FORENSIC_CLASSIFICATION] = classification
+    if voice_redacted:
+        out[_FORENSIC_VOICE_REDACTED] = "1"
     return out
 
 

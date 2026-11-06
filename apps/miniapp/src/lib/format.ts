@@ -56,6 +56,27 @@ export function formatSlotTime(isoWithOffset: string): string {
 }
 
 /**
+ * Parse a salon-local ISO wall clock into reusable date/time parts.
+ *
+ * DRF-2589: this stays in the single formatting home because callers must
+ * never project schedule/visit wall-clock values through the device timezone.
+ * Returns null for an unexpected wire shape.
+ */
+export function parseSalonWallClock(
+  isoWithOffset: string,
+): { ymd: string; year: number; month: number; day: number; hm: string } | null {
+  const match = isoWithOffset.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}:\d{2})/);
+  if (!match) return null;
+  return {
+    ymd: `${match[1]}-${match[2]}-${match[3]}`,
+    year: Number(match[1]),
+    month: Number(match[2]),
+    day: Number(match[3]),
+    hm: match[4] ?? "",
+  };
+}
+
+/**
  * «25 сентября в 09:00» — слова владельца 28.09, п.8 (DRF-2585), для
  * подтверждения переноса «Было / Стало». Часы — из строки, как у
  * {@link formatVisitFull}: пояс задаёт сервер. Не разобралось — «—».
@@ -104,4 +125,71 @@ export type MaybeCount = number | null;
 /** Число как есть; неизвестность — знаком, а не нулём. */
 export function countLabel(count: MaybeCount): string {
   return count === null ? UNKNOWN_MARK : String(count);
+}
+
+/**
+ * DRF-2761 — пометка оценки калорий ИИ: слова владельца, дословно
+ * (решение 02.10.2026, пересмотр вопроса 40).
+ */
+export const AI_ESTIMATE_MARK = "Оценка ИИ";
+
+/**
+ * «≈ 320 ккал · Оценка ИИ» — единственная форма, в которой оценка ИИ
+ * показывается человеку. Знак «≈» и пометка идут вместе, чтобы оценку
+ * нельзя было принять за проверенное «N ккал» ни на одном экране.
+ */
+export function aiKcalPhrase(kcal: number): string {
+  return `≈ ${Math.round(kcal)} ккал · ${AI_ESTIMATE_MARK}`;
+}
+
+/**
+ * Оценка ИИ у записи — число, которое можно показать, или `null`.
+ * Проверенное бьёт оценку: есть `calories` — оценки нет. Не число
+ * (строка, булево, NaN, отрицательное) — оценки нет.
+ */
+// ── DRF-2766 фаза 2 — итог дня с оценками ИИ ────────────────────────────────
+// Решение владельца 04.10, п.3: оценки ИИ входят в дневной итог; итог
+// помечается «≈ … ккал, включая оценки ИИ»; запись без значения — не ноль,
+// итог неполный. Подписи — [confirmable], те же слова, что в чате.
+export const KCAL_TOTAL_AI_NOTE = "включая оценки ИИ";
+export const KCAL_TOTAL_INCOMPLETE = "Итог неполный: не у всех записей есть калории.";
+export const KCAL_TOTAL_UNKNOWN = "Калории пока не посчитаны.";
+
+/** Признаки итога дня с провода. Отсутствие и мусор — «нет». */
+export interface KcalTotalMarks {
+  /** В итог вошли оценки ИИ: число приблизительное. */
+  approx: boolean;
+  /** Есть записи без калорий: итог неполный. */
+  incomplete: boolean;
+}
+
+function positiveCount(value: unknown): boolean {
+  return typeof value === "number" && Number.isFinite(value) && value > 0;
+}
+
+export function kcalTotalMarks(source: {
+  calories_ai_included?: unknown;
+  calories_unscored?: unknown;
+  kcal_ai_included?: unknown;
+  uncounted_meals?: unknown;
+}): KcalTotalMarks {
+  return {
+    approx: positiveCount(source.calories_ai_included) || positiveCount(source.kcal_ai_included),
+    incomplete: positiveCount(source.calories_unscored) || positiveCount(source.uncounted_meals),
+  };
+}
+
+/** «≈ » перед числом итога, если в нём есть оценки ИИ. */
+export function approxPrefix(marks: KcalTotalMarks): string {
+  return marks.approx ? "≈ " : "";
+}
+
+export function aiCaloriesOf(entry: {
+  calories?: number | null;
+  ai_calories?: unknown;
+}): number | null {
+  if (entry.calories != null) return null;
+  const value = entry.ai_calories;
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return null;
+  return value;
 }

@@ -162,8 +162,13 @@ def send_max_notification(
     addresses: Sequence[MaxAddress] = (),
     timeout: float = _SEND_TIMEOUT,
     on_failure: Callable[[str, Exception], None] | None = None,
+    attachments: list[dict[str, Any]] | None = None,
 ) -> int:
     """Fan out ``text`` to each MAX recipient, best-effort. Returns failures.
+
+    ``attachments`` (DRF-2785) — e.g. the master's «✅ Подтверждаю» keyboard;
+    passed to ``send_message`` only when given, so every existing caller
+    sends exactly what it sent before.
 
     Two recipient lists, because there are two kinds of address and only
     one of them survives a change of sending bot (DRF-1558):
@@ -198,7 +203,10 @@ def send_max_notification(
     failures = 0
     for user_id in user_ids:
         try:
-            send_message(user_id=user_id, text=text, timeout=timeout)
+            if attachments:
+                send_message(user_id=user_id, text=text, timeout=timeout, attachments=attachments)
+            else:
+                send_message(user_id=user_id, text=text, timeout=timeout)
         except Exception as exc:  # noqa: BLE001 — best-effort by contract
             failures += 1
             logger.warning(

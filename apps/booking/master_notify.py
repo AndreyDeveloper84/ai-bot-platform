@@ -355,6 +355,34 @@ def _salon_bot_for(tenant: Tenant):
         return None
 
 
+def _master_keyboard(salon_bot, *, tenant: Tenant, appointment_id: UUID):
+    """«✅ Подтверждаю» | «❌ Не смогу» under the master's copy (DRF-2785).
+
+    Only when the message goes out as the SALON bot: the taps come back to
+    whichever bot sent it, and only the salon bot's handler knows them. With
+    no salon bot the copy goes out as the client bot (see the call site) —
+    then without buttons, exactly as before.
+
+    The version is the one the mirror learned from ``booking.created``
+    (``appointment_version``); the ``on_commit`` that calls this runs after
+    that write. Unknown → the button carries 0 and the tap sends 1 or what
+    the mirror knows by then (``master_actions.act``).
+    """
+
+    if salon_bot is None:
+        return None
+    from apps.booking.models import RemoteBookingProxy
+    from apps.channels.max.master_actions import ack_rows
+    from apps.channels.max.outbound import make_inline_keyboard_attachment_rows
+
+    version = (
+        RemoteBookingProxy.all_tenants.filter(tenant=tenant, appointment_id=appointment_id)
+        .values_list("appointment_version", flat=True)
+        .first()
+    )
+    return [make_inline_keyboard_attachment_rows(ack_rows(str(appointment_id), version))]
+
+
 def _audit_specialist_unreachable(
     *,
     tenant: Tenant,
@@ -448,7 +476,8 @@ def notify_booking_created(
         # a notification from the client bot is worse than nothing only in
         # tone, whereas silence is worse in substance. That is the one case
         # where the wrong avatar beats no message.
-        with bot_scope(_salon_bot_for(tenant)):
+        salon_bot = _salon_bot_for(tenant)
+        with bot_scope(salon_bot):
             if specialist_user_id and master_muted_new_booking(master):
                 # DRF-1123 — the master's own «Новая запись» switch is
                 # off. Named, not silent: the salon copy below still
@@ -470,7 +499,13 @@ def notify_booking_created(
                     service_name=service_name,
                     raw_source=raw_source,
                 )
-                failures = send_max_notification(text=personal, user_ids=(specialist_user_id,))
+                failures = send_max_notification(
+                    text=personal,
+                    user_ids=(specialist_user_id,),
+                    attachments=_master_keyboard(
+                        salon_bot, tenant=tenant, appointment_id=appointment_id
+                    ),
+                )
                 specialist_notified = failures == 0
                 if specialist_notified:
                     logger.info(

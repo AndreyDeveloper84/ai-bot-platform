@@ -106,3 +106,20 @@ def frozen_ratelimit_clock(monkeypatch) -> None:
 
     frozen = ratelimit_core.time.time()
     monkeypatch.setattr(ratelimit_core, "time", types.SimpleNamespace(time=lambda: frozen))
+
+
+@pytest.fixture
+def plan_open_to_everyone(monkeypatch) -> None:
+    """Считать любой аккаунт названным в списке приёмки Плана (DRF-2885).
+
+    Замок ``apps.orchestrator.plan_access`` закрыт, пока аккаунт не назван в
+    ``PLAN_ACCEPTANCE_ACCOUNTS``. Узлам, которые проверяют сам План, а не
+    замок, нужен человек «из списка». Opt in per file with ``pytestmark =
+    pytest.mark.usefixtures("plan_open_to_everyone")`` — шов назван в начале
+    файла, и читатель знает, что замок этим файлом НЕ проверяется. Флаг
+    ``PLAN_ENGINE_ENABLED`` фикстура не трогает: его включает сам узел.
+    Настоящий замок держит ``apps/orchestrator/tests/test_plan_access_2885.py``.
+    """
+    from apps.orchestrator import plan_access
+
+    monkeypatch.setattr(plan_access, "_listed", lambda account: True)

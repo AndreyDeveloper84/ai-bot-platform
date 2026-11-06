@@ -170,7 +170,7 @@ def test_nothing_claims_a_booking_was_created(tenant: Tenant, bot_user: BotUser,
     # непустую фразу, значит отрицания ниже сказаны про текст, а не про
     # его отсутствие.
     assert result.text, "исход не дал человеку ни слова — проверять нечего"
-    assert "Вы записаны" not in result.text
+    assert "Запись подтверждена" not in result.text
     assert "записан" not in result.text.lower()
 
 

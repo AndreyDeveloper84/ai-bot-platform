@@ -41,8 +41,8 @@ def bot_user() -> BotUser:
     return BotUser.all_tenants.create(
         tenant=tenant,
         channel="max",
-        channel_user_id="260237491",
-        chat_id="260237491",
+        channel_user_id="200000001",
+        chat_id="200000001",
         client_name="Андрей",
     )
 
@@ -82,7 +82,7 @@ def test_unlinked_user_gets_client_id_from_resolution(
 
     assert isinstance(provider, AylaYClientsAdapter)
     assert provider._client_id == str(resolved_uuid)
-    assert provider._external_user_id == "bot:max:260237491"
+    assert provider._external_user_id == "bot:max:200000001"
 
 
 @override_settings(**AYLA_SETTINGS)
@@ -129,7 +129,7 @@ def test_body_client_id_equals_resolved_subject(
     provider = get_booking_provider(bot_user=bot_user)
 
     assert provider._client_id == str(resolved_uuid)
-    assert provider._external_user_id == "bot:max:260237491"
+    assert provider._external_user_id == "bot:max:200000001"
 
 
 # ─── graceful degradation is unchanged ──────────────────────────────────────

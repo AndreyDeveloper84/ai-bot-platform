@@ -237,6 +237,81 @@ class TestFoodScannerConsentAcrossShells:
         assert not any(diary_is_granted(s) for s in shells)
 
 
+def _rows_added_by(journal, action) -> list:
+    """Строки, которых не было до ``action`` — по признаку, не по положению (DRF-2648).
+
+    Прежде «новые» брались срезом ``order_by("-created_at")[:count - before]``.
+    ``created_at`` у строк, созданных подряд, совпадает, а ``id`` здесь
+    uuid4 — полного порядка «по времени» нет вовсе, и срез молча брал бы
+    старую строку вместо новой. «Сколько добавилось» — число, а не способ
+    выбрать какие: выбирает множество ``id``, известное до действия.
+    """
+    existed = _ids(journal)
+    action()
+    return _rows_added_since(journal, existed)
+
+
+def _ids(journal) -> set:
+    """Множество ``id`` журнала сейчас — «что было до» для :func:`_rows_added_since`."""
+    return set(journal.values_list("pk", flat=True))
+
+
+def _rows_added_since(journal, existed: set) -> list:
+    """Строки журнала, которых нет в ``existed``.
+
+    Отдельно от :func:`_rows_added_by` для записей ``on_commit``: строка
+    появляется на выходе из ``django_capture_on_commit_callbacks``, то есть
+    ПОСЛЕ действия, и отбирать её надо после блока, а «до» снимать перед ним.
+    """
+    return list(journal.exclude(pk__in=existed))
+
+
+def _decoy_granted_row():
+    """Старая строка ``consent.granted`` с ``created_at`` позже любой новой."""
+    from datetime import timedelta
+
+    from django.utils import timezone
+
+    from apps.audit.models import AuditLog
+
+    row = AuditLog.all_tenants.create(
+        action="consent.granted", payload={"consent_type": "decoy-2648"}
+    )
+    AuditLog.all_tenants.filter(pk=row.pk).update(created_at=timezone.now() + timedelta(hours=1))
+    return row
+
+
+@pytest.mark.django_db
+class TestTheNewRowsAreChosenByIdentityNotPosition:
+    """DRF-2648 — пара: действие добавило строку → отбор возвращает ИМЕННО её;
+    не добавило → отбор пуст. Узел «вернулось столько, сколько добавилось»
+    прошёл бы при самом дефекте: число верное, строки не те."""
+
+    def test_an_added_row_is_returned_and_the_later_decoy_is_not(self):
+        from apps.audit.models import AuditLog
+
+        journal = AuditLog.all_tenants.filter(action="consent.granted")
+        decoy = _decoy_granted_row()
+        made = []
+
+        def add():
+            made.append(AuditLog.all_tenants.create(action="consent.granted", payload={}))
+
+        added = _rows_added_by(journal, add)
+
+        assert [row.pk for row in added] == [made[0].pk]
+        assert decoy.pk not in {row.pk for row in added}
+
+    def test_nothing_added_means_nothing_returned(self):
+        from apps.audit.models import AuditLog
+
+        journal = AuditLog.all_tenants.filter(action="consent.granted")
+        decoy = _decoy_granted_row()
+        assert journal.filter(pk=decoy.pk).exists()  # presence: the journal is not empty
+
+        assert _rows_added_by(journal, lambda: None) == []
+
+
 @pytest.mark.django_db
 class TestFoodScannerConsentAudit:
     def test_the_grant_leaves_a_trace_in_the_consent_journal(
@@ -252,12 +327,18 @@ class TestFoodScannerConsentAudit:
         from apps.audit.models import AuditLog
 
         journal = AuditLog.all_tenants.filter(action="consent.granted")
-        before = journal.count()
+        # DRF-2648 — приманка: чужая строка того же рода, «позже» новой по
+        # времени. Отбор по положению («последние N по created_at») взял бы её;
+        # отбор по признаку — нет.
+        decoy = _decoy_granted_row()
+        existed = _ids(journal)
         with django_capture_on_commit_callbacks(execute=True) as callbacks:
             _grant(client, bot_user)
         assert len(callbacks) >= 1  # presence first: the grant scheduled its trace
 
-        new_rows = list(journal.order_by("-created_at")[: journal.count() - before])
+        new_rows = _rows_added_since(journal, existed)
+
+        assert [row.pk for row in new_rows] != [decoy.pk]
         assert len(new_rows) == 1
         assert new_rows[0].payload["consent_type"] == DIARY
         assert new_rows[0].payload["document_version"] == FOOD_DIARY_CONSENT_DOCUMENT_VERSION

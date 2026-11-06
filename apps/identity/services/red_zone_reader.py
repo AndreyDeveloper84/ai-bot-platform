@@ -63,6 +63,22 @@ from apps.identity.services.red_zone_guc import (
 logger = logging.getLogger(__name__)
 
 
+class RedZoneUseWithheld(MemoryEntry.DoesNotExist):  # type: ignore[name-defined,misc]
+    """Строка есть, но использовать её нельзя: согласия красной зоны нет,
+    либо человек попросил «забудь всё» / подал заявку на удаление.
+
+    Наследник ``DoesNotExist`` намеренно: читатель, который уже умеет «строки
+    нет», получает отказ тем же путём и не роняет ход человека; тот, кому
+    причина важна, ловит это имя.
+    """
+
+
+#: Роли, читающие ради ИСПОЛЬЗОВАНИЯ факта. Субъект смотрит своё — это не
+#: использование: экран памяти обязан показать и дать удалить строку и после
+#: отзыва согласия.
+_ROLES_EXEMPT_FROM_USE_GATE = frozenset({RedZoneAccessLog.ACCESSOR_DATA_SUBJECT})
+
+
 def _default_principal_for_role(role: str) -> str:
     """Best-effort concrete identity when caller didn't supply one.
 
@@ -71,7 +87,11 @@ def _default_principal_for_role(role: str) -> str:
     service-account name). For `ops_admin` callers we cannot infer
     the staff UUID — they MUST supply `accessor_principal` explicitly.
     """
-    if role == RedZoneAccessLog.ACCESSOR_AYLA_LLM:
+    if role in (
+        RedZoneAccessLog.ACCESSOR_AYLA_LLM,
+        RedZoneAccessLog.ACCESSOR_RECOMMENDATIONS,
+        RedZoneAccessLog.ACCESSOR_SCANNER,
+    ):
         return red_zone_principal(role, "worker")
     if role == RedZoneAccessLog.ACCESSOR_SYSTEM_JOB:
         return red_zone_principal(role, "system")
@@ -117,7 +137,14 @@ class RedZoneReader:
             MemoryEntry.DoesNotExist: entry missing OR `entry.user_id`
                 doesn't match `user_id` (ownership mismatch is
                 indistinguishable from missing — by design, to avoid
-                leaking «exists but not yours»).
+                leaking «exists but not yours»). DRF-2132: a tombstoned
+                row or one with a pending delete request is missing too —
+                the same «live» gate as :meth:`list_live_for_subject`.
+            RedZoneUseWithheld: (a ``DoesNotExist``) the row is live but the
+                person holds it back — no active red-zone consent, forget-all
+                requested, or a live deletion request. Checked at the point
+                of USE for every role except the data subject. No audit row:
+                the read did not happen.
             TenantScopeViolation: cross-tenant red read attempted.
         """
         accessor_principal = cls._resolve_principal(accessor_role, accessor_principal)
@@ -146,7 +173,33 @@ class RedZoneReader:
                 # the entry belongs to a different user, DoesNotExist fires
                 # and the atomic block rolls back — no audit row is committed
                 # (the no-orphan-log invariant from round-2 AS1).
-                entry = MemoryEntry.objects.get(id=entry_id, user_id=user_id)
+                #
+                # DRF-2132 — только живая строка. До этой правки надгробие
+                # читалось отсюда всё время удержания (до 30 дней после
+                # «забудь»): фильтра не было, а физическая очистка — отдельный
+                # шаг.
+                entry = MemoryEntry.objects.get(
+                    id=entry_id,
+                    user_id=user_id,
+                    soft_deleted_at__isnull=True,
+                    delete_requested_at__isnull=True,
+                )
+
+                # Step 2b — согласие в точке ИСПОЛЬЗОВАНИЯ (DRF-2132). Строка
+                # несёт ``consent_at`` — момент, когда согласие было; отозвано
+                # ли оно с тех пор, знает только журнал согласий.
+                if accessor_role not in _ROLES_EXEMPT_FROM_USE_GATE:
+                    from apps.identity.services.memory_term import person_holds_back
+
+                    if person_holds_back(user_id, entry.sensitivity_zone):
+                        logger.info(
+                            "identity.red_zone_reader.use_withheld role=%s entry=%s",
+                            accessor_role,
+                            entry_id,
+                        )
+                        raise RedZoneUseWithheld(
+                            "red-zone entry is withheld from use by its subject"
+                        )
 
                 # Step 3 — cross-tenant carve-out check (ADR-0011 §9.1).
                 # When the caller pins a tenant scope, the entry's source
@@ -294,6 +347,12 @@ class RedZoneReader:
                         request_id=request_id,
                         purpose=purpose,
                     )
+                    # DRF-2700 — как у зелёной двери: переписка до стирания
+                    # модели больше не отдаётся.
+                    from apps.identity.services import model_history_cutoff
+
+                    if reason in model_history_cutoff.PIECEWISE_REQUEST_REASONS:
+                        model_history_cutoff.stamp(user_id, at=now)
                 return bool(moved)
         finally:
             cls._reset_guc()

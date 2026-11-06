@@ -81,7 +81,7 @@ def other_master(tenant) -> CatalogMaster:
     )
 
 
-def _visit(master, *, at: datetime, minutes: int = 60):
+def _visit(master, *, at: datetime, minutes: int = 60, version: int | None = None):
     """One row in the mirror the master surface actually reads.
 
     `RemoteBookingProxy`, not `BookingRequest`: on the pilot the local
@@ -95,6 +95,7 @@ def _visit(master, *, at: datetime, minutes: int = 60):
         start_at=at,
         end_at=at + timedelta(minutes=minutes),
         status="confirmed",
+        appointment_version=version,
     )
 
 
@@ -126,7 +127,27 @@ class TestMyDay:
         visit = my_day(master, date="2026-08-25")["visits"][0]
 
         assert "phone" not in visit
-        assert set(visit) == {"time", "duration_min", "service", "client", "status"}
+        assert set(visit) == {
+            "appointment_id",
+            "appointment_version",
+            "time",
+            "duration_min",
+            "service",
+            "client",
+            "status",
+        }
+
+    def test_exposes_exact_booking_identity_and_version_for_safe_actions(self, master):
+        row = _visit(
+            master,
+            at=datetime(2026, 8, 25, 10, 0, tzinfo=MSK),
+            version=7,
+        )
+
+        visit = my_day(master, date="2026-08-25")["visits"][0]
+
+        assert visit["appointment_id"] == str(row.appointment_id)
+        assert visit["appointment_version"] == 7
 
     def test_a_junk_date_is_a_readable_refusal(self, master):
         with pytest.raises(ToolError, match="не понимаю дату"):

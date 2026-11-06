@@ -27,15 +27,34 @@
 ответ ``502 partial`` означал «часть сделана», и человек не знал, в каком
 состоянии его данные. Здесь состояние всегда одно из двух — заявка есть
 или её нет, — и слово «не началось» ровно это и говорит.
+
+### Сначала — можно ли (DRF-2919 п.2)
+
+Заявка уходит в каталог, и его исполнитель снимает с человека роли,
+отвязывает карточку мастера и стирает ПДн. Поэтому до заявки
+:func:`~apps.identity.services.deletion_eligibility.deletion_eligibility`
+оценивает удаление по операциям. Заявка заводится, только если удаление ПДн
+может начаться сейчас (сразу или с законным хранением истории). Иначе —
+``not_started`` с причиной (``obligations_unsettled`` — сначала урегулировать
+свои записи или долг; ``verification_required`` — проверить нечем) и полной
+оценкой: что мешает и какой следующий шаг. Запрос при этом принят и
+мотивированно отвечен; необратимого не началось. Основание — обязательства,
+не роль: брошенный соло-кабинет удаляется.
 """
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 from dataclasses import dataclass
 from typing import Any
 
 from apps.identity.models import BotUser
+from apps.identity.services.deletion_eligibility import (
+    DeletionEligibility,
+    Reason,
+    deletion_eligibility,
+)
 from apps.identity.services.privacy import resolve_person_link
 
 logger = logging.getLogger(__name__)
@@ -44,6 +63,8 @@ logger = logging.getLogger(__name__)
 NOT_LINKED = "not_linked"
 IDENTITY_CONFLICT = "identity_conflict"
 UPSTREAM_UNAVAILABLE = "upstream_unavailable"
+OBLIGATIONS_UNSETTLED = "obligations_unsettled"
+VERIFICATION_REQUIRED = "verification_required"
 
 #: Текст для человека — один на все причины (см. докстринг модуля).
 NOT_STARTED_TEXT = (
@@ -59,10 +80,14 @@ class DeletionNotStarted(Exception):
     (сеть — да; отсутствие связи с Ayla — нет, пока её не установят).
     """
 
-    def __init__(self, reason: str, *, retryable: bool) -> None:
+    def __init__(
+        self, reason: str, *, retryable: bool, eligibility: DeletionEligibility | None = None
+    ) -> None:
         super().__init__(NOT_STARTED_TEXT)
         self.reason = reason
         self.retryable = retryable
+        #: Оценка по операциям, когда отказ — из-за неё (DRF-2919).
+        self.eligibility = eligibility
 
 
 @dataclass(frozen=True)
@@ -76,6 +101,8 @@ class DeletionRequestView:
     completed_at: str | None
     is_open: bool
     created: bool
+    #: Оценка, по которой заявка заведена (DRF-2919); в ``as_dict`` не входит.
+    eligibility: DeletionEligibility | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -105,6 +132,13 @@ def _from_wire(data: dict[str, Any], *, created: bool) -> DeletionRequestView:
         raise DeletionNotStarted(UPSTREAM_UNAVAILABLE, retryable=True) from exc
 
 
+def not_started_reason(eligibility: DeletionEligibility) -> str:
+    """Машинная причина отказа по оценке: проверить нечем или есть что урегулировать."""
+    if set(eligibility.erasure.reasons) == {Reason.VERIFICATION_REQUIRED}:
+        return VERIFICATION_REQUIRED
+    return OBLIGATIONS_UNSETTLED
+
+
 def request_account_deletion(bot_user: BotUser, *, client: Any = None) -> DeletionRequestView:
     """Завести заявку в каталоге и вернуть то, что показать человеку.
 
@@ -117,6 +151,28 @@ def request_account_deletion(bot_user: BotUser, *, client: Any = None) -> Deleti
         PersonalContextHttpClient,
     )
     from apps.integrations.ayla.user_proxy import external_user_id_for
+
+    # Конфликт идентичности — своя причина, и узнаётся без Ayla: при нём
+    # неизвестно даже, чьи обязательства оценивать.
+    if resolve_person_link(bot_user, resolve_upstream=False).conflict:
+        logger.error(
+            "identity.deletion_request.not_started reason=%s bot_user=%s",
+            IDENTITY_CONFLICT,
+            bot_user.id,
+        )
+        raise DeletionNotStarted(IDENTITY_CONFLICT, retryable=False)
+
+    # До любого обращения к Ayla: необратимое не начинается, пока оценка его
+    # не разрешает (см. докстринг модуля).
+    eligibility = deletion_eligibility(bot_user)
+    if not eligibility.erasure_may_start:
+        reason = not_started_reason(eligibility)
+        logger.info(
+            "identity.deletion_request.not_started reason=%s bot_user=%s",
+            reason,
+            bot_user.id,
+        )
+        raise DeletionNotStarted(reason, retryable=False, eligibility=eligibility)
 
     link = resolve_person_link(bot_user)
     if link.conflict:
@@ -153,7 +209,9 @@ def request_account_deletion(bot_user: BotUser, *, client: Any = None) -> Deleti
 
     # ``created`` берётся из тела: клиент отдаёт JSON без HTTP-статуса, а
     # «принято» и «уже принято» человеку — разное (второе нажатие).
-    view = _from_wire(data, created=bool(data.get("created", False)))
+    view = dataclasses.replace(
+        _from_wire(data, created=bool(data.get("created", False))), eligibility=eligibility
+    )
     # D2 (§7): персонализация прекращается СРАЗУ — флаг ставится здесь, до
     # возврата (то есть до показа успеха), на уровне человека.
     from apps.identity.services.deletion_gate import mark_deletion_requested

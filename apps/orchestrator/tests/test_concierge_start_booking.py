@@ -138,7 +138,7 @@ class TestStartBookingTool:
         monkeypatch.setattr(concierge, "find_masters_by_name", find)
         handoff = Mock(
             return_value=DiscoveryReply(
-                text="Выберите дату записи к Архипкину Денису:",
+                text="Выбери дату записи к Архипкину Денису:",
                 action_data={"attachments": [{"type": "inline_keyboard", "payload": {}}]},
             )
         )
@@ -152,7 +152,7 @@ class TestStartBookingTool:
             trace_id=TRACE_ID,
         )
 
-        assert reply.text == "Выберите дату записи к Архипкину Денису:"
+        assert reply.text == "Выбери дату записи к Архипкину Денису:"
         assert reply.action_data is not None
         # The name went to the CATALOG, not to the model's judgement.
         assert find.call_args.args[0] == "Архипкин Денис"
@@ -187,7 +187,7 @@ class TestStartBookingTool:
         )
 
         # A question about the NAME, not a redraw of the catalog.
-        assert "Уточните" in reply.text
+        assert "Уточни, к кому именно" in reply.text
         assert "Архипкин Денис" in reply.text
         assert "Денис Кузнецов" in reply.text
         # …closable with one tap, on the same callback grammar as the cards.
@@ -322,7 +322,7 @@ class TestTranscriptHoldsWhatWasSent:
         monkeypatch.setattr(
             concierge,
             "handoff_to_booking",
-            lambda **kw: DiscoveryReply(text="Выберите дату:"),
+            lambda **kw: DiscoveryReply(text="Выбери дату:"),
         )
         bot_user, conversation = _bot_user_and_conversation()
 
@@ -333,7 +333,7 @@ class TestTranscriptHoldsWhatWasSent:
             trace_id=TRACE_ID,
         )
 
-        assert [r.content for r in _rows(conversation)] == ["Выберите дату:"]
+        assert [r.content for r in _rows(conversation)] == ["Выбери дату:"]
 
 
 @pytest.mark.django_db(transaction=True)

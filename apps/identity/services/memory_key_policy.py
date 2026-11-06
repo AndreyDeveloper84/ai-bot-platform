@@ -129,12 +129,23 @@ def read_current_view(user_id: uuid.UUID) -> PersonalContextView:
     so consumers never surface mutually exclusive values of one key, and each
     carries its :attr:`MemoryEntry.source` so the prompt can tell a quote from
     a guess (P0-3).
+
+    DRF-2781 (smart memory F4, owner 05.10: «предположение не становится
+    фактом без подтверждения»): only what the person SAID or CONFIRMED reaches
+    this view — an unconfirmed or expired inference never surfaces in the
+    conversation. Filtered BEFORE the key policy, so a proposal can never
+    displace a said value of the same key either. A CONFIRMED inference also
+    needs the preference-inference consent to be active right now (owner: on
+    withdrawal stop using them at once). The memory screen reads the rows
+    itself and shows proposals separately.
     """
+    from apps.identity.services.memory_proposals import inference_use_allowed, is_surfaceable
 
     upc = get_personal_context(user_id)
     if upc is None:
         return PersonalContextView()
 
+    allowed = inference_use_allowed(user_id)
     facts = [
         GreenFact(
             kind=entry.kind,
@@ -143,8 +154,11 @@ def read_current_view(user_id: uuid.UUID) -> PersonalContextView:
             # and used to throw it away right here — the single point where the
             # bot lost «who said this» (P0-3). Carry it to the consumer.
             source=entry.source,
+            source_tenant_id=entry.source_tenant_id,
         )
-        for entry in select_current_facts(read_green_entries(user_id))
+        for entry in select_current_facts(
+            [e for e in read_green_entries(user_id) if is_surfaceable(e, inference_allowed=allowed)]
+        )
     ]
     summary = (upc.summary or "").strip() or None
     return PersonalContextView(summary=summary, green_facts=facts)

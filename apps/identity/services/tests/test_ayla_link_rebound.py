@@ -15,7 +15,7 @@ after B-2.1/B-2.2 every subject-bound call it made — export, personal
 context, the profile card — carried a URL subject that no longer matched
 its own header: 403 everywhere, and ``user.profile.updated`` for the real
 key found no row at all. Found while drawing Phase 1 OTP boundaries
-(``MEASUREMENT_PHASE1_OTP_SELF_LINK_2026-09-12.md`` §6).
+(``docs/MEASUREMENT_PHASE1_OTP_SELF_LINK_2026-09-12.md`` §6).
 
 Rule now: «never overwrite» is loosened by exactly one transition — a
 stored key whose sort is proxy (``True``) or unknown (``NULL``) may be

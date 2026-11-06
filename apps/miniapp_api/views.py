@@ -57,6 +57,8 @@ from django.core.cache import cache
 from django.utils.dateparse import parse_datetime
 
 from apps.catalog.models import CatalogMaster, CatalogService, MasterService, sellable_edge_q
+from apps.catalog.rating import public_rating
+from apps.integrations.ayla.edge_duration import duration_from_edge
 from apps.integrations.ayla.offer_refusal import (
     OFFER_NOT_SELLABLE_SLUG,
     client_text_for,
@@ -64,6 +66,9 @@ from apps.integrations.ayla.offer_refusal import (
     reason_from_refusal,
 )
 from apps.identity.models import BotUser
+from apps.consent import ai_food_estimation
+from apps.nutrition_proactive.prefs import get_prefs, numbers_hidden_for, write_prefs
+from apps.nutrition_proactive.prefs import numbers_hidden as numbers_hidden_by_choice
 from apps.tenancy.models import Tenant
 from apps.miniapp_api.auth import VerifiedInitData
 from apps.miniapp_api.master_media import master_photo_path
@@ -118,9 +123,13 @@ def _lazy_register_bot_user(tenant: Tenant, verified: VerifiedInitData) -> BotUs
     last = (user.get("last_name") or "").strip()
     display = (f"{first} {last}".strip() or f"max:{verified.user_id}")[:200]
 
-    chat_id = ""
-    if verified.chat and "id" in verified.chat:
-        chat_id = str(verified.chat.get("id", ""))[:128]
+    # DRF-2668: как у парсера MAX (``channels/max/parser.py`` — ``is None`` до
+    # ``str()``): отсутствие адреса остаётся пустотой. ``str(None)`` писал
+    # строку ``"None"``, а резолвер дописывает только ПУСТЫЕ поля — такая
+    # строка застревала навсегда и не давала первому сообщению боту
+    # поставить настоящий ``chat_id``.
+    raw_chat_id = (verified.chat or {}).get("id")
+    chat_id = "" if raw_chat_id is None else str(raw_chat_id).strip()[:128]
 
     bot_user, created = BotUser.all_tenants.get_or_create(
         tenant=tenant,
@@ -815,7 +824,10 @@ def _master_to_dict(m: CatalogMaster) -> dict[str, Any]:
         "specialization": m.specialization,
         "bio": m.bio,
         "experience": m.experience,
-        "rating": str(m.rating) if m.rating is not None else None,
+        # DRF-2875 — оценка без отзывов клиенту не уходит (п.20 листа 07.10).
+        "rating": (
+            str(shown) if (shown := public_rating(m.rating, m.review_count)) is not None else None
+        ),
         "photo_url": master_photo_path(m.id, m.photo_url),
         # DRF-1778 — trust signal только из данных: число отзывов из
         # зеркала (`reviews_count` фида). 0 — экран скобок не рисует.
@@ -906,7 +918,8 @@ def masters_list(request: HttpRequest) -> HttpResponse:
             .values_list("master_id", flat=True)
         )
         qs = qs.filter(id__in=list(master_ids))
-    rows = [_master_to_dict(m) for m in qs]
+    masters = list(qs)
+    rows = [_master_to_dict(m) for m in masters]
 
     # DRF-1707 / OD-PILOT-9 distance contract + решение владельца D3.
     # ``?lat=&lon=`` — одноразовые координаты по кнопке «Показать рядом со
@@ -917,7 +930,7 @@ def masters_list(request: HttpRequest) -> HttpResponse:
     if coords_error:
         return _error("bad_request", coords_error, 400)
     if coords is not None:
-        rows = _attach_distance(rows, lat=coords[0], lon=coords[1])
+        rows = _attach_distance(rows, masters, lat=coords[0], lon=coords[1])
     return JsonResponse({"masters": rows})
 
 
@@ -939,14 +952,28 @@ def _parse_coords(query) -> tuple[tuple[float, float] | None, str | None]:
     return (lat, lon), None
 
 
-def _attach_distance(rows: list[dict[str, Any]], *, lat: float, lon: float) -> list[dict[str, Any]]:
+def _attach_distance(
+    rows: list[dict[str, Any]],
+    masters: list[CatalogMaster],
+    *,
+    lat: float,
+    lon: float,
+) -> list[dict[str, Any]]:
     """Дописать ``distance_meters`` с провода каталога и отсортировать по близости.
 
     Без ответа каталога (флаг выключен, источник лежит, мастер не найден
     в ответе) поля нет вовсе — экран тогда не называет список «Рядом с
     вами» (#1653: имя только при наличии поля). Неизвестное расстояние
     (``null``) — в конец, порядок имён между ними сохраняется.
+
+    DRF-2764: каталог отвечает под id профиля, поэтому строка ищется по
+    колонке ``catalog_specialist_id``, а не по первичному ключу зеркала —
+    у склеенного приглашения и соло-мастера это разные id (DRF-1933). Пустая
+    колонка — каталог мастера не знает, расстояния нет.
     """
+    catalog_of = {
+        str(m.id): str(m.catalog_specialist_id) for m in masters if m.catalog_specialist_id
+    }
     if not getattr(settings, "BOOKING_VIA_AYLA_REST", False):
         return rows
     from apps.integrations.ayla.booking_client import (
@@ -962,8 +989,9 @@ def _attach_distance(rows: list[dict[str, Any]], *, lat: float, lon: float) -> l
     by_id = {m.id: m.distance_meters for m in remote}
     matched = 0
     for row in rows:
-        if row["id"] in by_id:
-            row["distance_meters"] = by_id[row["id"]]
+        catalog_id = catalog_of.get(row["id"])
+        if catalog_id is not None and catalog_id in by_id:
+            row["distance_meters"] = by_id[catalog_id]
             matched += 1
     logger.info("miniapp_api.masters_list.distance geo=1 masters=%d matched=%d", len(rows), matched)
     if matched == 0:
@@ -993,7 +1021,53 @@ def master_detail(request: HttpRequest, master_id: str) -> HttpResponse:
     ]
     payload = _master_to_dict(master)
     payload["service_ids"] = service_ids
+    # DRF-2755 — расстояние до мастера на его карточке. Правило то же, что у
+    # списка (``_attach_distance``): одноразовые ``?lat=&lon=``, считает
+    # каталог, координаты не хранятся и не пишутся в журнал.
+    coords, coords_error = _parse_coords(request.GET)
+    if coords_error:
+        return _error("bad_request", coords_error, 400)
+    if coords is not None:
+        _attach_master_distance(payload, master, lat=coords[0], lon=coords[1])
     return JsonResponse({"master": payload})
+
+
+def _attach_master_distance(
+    payload: dict[str, Any], master: CatalogMaster, *, lat: float, lon: float
+) -> None:
+    """Дописать ``distance_meters`` одного мастера с провода каталога.
+
+    Без ответа каталога (флаг выключен, источник лежит, каталог вернул
+    другого мастера) поля нет вовсе; ``null`` с провода — неизвестно, и
+    экран блок не рисует.
+
+    DRF-1933: в каталог уходит id профиля из колонки, а не первичный ключ
+    зеркала — у склеенного приглашения и соло-мастера это разные id. Колонка
+    пуста — звать каталог не с чем, поля нет.
+    """
+    if not getattr(settings, "BOOKING_VIA_AYLA_REST", False):
+        return
+    from apps.integrations.ayla.booking_client import (
+        BookingAPIError,
+        get_ayla_booking_client,
+    )
+
+    try:
+        catalog_id = catalog_specialist_id(master)
+    except CatalogSpecialistUnresolved:
+        logger.info("miniapp_api.master_detail.distance geo=1 unresolved=1")
+        return
+    try:
+        remote = get_ayla_booking_client().get_masters(
+            specialist_id=catalog_specialist_id(master), lat=lat, lon=lon
+        )
+    except BookingAPIError:
+        logger.warning("miniapp_api.master_detail.distance_unavailable geo=1")
+        return
+    match = next((m for m in remote if m.id == catalog_id), None)
+    logger.info("miniapp_api.master_detail.distance geo=1 matched=%d", int(match is not None))
+    if match is not None:
+        payload["distance_meters"] = match.distance_meters
 
 
 # --- POST /bookings (4a) ---------------------------------------------------
@@ -1316,7 +1390,7 @@ def _create_booking_via_ayla(
                 "duration_min": service.duration_min,
                 # DRF-1952 — адрес салона записи, тот же источник, что у карточки
                 # записи (зеркало ``Tenant.address``); ``None`` — зеркало молчит,
-                # экран успеха скажет «Уточните адрес в салоне».
+                # экран успеха скажет «Уточни адрес в салоне».
                 "address": tenant.address,
                 # Ayla verbatim: confirmed (payment_required=false) or
                 # awaiting_payment (true, pending Payment created).
@@ -1424,14 +1498,17 @@ def booking_quote(request: HttpRequest) -> HttpResponse:
                 # подтверждения рисовал «Цена 0 ₽».
                 return _offer_not_sellable(offer_reason)
             edge_price = edge.get("price")
-            edge_duration = edge.get("duration_minutes")
+            # DRF-2678: разрешённая каталогом длительность, не сырое
+            # переопределение — у мастера без своего значения оно пусто, и
+            # ответ уходил на зеркало услуги.
+            edge_duration = duration_from_edge(edge)
             try:
                 if edge_price is not None:
                     price = str(Decimal(str(edge_price)))
                     source = "edge"
             except (InvalidOperation, ValueError):
                 logger.warning("miniapp_api.booking_quote.bad_edge_price value=%r", edge_price)
-            if isinstance(edge_duration, int) and edge_duration > 0:
+            if edge_duration is not None:
                 duration = edge_duration
                 source = "edge"
 
@@ -2084,7 +2161,7 @@ def _salon_iso(moment, tenant) -> str:
     из строки (``formatVisitFull``), и человек видел «в 06:00». Тот же момент
     в поясе салона: ``new Date()`` на фронте не меняется, а часы в строке
     становятся часами салона — правило владельца (28.09, п.1) и прецедент
-    «✅ Вы записаны». Пояс и запись момента — ``apps.tenancy.timezones``
+    «✅ Запись подтверждена». Пояс и запись момента — ``apps.tenancy.timezones``
     (DRF-2595); здесь только контракт провода: пусто — пустая строка.
     Время без пояса (канон без смещения, тело запроса без смещения) — время
     салона: ``astimezone`` принял бы его за пояс СЕРВЕРА и сдвинул час заново.
@@ -2610,7 +2687,7 @@ def me(request: HttpRequest) -> HttpResponse:
 
     if request.method == "GET":
         snap = get_profile(bot_user)
-        return JsonResponse(_profile_to_dict(snap))
+        return JsonResponse(_me_payload(bot_user, snap))
 
     try:
         body = json.loads(request.body or b"{}")
@@ -2622,7 +2699,7 @@ def me(request: HttpRequest) -> HttpResponse:
         snap = update_profile(bot_user, body)
     except ProfileUpdateError as exc:
         return _error("invalid_field", str(exc), 400)
-    return JsonResponse(_profile_to_dict(snap))
+    return JsonResponse(_me_payload(bot_user, snap))
 
 
 @csrf_exempt
@@ -2647,6 +2724,20 @@ def delete_me(request: HttpRequest) -> HttpResponse:
         return _error("malformed", "body is not valid JSON", 400)
     if not isinstance(body, dict):
         return _error("malformed", "body must be a JSON object", 400)
+    # DRF-2919 п.2 — та же оценка, что у заявки: стирать ли сейчас, решают
+    # неурегулированные обязательства, а не роль.
+    from apps.identity.services.deletion_eligibility import deletion_eligibility
+
+    eligibility = deletion_eligibility(bot_user)
+    if not eligibility.erasure_may_start:
+        return JsonResponse(
+            {
+                "error": "obligations_unsettled",
+                "detail": "personal data is not erased while obligations are unsettled",
+                "eligibility": eligibility.as_dict(),
+            },
+            status=409,
+        )
     confirmation = body.get("confirmation", "")
     try:
         soft_delete_user(bot_user, confirmation)
@@ -2716,8 +2807,19 @@ def personal_data_delete(request: HttpRequest) -> HttpResponse:
 
     Idempotent per contract: a repeat confirmed request returns the same 200.
     A failed or skipped mandatory step yields an honest 502 + failed_steps.
+
+    DRF-2919 п.2: каскад необратим и идёт сразу, без окна заявки, поэтому
+    перед ним — та же оценка, что у ``POST /me/deletion-request/``. Удаление
+    ПДн не ``IMMEDIATE``/``PARTIAL_WITH_RETENTION`` → 409 ``not_started``
+    (``obligations_unsettled`` / ``verification_required``) с ``eligibility``;
+    ничего не тронуто. Обычного клиента база политики не останавливает.
+    Конфликт идентичности оценкой не перехватывается: у каскада на него
+    своя fail-closed ветка (решение §3 — ни Ayla, ни память, 502
+    ``identity_conflict``), и её контракт здесь не меняется.
     """
-    from apps.identity.services.privacy import delete_personal_data
+    from apps.identity.services.deletion_eligibility import deletion_eligibility
+    from apps.identity.services.deletion_request import not_started_reason
+    from apps.identity.services.privacy import delete_personal_data, resolve_person_link
     from apps.identity.services.profile import DELETE_CONFIRMATION_TOKEN
 
     bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
@@ -2731,6 +2833,19 @@ def personal_data_delete(request: HttpRequest) -> HttpResponse:
             "confirmation_mismatch",
             f"body.confirmation must equal {DELETE_CONFIRMATION_TOKEN!r}",
             400,
+        )
+
+    conflict = resolve_person_link(bot_user, resolve_upstream=False).conflict
+    eligibility = deletion_eligibility(bot_user)
+    if not conflict and not eligibility.erasure_may_start:
+        return JsonResponse(
+            {
+                "status": "not_started",
+                "reason": not_started_reason(eligibility),
+                "retryable": False,
+                "eligibility": eligibility.as_dict(),
+            },
+            status=409,
         )
 
     result = delete_personal_data(bot_user, retry_source="personal_data_delete")
@@ -2778,9 +2893,13 @@ def deletion_request(request: HttpRequest) -> HttpResponse:
     Ответы ``POST``: 201 заявка заведена / 200 уже была открыта (тот же
     номер) — тело одно; 400 токен; 409 ``not_linked`` /
     ``identity_conflict`` (повтор не поможет — человек не связан с Ayla
-    или связан дважды); 502 ``upstream_unavailable`` (повтор поможет).
-    В каждом отказе ``status: "not_started"`` — единственное слово о
-    состоянии данных, и оно правдиво.
+    или связан дважды) / ``obligations_unsettled`` / ``verification_required``
+    (DRF-2919 п.2: удаление ПДн сейчас начаться не может — тело несёт
+    ``eligibility`` с причинами и следующими шагами); 502
+    ``upstream_unavailable`` (повтор поможет). В каждом отказе
+    ``status: "not_started"`` — единственное слово о состоянии данных, и
+    оно правдиво. Принятая заявка тоже несёт ``eligibility``: хранение
+    истории — часть ответа, а не сюрприз.
     """
     from apps.identity.services.deletion_request import (
         DeletionNotStarted,
@@ -2810,19 +2929,19 @@ def deletion_request(request: HttpRequest) -> HttpResponse:
     try:
         view = request_account_deletion(bot_user)
     except DeletionNotStarted as exc:
-        return JsonResponse(
-            {
-                "status": "not_started",
-                "reason": exc.reason,
-                "retryable": exc.retryable,
-                "detail": str(exc),
-            },
-            status=502 if exc.retryable else 409,
-        )
-    return JsonResponse(
-        {"status": "accepted", "request": view.as_dict()},
-        status=201 if view.created else 200,
-    )
+        refused: dict = {
+            "status": "not_started",
+            "reason": exc.reason,
+            "retryable": exc.retryable,
+            "detail": str(exc),
+        }
+        if exc.eligibility is not None:
+            refused["eligibility"] = exc.eligibility.as_dict()
+        return JsonResponse(refused, status=502 if exc.retryable else 409)
+    accepted: dict = {"status": "accepted", "request": view.as_dict()}
+    if view.eligibility is not None:
+        accepted["eligibility"] = view.eligibility.as_dict()
+    return JsonResponse(accepted, status=201 if view.created else 200)
 
 
 # ---------------------------------------------------------------------------
@@ -3131,8 +3250,14 @@ def customer_proactive_hints(request: HttpRequest) -> HttpResponse:
     До DRF-1520 она по HTTP не отдавалась ни на чтение, ни на запись: бот
     решал, писать ли человеку первым, состоянием, которого человек не
     видел и изменить не мог.
+
+    Включение при отозванном согласии на хранение данных отклоняется: **409**
+    со слагом причины (решение владельца §47.3, DRF-2708). Не 200 с
+    пересчитанным состоянием — тело было бы правдой про базу и ложью про
+    запрос. Выключение не отклоняется никогда.
     """
     from apps.consent.customer import set_proactive_hints
+    from apps.consent.exceptions import ProactiveHintsUnavailable
 
     bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
     body = _json_object_body(request)
@@ -3142,7 +3267,149 @@ def customer_proactive_hints(request: HttpRequest) -> HttpResponse:
     if not isinstance(enabled, bool):
         return _error("bad_request", "enabled must be a boolean", 400)
 
-    set_proactive_hints(bot_user, enabled=enabled)
+    try:
+        set_proactive_hints(bot_user, enabled=enabled)
+    except ProactiveHintsUnavailable as exc:
+        return _error(
+            exc.reason,
+            "proactive hints cannot be enabled while the data-storage consent is withdrawn",
+            409,
+        )
+    return JsonResponse(_consents_document(bot_user))
+
+
+@csrf_exempt
+@require_http_methods(["GET", "POST"])
+@require_init_data
+@with_request_tenant
+def customer_nutrition_display(request: HttpRequest) -> HttpResponse:
+    """«Без чисел» (DRF-2766): ``GET`` — состояние, ``POST {"numbers_hidden": bool}``.
+
+    Решение владельца 04.10: добровольный режим — человек сам прячет
+    калории, БЖУ и числовые цели на всех экранах; записи дневника он не
+    трогает. Хранится в боте (настройки питания, тот же писатель
+    ``write_prefs``): каталог о показе не знает. Субъект — из проверенной
+    initData, чужой настройки отсюда не достать.
+
+    Записанное не легло (оболочка, которой закрыт личный контекст, §2.4) —
+    **409**, а не 200 с прежним состоянием: тело было бы правдой про базу и
+    ложью про запрос.
+    """
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    if request.method == "POST":
+        body = _json_object_body(request)
+        if isinstance(body, HttpResponse):
+            return body
+        wanted = body.get("numbers_hidden")
+        if not isinstance(wanted, bool):
+            return _error("bad_request", "numbers_hidden must be a boolean", 400)
+        write_prefs(bot_user, {"numbers_hidden": wanted})
+        if numbers_hidden_by_choice(get_prefs(bot_user)) is not wanted:
+            return _error(
+                "nutrition_display_unavailable",
+                "the display preference cannot be saved for this profile",
+                409,
+            )
+        logger.info(
+            "miniapp_api.nutrition_display bot_user=%s numbers_hidden=%s", bot_user.id, wanted
+        )
+    return JsonResponse({"numbers_hidden": numbers_hidden_by_choice(get_prefs(bot_user))})
+
+
+@csrf_exempt
+@require_http_methods(["POST", "DELETE"])
+@require_init_data
+@with_request_tenant
+def customer_preference_inference_consent(request: HttpRequest) -> HttpResponse:
+    """Согласие на предположения о предпочтениях (умная память Ф4, DRF-2779).
+
+    ``POST`` — выдать; тело ``{"document_version": "<версия>"}``. Версия —
+    доказательство, под каким текстом человек нажал: незнакомая отвергается
+    с 409, клиенту нужно перечитать ``GET /me/consents/`` (там
+    ``preference_inference.grant.document_version``). ``DELETE`` — отозвать.
+    Оба перехода идемпотентны и отвечают свежим документом согласий.
+
+    Добровольное: отказ не блокирует ни запись, ни что-либо ещё. Текст —
+    черновик владельца на юр-проверке (#947), документ это говорит
+    (``grant.pending_legal``).
+    """
+    from apps.consent import preference_inference
+
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    if request.method == "POST":
+        body = _json_object_body(request)
+        if isinstance(body, HttpResponse):
+            return body
+        try:
+            preference_inference.grant(
+                bot_user, document_version=str(body.get("document_version", ""))
+            )
+        except preference_inference.UnknownDisclosureVersionError:
+            return _error(
+                "stale_disclosure",
+                "document_version does not match the current preference-inference text",
+                409,
+            )
+    else:
+        preference_inference.withdraw(bot_user)
+    logger.info(
+        "miniapp_api.consents.preference_inference bot_user=%s granted=%s",
+        bot_user.id,
+        request.method == "POST",
+    )
+    return JsonResponse(_consents_document(bot_user))
+
+
+@csrf_exempt
+@require_http_methods(["POST", "DELETE"])
+@require_init_data
+@with_request_tenant
+def customer_ai_food_estimation_consent(request: HttpRequest) -> HttpResponse:
+    """Согласие на ИИ-оценку еды — выдать и отозвать (DRF-2867).
+
+    Решение владельца 07.10 (лист решений, п.17): согласие выдаётся и
+    отзывается на одном экране Mini App; отдельного механизма выдачи
+    сообщением в чате нет.
+
+    ``POST`` — выдать; тело ``{"document_version": "<версия>"}`` — под каким
+    текстом человек нажал. Незнакомая версия — 409 ``stale_disclosure``,
+    клиенту нужно перечитать ``GET /me/consents/``. Текст ещё не утверждён —
+    409 ``consent_text_not_approved``: показать человеку нечего, выдачи нет.
+    ``DELETE`` — отозвать; работает всегда, в том числе пока механизм
+    выключен. Оба перехода идемпотентны и отвечают свежим документом.
+
+    Добровольное: отказ и отзыв не закрывают ни справочник, ни дневник.
+    После отзыва блюдо наружу не уходит: предикат перед отправкой читается
+    заново на каждом вызове (``ai_food_estimation.estimate_permitted``).
+    """
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    if request.method == "POST":
+        body = _json_object_body(request)
+        if isinstance(body, HttpResponse):
+            return body
+        try:
+            ai_food_estimation.grant_from_screen(
+                bot_user, document_version=str(body.get("document_version", ""))
+            )
+        except ai_food_estimation.TextNotApprovedError:
+            return _error(
+                "consent_text_not_approved",
+                "the AI food estimation consent text is not approved yet",
+                409,
+            )
+        except ai_food_estimation.UnknownDisclosureVersionError:
+            return _error(
+                "stale_disclosure",
+                "document_version does not match the current AI food estimation text",
+                409,
+            )
+    else:
+        ai_food_estimation.withdraw(bot_user, source=ai_food_estimation.MINIAPP_SOURCE)
+    logger.info(
+        "miniapp_api.consents.ai_food_estimation bot_user=%s granted=%s",
+        bot_user.id,
+        request.method == "POST",
+    )
     return JsonResponse(_consents_document(bot_user))
 
 
@@ -3175,11 +3442,14 @@ def customer_marketing_consent(request: HttpRequest) -> HttpResponse:
 
 
 @csrf_exempt
-@require_http_methods(["DELETE"])
+@require_http_methods(["POST", "DELETE"])
 @require_init_data
 @with_request_tenant
 def customer_data_storage_consent(request: HttpRequest) -> HttpResponse:
-    """Отзыв согласия на хранение данных. Только отзыв — выдача не здесь.
+    """Согласие на хранение данных: ``DELETE`` — отозвать, ``POST`` — выдать заново.
+
+    ``POST`` (DRF-2709) — в :func:`_regrant_data_storage`, ниже. Дальше —
+    про отзыв.
 
     Тело обязано нести обе половины подтверждения::
 
@@ -3218,6 +3488,8 @@ def customer_data_storage_consent(request: HttpRequest) -> HttpResponse:
     body = _json_object_body(request)
     if isinstance(body, HttpResponse):
         return body
+    if request.method == "POST":
+        return _regrant_data_storage(bot_user, body)
 
     # Ничего ещё не тронуто — обе проверки стоят до вызова процедуры.
     if body.get("confirmation", "") != DELETE_CONFIRMATION_TOKEN:
@@ -3233,7 +3505,16 @@ def customer_data_storage_consent(request: HttpRequest) -> HttpResponse:
             409,
         )
 
-    result = revoke_data_storage(bot_user)
+    # DRF-2919 п.2, пятая дверь (решение владельца 19.10, б): отзыв согласия
+    # не блокируется никогда. Оценка лишь называет, что удерживается по
+    # закону, — коды в ответ и в audit; каскад тот же.
+    from apps.identity.services.deletion_eligibility import (
+        deletion_eligibility,
+        revocation_retention,
+    )
+
+    retention = revocation_retention(deletion_eligibility(bot_user))
+    result = revoke_data_storage(bot_user, retention=[r.value for r in retention.reasons])
     document = _consents_document(bot_user)
 
     if document["data_storage"]["granted"]:
@@ -3261,8 +3542,71 @@ def customer_data_storage_consent(request: HttpRequest) -> HttpResponse:
         ),
         "failed_steps": result.failed_steps,
         "failed_details": {s.step: s.detail for s in result.steps if not s.ok and s.detail},
+        "retention": retention.as_dict(),
     }
     return JsonResponse(document, status=200)
+
+
+def _regrant_data_storage(bot_user: BotUser, body: dict) -> HttpResponse:
+    """Повторная выдача согласия на хранение данных (DRF-2709).
+
+    Тело::
+
+        {"document_version": "welcome-s2-v1"}
+
+    ``document_version`` — доказательство, под каким текстом человек нажал,
+    как ``disclosure_version`` у отзыва. Согласие информированное (152-ФЗ):
+    строка реестра обязана говорить, КАКОЙ текст принят, и единственное, чем
+    сервер может это проверить, — версия, которую прислал показавший текст
+    клиент. Незнакомая или пустая — 409, и не пишется ничего: клиенту нужно
+    перечитать документ (``GET /me/consents/`` отдаёт её в
+    ``data_storage.regrant.document_version``), а не чинить тело.
+
+    Подсказки выдача не включает (решение владельца §47.3) — в ответе
+    ``proactive_hints.enabled`` остаётся ``false``, а ``can_enable``
+    становится ``true``.
+    """
+    from apps.consent.customer import (
+        DATA_STORAGE_REGRANT_DOCUMENT_VERSION,
+        regrant_data_storage,
+    )
+
+    if body.get("document_version", "") != DATA_STORAGE_REGRANT_DOCUMENT_VERSION:
+        return _error(
+            "stale_document",
+            "document_version does not match the current data-storage consent document",
+            409,
+        )
+
+    regrant_data_storage(bot_user)
+    document = _consents_document(bot_user)
+    if not document["data_storage"]["granted"]:
+        # Выдача не состоялась — состояние осталось «не разрешено».
+        logger.error(
+            "miniapp_api.consents.data_storage_regrant_failed bot_user=%s",
+            bot_user.id,
+        )
+        return JsonResponse(document, status=502)
+    return JsonResponse(document, status=200)
+
+
+def _me_payload(bot_user: BotUser, snap) -> dict:
+    """Тело ``/customer/me``: снимок профиля плюс признак про удаление (DRF-2919).
+
+    ``account_deletion_available`` — начнётся ли удаление ПДн, если человек
+    попросит сейчас (та же оценка, что у ручки заявки). ``False`` — есть
+    неурегулированные обязательства или их нечем проверить; экрану — не
+    предлагать действие, которое сервер отклонит. Право устанавливает не
+    признак, а сама ручка заявки.
+
+    Отсутствие поля читается как «как раньше»: закешированный бандл о нём
+    не знает и показывает кнопку, а сервер отвечает ``not_started``.
+    """
+    from apps.identity.services.deletion_eligibility import deletion_eligibility
+
+    payload = _profile_to_dict(snap)
+    payload["account_deletion_available"] = deletion_eligibility(bot_user).erasure_may_start
+    return payload
 
 
 def _profile_to_dict(snap) -> dict:
@@ -4044,7 +4388,9 @@ def customer_wellness_today(request: HttpRequest) -> HttpResponse:
     # today», it is «we could not ask», and the two are indistinguishable
     # to the person reading the screen.
     summary_known = True
-    calories_eaten = 0
+    calories_eaten: int | None = 0
+    calories_ai_included = 0
+    calories_unscored = 0
     # None — «цели нет», не «цель ноль». Ключа в ответе не будет, как у
     # воды ниже: Ayla отдаёт ``calories_goal = 0``, когда считать цель
     # не из чего — анкету питания человек не проходил.
@@ -4068,7 +4414,14 @@ def customer_wellness_today(request: HttpRequest) -> HttpResponse:
         )
         summary_known = False
     else:
-        calories_eaten = round(summary_res.calories_total)
+        # DRF-2766 (фаза 2) — итога может не быть: записи есть, а калорий ни
+        # у одной (ни проверенного, ни оценки). Это не ноль; ключ тогда не
+        # уходит, а счётчики ниже говорят экрану, что день неполный.
+        calories_eaten = (
+            round(summary_res.calories_total) if summary_res.calories_total is not None else None
+        )
+        calories_ai_included = int(getattr(summary_res, "calories_ai_included", 0) or 0)
+        calories_unscored = int(getattr(summary_res, "calories_unscored", 0) or 0)
         # Ориентир приходит от Ayla уже КАК ОТСУТСТВИЕ: ключа
         # ``calories_goal`` в ответе нет, клиент отдаёт ``None``
         # (§82 — «Текущая плоская норма калорий для всех удаляется»).
@@ -4113,27 +4466,18 @@ def customer_wellness_today(request: HttpRequest) -> HttpResponse:
         # решается и не воспроизводится: значение проходит как есть.
         entries = list(summary_res.entries or [])
 
-    # ── прятать ли числа (from get_profile) ─────────────────────────────
-    # Наружу уходит ОДИН производный булев, а не `health_flags`.
+    # ── прятать ли числа — выбор самого человека «Без чисел» ─────────────
+    # DRF-2766 (решение владельца 04.10): числа прячутся только по
+    # добровольному выбору человека (`prefs.numbers_hidden`, тумблер в
+    # «Профиле»), а не по признаку профиля. Прежде признак выводился из
+    # `health_flags.eating_disorder` — владелец это автоматическое скрытие
+    # снял: калорийность еды доступна всем, включая РПП.
     #
-    # Клиенту нужно знать «прятать ли цифру», а не «что с человеком».
-    # Диагноз — специальная категория 152-ФЗ, и границу он пересекать не
-    # обязан: раз сырого флага в ответе нет, его нельзя ни залогировать,
-    # ни отправить дальше, ни прочитать в консоли браузера. Тот же приём,
-    # которым убрано `subject_ref` из тела запроса границы резолвера
-    # (§9.4): не давать пути, а не запрещать по нему ходить.
+    # Выбор хранится в боте, поэтому от ответа каталога он больше не
+    # зависит: ключ в ответе есть всегда. Экран на отсутствие ключа
+    # по-прежнему реагирует fail-closed — для старых ответов.
     #
-    # Имя называет СЛЕДСТВИЕ, а не причину. `ed_mode` было бы тем же
-    # диагнозом, только короче.
-    #
-    # Ключ отсутствует, если чтение не удалось, — и экран на отсутствие
-    # реагирует fail-closed, то есть числа прячет. Цена названа прямо:
-    # пока `get_profile` не отвечает, дневник у ВСЕХ без цифр. Это
-    # задумано. Обратное умолчание («не знаем → показать») превратило бы
-    # отсутствие данных в разрешение показать калории тому, кому спека
-    # их показывать запрещает (§10 Appendix ED Mode) — и цена ошибки
-    # здесь несимметрична.
-    numbers_hidden: bool | None = None
+    # Имя по-прежнему называет СЛЕДСТВИЕ («прятать числа»), а не причину.
     if isinstance(profile_res, nutrition_errors):
         logger.warning("wellness_today.profile_unavailable ext=%s err=%s", external_id, profile_res)
     elif isinstance(profile_res, Exception):
@@ -4142,13 +4486,7 @@ def customer_wellness_today(request: HttpRequest) -> HttpResponse:
             external_id,
             type(profile_res).__name__,
         )
-    elif profile_res is not None:
-        # `get_profile` отдаёт `None`, когда анкеты нет вовсе. Это не
-        # отказ чтения: спросили и узнали, что профиля нет, а значит и
-        # флага нет — числа показываются.
-        numbers_hidden = bool((profile_res.health_flags or {}).get("eating_disorder"))
-    else:
-        numbers_hidden = False
+    numbers_hidden: bool | None = numbers_hidden_for(bot_user)
 
     # ── настроены ли ориентиры (from get_profile) — §6 свода 11.09 ─────
     # Ориентир показывается только с названным происхождением
@@ -4236,7 +4574,10 @@ def customer_wellness_today(request: HttpRequest) -> HttpResponse:
     # `summary_known` comment above; the frontend renders «Не удалось
     # загрузить» for an absent slice and numbers for a present one.
     if summary_known:
-        payload["calories_eaten"] = calories_eaten
+        if calories_eaten is not None:
+            payload["calories_eaten"] = calories_eaten
+        payload["calories_ai_included"] = calories_ai_included
+        payload["calories_unscored"] = calories_unscored
         # Цель уходит, только когда она есть И настроена. Ключа нет = цели
         # нет; ``NOT_CONFIGURED`` §6 на этой границе — отсутствие ключа.
         if calories_target is not None and calories_configured:
@@ -4784,21 +5125,35 @@ def customer_food_estimate(request: HttpRequest) -> HttpResponse:
     try:
         estimate = asyncio.run(
             get_nutrition_client().estimate_dish(
-                external_user_id=external_id, dish_name=parsed.dish, portion_g=grams
+                external_user_id=external_id,
+                dish_name=parsed.dish,
+                portion_g=grams,
+                ai_estimate_allowed=ai_food_estimation.estimate_permitted(bot_user),
             )
         )
     except NutritionAPIError as exc:
         return _food_text_catalog_refusal(exc, external_id=external_id, step="estimate")
 
+    # DRF-2844 — «Без чисел» (решение владельца 04.10: на всех экранах). Экран
+    # текстового ввода режима не знает и рисует всё, что пришло, поэтому числа
+    # в этом режиме не едут вовсе: блюдо и порция остаются, калории, БЖУ,
+    # оценка ИИ и причина её отсутствия (DRF-2822) — нет. Запись от этого не
+    # меняется: экран шлёт в неё блюдо и граммы, а не числа.
+    hidden = numbers_hidden_for(bot_user)
     return JsonResponse(
         {
             "matched_dish": estimate.matched_dish,
             "portion_g": estimate.portion_g,
             "portion_estimated": estimate.portion_estimated,
-            "kcal": estimate.kcal,
-            "protein_g": estimate.protein_g,
-            "fat_g": estimate.fat_g,
-            "carbs_g": estimate.carbs_g,
+            "kcal": None if hidden else estimate.kcal,
+            "protein_g": None if hidden else estimate.protein_g,
+            "fat_g": None if hidden else estimate.fat_g,
+            "carbs_g": None if hidden else estimate.carbs_g,
+            # DRF-2761 — оценка калорий ИИ, своим ключом: ``kcal`` при ней
+            # null. Экран показывает её только с пометкой «Оценка ИИ».
+            "kcal_ai_estimate": None if hidden else getattr(estimate, "kcal_ai_estimate", None),
+            # DRF-2822 — почему оценки нет: экран называет сбой и «выключена».
+            "kcal_ai_status": None if hidden else getattr(estimate, "kcal_ai_status", None),
         }
     )
 
@@ -4917,6 +5272,7 @@ def _customer_food_log(request: HttpRequest) -> HttpResponse:
                 portion_multiplier=round(float(portion) / _FOOD_TEXT_BASELINE_G, 3),
                 idempotency_key=f"food-text-ma:{external_id}:{key.strip()}",
                 entry_origin=origin,
+                ai_estimate_allowed=ai_food_estimation.estimate_permitted(bot_user),
             )
         )
     except NutritionAPIError as exc:
@@ -4927,6 +5283,7 @@ def _customer_food_log(request: HttpRequest) -> HttpResponse:
             "log_id": log.log_id,
             "dish_name": log.dish_name,
             "calories": log.calories,
+            "ai_calories": getattr(log, "ai_calories", None),
             "entry_origin": origin,
         },
         status=201,
@@ -5105,7 +5462,10 @@ def _customer_food_log_scan(bot_user: BotUser, body: dict[str, Any]) -> HttpResp
     try:
         log = asyncio.run(
             get_nutrition_client().log_meal(
-                scan_id=kwargs.pop("scan_id"), entry_origin=entry_origin, **kwargs
+                scan_id=kwargs.pop("scan_id"),
+                entry_origin=entry_origin,
+                ai_estimate_allowed=ai_food_estimation.estimate_permitted(bot_user),
+                **kwargs,
             )
         )
     except NutritionAPIError as exc:
@@ -5128,6 +5488,8 @@ def _food_log_payload(log: Any) -> dict[str, Any]:
         "id": log.log_id,
         "dish_name": log.dish_name,
         "calories": log.calories,
+        # DRF-2761 — оценка ИИ после правки граммов / возврата записи.
+        "ai_calories": getattr(log, "ai_calories", None),
         "meal_type": log.meal_type,
     }
 
@@ -5758,9 +6120,11 @@ def create_payment(request: HttpRequest) -> HttpResponse:
 @with_request_tenant
 def cards_setup(request: HttpRequest) -> HttpResponse:
     """C7.2 — start card binding (separate voluntary action). Body carries
-    the consent boundary: ``consent_version`` (required; ``consented_at``
-    accepted for the audit trail, not forwarded upstream) + optional
-    ``return_url``. Response: ``{confirmation_url}`` verbatim."""
+    the consent boundary: ``consent_version`` (required — its presence is the
+    act of consent; the catalog records its OWN version, DRF-2681) + optional
+    ``return_url``. ``consented_at`` may be sent and is ignored: it is neither
+    stored nor forwarded, the recorded moment is the catalog's clock.
+    Response: ``{confirmation_url}`` verbatim."""
 
     body = _c7_json_body(request)
     if isinstance(body, JsonResponse):
@@ -5772,6 +6136,10 @@ def cards_setup(request: HttpRequest) -> HttpResponse:
     binding = _resolve_c7_ayla_user(request, body, establish_link=True)
     if isinstance(binding, JsonResponse):
         return binding
+    # DRF-2681: значение уходит в платёжный контур каталога — нестроковое
+    # получает отказ этой двери, а не становится текстом "{'a': 1}".
+    if body.get("consent_version") is not None and not isinstance(body.get("consent_version"), str):
+        return _error("bad_request", "consent_version must be a string", 400)
     consent_version = str(body.get("consent_version") or "").strip()
     if not consent_version:
         return _error("bad_request", "consent_version is required", 400)

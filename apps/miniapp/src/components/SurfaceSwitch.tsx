@@ -34,6 +34,7 @@
  */
 
 import { createContext, useContext } from "react";
+import { useNavigate } from "react-router-dom";
 
 export interface SurfaceModeContextValue {
   /** True when the caller holds both an admin-side role AND a master link. */
@@ -111,5 +112,45 @@ export function SurfaceSwitchExit() {
     <button type="button" className="cta-bar__exit" onClick={requestChooser}>
       {SURFACE_SWITCH_LABEL}
     </button>
+  );
+}
+
+/**
+ * «Вернуться в кабинет» — выход сотрудника с клиентского экрана (DRF-2918).
+ *
+ * Сотрудник салона пользуется ботом и как клиент: кнопка из клиентского
+ * чата приводит его на клиентский экран Mini App (DRF-2687), а ветки
+ * кабинета такого адреса не знают. «Сменить режим» ему не помощник — она
+ * только у многоролевых и только в профиле, а с экрана согласия сканера
+ * (живой проход 30.09) до профиля три нажатия. Поэтому выход объявляется
+ * не на одном экране, а полосой над всей клиентской поверхностью — тот же
+ * приём, что у `SurfaceSwitchExit`.
+ *
+ * Полоса сама ничего не решает: кто её видит, решает каскад в `App` —
+ * она стоит ровно в одной ветке, «сотрудник на клиентском адресе».
+ * Обычный клиент и многоролевой в режиме «Клиент» в эту ветку не
+ * заходят. «/» клиентским адресом не считается, поэтому после перехода
+ * каскад отдаёт кабинет: мастеру — его день, администратору — посадку
+ * салона, а владельцу-мастеру без выбранного режима — выбор режима.
+ * Стартовый payload обратно не уносит — он обрабатывается один раз.
+ *
+ * Подпись — из ответа 08.10 на вопрос владельцу (DRF-2918); другая
+ * подпись — одна константа ниже.
+ */
+export const CABINET_RETURN_LABEL = "Вернуться в кабинет";
+
+export function CabinetReturnBar() {
+  const navigate = useNavigate();
+  return (
+    <div style={{ padding: "var(--s-2) var(--s-3) 0" }}>
+      <button
+        type="button"
+        className="btn-secondary"
+        style={{ width: "100%", justifyContent: "center" }}
+        onClick={() => navigate("/")}
+      >
+        {CABINET_RETURN_LABEL}
+      </button>
+    </div>
   );
 }
