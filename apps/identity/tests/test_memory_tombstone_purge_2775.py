@@ -255,7 +255,16 @@ class TestTheSwitch:
         old = _tombstone(upc, GREEN, hours_ago=400 * 24)
         young = _tombstone(upc, GREEN, hours_ago=24)
 
-        with override_settings(MEMORY_TOMBSTONE_PURGE_ENABLED=True):
+        # Задача берёт часы у ``timezone.now``; надгробия стоят относительно
+        # фиксированного ``NOW``. Без подмены часов «молодое» надгробие само
+        # состарилось бы через 30 дней после ``NOW`` и тест упал бы по календарю.
+        with (
+            override_settings(MEMORY_TOMBSTONE_PURGE_ENABLED=True),
+            patch(
+                "apps.identity.services.memory_deleter.timezone.now",
+                return_value=NOW,
+            ),
+        ):
             summary = memory_tombstone_purge()
 
         assert summary["purged_green"] == 1

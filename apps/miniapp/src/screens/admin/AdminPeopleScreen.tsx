@@ -48,6 +48,13 @@
  * and never a new one. Owner only as well: restoring is granting, and an
  * admin who may revoke may not restore (accepted 22.09).
  *
+ * DRF-2833 (B3, the owner's decision 07.10, variant B) adds the fourth:
+ * «Открыть стойку записи», onto `staff/receptionist/link/`. A receptionist
+ * whose role came from a code or «Сменить роль» has the bot half only; the
+ * catalog answers 403 at the booking desk until this wires her in. Owner
+ * only, as the role change; the catalog checks the owner again, and its
+ * refusal is said in words. Taking the desk away is «Отозвать доступ».
+ *
  * ### The button is gated on the VIEWER'S ROLE
  *
  * `staff/revoke/` sits behind `require_admin_role` — owner and admin,
@@ -77,6 +84,7 @@ import { ApiError } from "../../lib/api";
 import {
   changeStaffRole,
   getStaffRoster,
+  linkReceptionistDesk,
   restoreStaffAccess,
   revokeStaffAccess,
   type ChangeableRole,
@@ -395,6 +403,46 @@ function restoreTarget(
   return roles.length > 0 ? roles : null;
 }
 
+/**
+ * Whom «Открыть стойку записи» would wire into the catalog, or `null` for
+ * no button. Only a LIVE receptionist role: the server answers
+ * `not_a_receptionist` (409) to anybody else, and yourself is 403. The
+ * viewer's half (owner only) is `mayChangeRole`, asked by the caller.
+ */
+function deskTarget(person: StaffRosterPerson, me: MeResponse): string | null {
+  const botUserId = person.bot_user_id;
+  if (!botUserId || botUserId === me.user.id) return null;
+  const live = person.roles.some(
+    (g) => g.role === "receptionist" && g.state === "active",
+  );
+  return live ? botUserId : null;
+}
+
+/** What the desk sheet is asking about; `created` is set once it answered. */
+interface PendingDesk {
+  person: StaffRosterPerson;
+  botUserId: string;
+  created: boolean | null;
+}
+
+/**
+ * The desk sheet's refusal in words. The catalog's own «что сделать» comes
+ * in `details.hint`; the most likely one on the pilot is the owner not yet
+ * being an administrator of the salon in the catalog.
+ */
+function deskRefusal(err: unknown): string | null {
+  if (err instanceof ApiError && err.slug === "catalog_admin_link_refused") {
+    const hint = typeof err.details?.hint === "string" ? err.details.hint : "";
+    return hint
+      ? `Каталог не открыл стойку записи: ${hint}.`
+      : "Каталог не открыл стойку записи.";
+  }
+  if (err instanceof ApiError && err.slug === "not_a_receptionist") {
+    return "У этого человека больше нет роли ресепшена — обновите список.";
+  }
+  return accessRefusal(err);
+}
+
 /** What the restore sheet is currently asking about. */
 interface PendingRestore {
   person: StaffRosterPerson;
@@ -481,6 +529,10 @@ export function AdminPeopleScreen({ me }: Props) {
   const [restore, setRestore] = useState<PendingRestore | null>(null);
   const [restoring, setRestoring] = useState<boolean>(false);
   const [restoreErr, setRestoreErr] = useState<unknown>(null);
+  // DRF-2833 — the desk sheet, its own trio for the same reason.
+  const [desk, setDesk] = useState<PendingDesk | null>(null);
+  const [linkingDesk, setLinkingDesk] = useState<boolean>(false);
+  const [deskErr, setDeskErr] = useState<unknown>(null);
 
   useEffect(() => {
     setBackButton(true);
@@ -607,11 +659,34 @@ export function AdminPeopleScreen({ me }: Props) {
     setRestoreErr(null);
   }, []);
 
+  const confirmDesk = useCallback(async () => {
+    if (!desk) return;
+    setLinkingDesk(true);
+    setDeskErr(null);
+    try {
+      const res = await linkReceptionistDesk({ bot_user_id: desk.botUserId });
+      // The sheet stays open with the answer: nothing on the row changes
+      // (the roster does not carry the catalog half), so closing silently
+      // would leave the owner unsure anything happened.
+      setDesk({ ...desk, created: res.created });
+    } catch (e) {
+      setDeskErr(e);
+    } finally {
+      setLinkingDesk(false);
+    }
+  }, [desk]);
+
+  const closeDesk = useCallback(() => {
+    setDesk(null);
+    setDeskErr(null);
+  }, []);
+
   // The endpoint is owner-only and answers 403 to everyone else. The
   // check here is so an admin who deep-links sees a sentence instead of
   // an error card; the backend 403 is the actual gate.
   const roleRefusal = roleErr != null ? accessRefusal(roleErr) : null;
   const restoreRefusal = restoreErr != null ? accessRefusal(restoreErr) : null;
+  const deskRefusalText = deskErr != null ? deskRefusal(deskErr) : null;
 
   if (!me.is_owner) {
     return (
@@ -707,6 +782,8 @@ export function AdminPeopleScreen({ me }: Props) {
               : null;
             // Owner only, like the role change: restoring is granting.
             const restoreRoles = mayChangeRole(me) ? restoreTarget(p, me) : null;
+            // Owner only, like the role change: assigning the desk is granting.
+            const deskId = mayChangeRole(me) ? deskTarget(p, me) : null;
             return (
               <li key={p.id}>
                 {/*
@@ -781,7 +858,7 @@ export function AdminPeopleScreen({ me }: Props) {
                         </span>
                       )}
 
-                    {(target || roleTarget || restoreRoles) && (
+                    {(target || roleTarget || restoreRoles || deskId) && (
                       <span
                         style={{
                           display: "flex",
@@ -806,6 +883,19 @@ export function AdminPeopleScreen({ me }: Props) {
                             }}
                           >
                             Сменить роль
+                          </button>
+                        )}
+                        {deskId && (
+                          <button
+                            type="button"
+                            className="btn-secondary"
+                            aria-label={`Открыть стойку записи: ${p.name}`}
+                            onClick={() => {
+                              setDeskErr(null);
+                              setDesk({ person: p, botUserId: deskId, created: null });
+                            }}
+                          >
+                            Открыть стойку записи
                           </button>
                         )}
                         {restoreRoles && (
@@ -1137,6 +1227,90 @@ export function AdminPeopleScreen({ me }: Props) {
                 {changingRole ? "Меняем…" : "Сменить роль"}
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/*
+        DRF-2833. Names the person and what opens for her — the booking
+        cycle, nothing wider (no availability, roles, invites, settings).
+        After the answer the sheet says what happened and offers only
+        «Готово»: a second send would change nothing.
+      */}
+      {desk && (
+        <div
+          className="admin-sheet-backdrop"
+          role="dialog"
+          aria-modal="true"
+          aria-label={`Открыть стойку записи: ${desk.person.name}`}
+          onClick={() => !linkingDesk && closeDesk()}
+        >
+          <div
+            className="admin-sheet"
+            onClick={(e) => e.stopPropagation()}
+            style={{ textAlign: "start" }}
+          >
+            <div className="admin-sheet__title" style={{ textAlign: "start" }}>
+              {`Открыть стойку записи: ${desk.person.name}`}
+            </div>
+            {desk.created === null ? (
+              <p style={{ margin: "var(--s-2) 0" }}>
+                {`${desk.person.name} сможет записывать клиентов, переносить и отменять визиты салона. Графики, роли и настройки останутся закрыты.`}
+              </p>
+            ) : (
+              <div className="callout" role="status" style={{ margin: "var(--s-2) 0" }}>
+                {desk.created
+                  ? "Стойка записи открыта."
+                  : "Стойка записи уже была открыта."}
+              </div>
+            )}
+
+            {deskRefusalText != null && (
+              <div style={{ margin: "var(--s-3) 0" }}>
+                <p style={{ margin: "0 0 var(--s-2)" }}>Стойка не открыта.</p>
+                <div className="callout callout--danger" role="alert">
+                  {deskRefusalText}
+                </div>
+              </div>
+            )}
+            {deskErr != null && deskRefusalText == null && (
+              <div style={{ margin: "var(--s-3) 0" }}>
+                <p style={{ margin: "0 0 var(--s-2)" }}>Стойка не открыта.</p>
+                <StateError err={deskErr} onRetry={() => void confirmDesk()} />
+              </div>
+            )}
+
+            {desk.created === null ? (
+              <div style={{ display: "flex", gap: "var(--s-2)" }}>
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  disabled={linkingDesk}
+                  onClick={closeDesk}
+                  style={{ flex: 1 }}
+                >
+                  Отмена
+                </button>
+                <button
+                  type="button"
+                  className="cta-bar__button"
+                  disabled={linkingDesk}
+                  onClick={() => void confirmDesk()}
+                  style={{ flex: 1 }}
+                >
+                  {linkingDesk ? "Открываем…" : "Открыть стойку"}
+                </button>
+              </div>
+            ) : (
+              <button
+                type="button"
+                className="cta-bar__button"
+                onClick={closeDesk}
+                style={{ width: "100%" }}
+              >
+                Готово
+              </button>
+            )}
           </div>
         </div>
       )}

@@ -162,12 +162,16 @@ STAFF_INVITE_REVOKED = "staff.invite_revoked"
 # DRF-2085 (OWNER RULING 18.09): the catalog created a fresh salon-admin
 # account + TUR and bound this person's MAX identity to it — written in the
 # same transaction as the TenantStaff admin row. Payload: {surface,
-# actor_label, tenant_id, person_id, ayla_user_id, relationship_id,
+# actor_label, role, tenant_id, person_id, ayla_user_id, relationship_id,
 # correlation_id, idempotency_key, created}. No MAX id, no secret.
+# DRF-2833: ``role`` — ``admin`` or ``receptionist`` (the front desk linked
+# by the owner's action in the Mini App; rows before it carry no ``role``
+# and are all ``admin``).
 STAFF_SALON_ADMIN_LINKED = "staff.salon_admin_linked"
-# The catalog (or the missing credential) refused the link; the admin role
-# was NOT granted. Written after the rollback by the caller. Payload:
-# {surface, actor_label, tenant_id, person_id, reason, correlation_id}.
+# The catalog (or the missing credential) refused the link; the role was
+# NOT granted (admin) or the desk NOT opened (receptionist). Written after
+# the rollback by the caller. Payload: {surface, actor_label, role,
+# tenant_id, person_id, reason, correlation_id}.
 STAFF_SALON_ADMIN_LINK_REFUSED = "staff.salon_admin_link_refused"
 
 # --- Specialist onboarded into a salon (поток A, п. 3) --------------------
