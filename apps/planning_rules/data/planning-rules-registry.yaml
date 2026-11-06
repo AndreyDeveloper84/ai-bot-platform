@@ -1,7 +1,8 @@
 # Ayla Planning Rules Registry — machine-readable носитель планировочных правил
 #
 # Canonical source: ayla-knowledge / 03 AI System/Contracts/planning-rules-registry.yaml
-# Нормативный источник семантики: PLANNING_CONSTRAINTS_CONTRACT_v1.0.md
+# Нормативный источник семантики: PLANNING_CONSTRAINTS_CONTRACT_v1.1.md
+# (v1.0 — история; v1.1 добавляет PLAN_CADENCE по AYLA-DEC-0093, 2026-09-21)
 # (docs/specs/, рабочее дерево Ayla), решение владельца D-1 от 08.09.2026
 # (docs/OPEN_DECISIONS.md §70).
 # Change control: изменение этого файла — через change control ayla-knowledge;
@@ -10,13 +11,16 @@
 # major ДО разбора тела (образец: ai-bot-platform
 # apps/integrations/ayla/recommendation_resolver_client.py, SUPPORTED_SPEC_MAJOR).
 registry: ayla.planning-rules-registry
-registry_version: "0.1"
-compatible_contract_version: "1.0"   # PLANNING_CONSTRAINTS_CONTRACT_v1.0
+registry_version: "1.0"
+compatible_contract_version: "1.1"   # PLANNING_CONSTRAINTS_CONTRACT_v1.1
 status: draft
-updated: 2026-09-08
+updated: 2026-09-21
 
-# Закрытый перечень типов (контракт §3). Четырнадцатый тип не заводится —
+# Закрытый перечень типов (контракт §3). Перечень расширен ВЛАДЕЛЬЦЕМ до 14
+# (PLAN_CADENCE, AYLA-DEC-0093, 2026-09-21); пятнадцатый тип не заводится —
 # рантайм не расширяет перечень по аналогии с v1.1 §14.4.
+# Смена перечня — major реестра: 0.1 → 1.0; потребитель с поддержкой 0.x
+# обязан отвергнуть 1.0 до разбора тела (контракт §9).
 kinds:
   - CAPABILITY_SEMANTICS
   - SERVICE_CAPABILITY_MAPPING
@@ -31,6 +35,7 @@ kinds:
   - INCOMPATIBILITY
   - RECOVERY_WINDOW
   - SAFETY_CONSTRAINT
+  - PLAN_CADENCE
 
 # Закрытый перечень статусов записи (направление владельца 08.09.2026).
 #   KNOWN                    — правило есть, значение и unit заполнены;
@@ -53,6 +58,9 @@ unknown_reasons:
   - POLICY_WITHHELD
 
 # Срез на 08.09.2026: ни один вид не имеет KNOWN-правила в этом реестре.
+# 2026-09-21: KNOWN — только PLAN_CADENCE (7 правил, таблица владельца
+# AYLA-DEC-0089). Все правила о курсах, интервалах и совместимости УСЛУГ
+# (subject_kind canonical_service) остаются UNKNOWN / INTENTIONALLY_UNSUPPORTED.
 # UNKNOWN здесь — первоклассный результат замера, а не пропущенная работа
 # (инвентарь PLANNING_CONSTRAINTS_INVENTORY.md, перепроверено 08.09).
 rules:
@@ -193,15 +201,17 @@ rules:
       subject_ids: []
       conditions: []
     provenance:
-      source: "ayla-knowledge:05 Architecture/ADR-0012 Dynamic User Model.md:N-04"
-      version: "0.2"
+      source: "ayla-knowledge:00 Foundation/Canon Governance/OWNER_DECISION_REGISTER.md:AYLA-DEC-0093"
+      version: "0.4"
     note: >-
       Тип пуст по принятому решению, а не по забывчивости. ADR-0012 N-04
       дословно: «Запрещено: предложить курс процедур (существенная
       рекомендация) только потому, что из поведения выведено…». Владелец
       08.09.2026: «совместимость и повторяемость — не пробел, а принятое
-      решение НЕ делать». Источник — draft (version 0.2), это зафиксировано
-      честно.
+      решение НЕ делать». С 2026-09-21 запрет N-04 утверждён владельцем как
+      решение (AYLA-DEC-0093) — основание больше не draft ADR-0012 v0.2.
+      PLAN_CADENCE (ниже) этот тип НЕ заполняет: регулярность привычки в
+      плане — не курс процедур.
 
   - rule_id: PR-SEQUENCE-0001
     kind: SEQUENCE
@@ -323,3 +333,219 @@ rules:
       Ayla) и константы apps/orchestrator/safety/* (ai-bot-platform).
       Канон §15.7 назначает владельцем ayla-knowledge — перенос сюда ещё
       не выполнен (инвентарь §T13).
+
+  - rule_id: PR-PLAN_CADENCE-BODY_SHAPE
+    kind: PLAN_CADENCE
+    status: KNOWN
+    value:
+      actions:
+        - action_type: book_service
+          cadence: per_week
+          target_count: 1
+        - action_type: log_food
+          cadence: per_week
+          target_count: 5
+        - action_type: log_water
+          cadence: per_day
+          target_count: 6
+    unit: plan_action_count_per_cadence
+    applicability:
+      scope: GENERAL
+      subject_kind: plan_template
+      subject_ids: ["body_shape"]
+      conditions: []
+    provenance:
+      source: "ayla-knowledge:00 Foundation/Canon Governance/OWNER_DECISION_REGISTER.md:AYLA-DEC-0089"
+      version: "0.4"
+    note: >-
+      PLAN_CADENCE — только подтверждённая человеком организационная регулярность
+      действия в его плане (AYLA-DEC-0093). Не доказывает медицинскую или
+      косметологическую пользу, совместимость процедур, минимальный или
+      максимальный интервал и обязательное число процедур; не применяется к
+      canonical_service как курс и не приводится как такое основание.
+      Шаблон — предложение; значение действует только после подтверждения
+      человеком. Runtime-носитель — каталог wellness.PlanTemplate
+      (beautygo_backend wellness/plan_lite_templates.py, сид = эта таблица).
+
+  - rule_id: PR-PLAN_CADENCE-EVENT
+    kind: PLAN_CADENCE
+    status: KNOWN
+    value:
+      actions:
+        - action_type: book_service
+          cadence: per_week
+          target_count: 1
+        - action_type: log_water
+          cadence: per_day
+          target_count: 5
+    unit: plan_action_count_per_cadence
+    applicability:
+      scope: GENERAL
+      subject_kind: plan_template
+      subject_ids: ["event"]
+      conditions: []
+    provenance:
+      source: "ayla-knowledge:00 Foundation/Canon Governance/OWNER_DECISION_REGISTER.md:AYLA-DEC-0089"
+      version: "0.4"
+    note: >-
+      PLAN_CADENCE — только подтверждённая человеком организационная регулярность
+      действия в его плане (AYLA-DEC-0093). Не доказывает медицинскую или
+      косметологическую пользу, совместимость процедур, минимальный или
+      максимальный интервал и обязательное число процедур; не применяется к
+      canonical_service как курс и не приводится как такое основание.
+      Шаблон — предложение; значение действует только после подтверждения
+      человеком. Runtime-носитель — каталог wellness.PlanTemplate
+      (beautygo_backend wellness/plan_lite_templates.py, сид = эта таблица).
+
+  - rule_id: PR-PLAN_CADENCE-NEW_LOOK
+    kind: PLAN_CADENCE
+    status: KNOWN
+    value:
+      actions:
+        - action_type: book_service
+          cadence: per_week
+          target_count: 1
+    unit: plan_action_count_per_cadence
+    applicability:
+      scope: GENERAL
+      subject_kind: plan_template
+      subject_ids: ["new_look"]
+      conditions: []
+    provenance:
+      source: "ayla-knowledge:00 Foundation/Canon Governance/OWNER_DECISION_REGISTER.md:AYLA-DEC-0089"
+      version: "0.4"
+    note: >-
+      PLAN_CADENCE — только подтверждённая человеком организационная регулярность
+      действия в его плане (AYLA-DEC-0093). Не доказывает медицинскую или
+      косметологическую пользу, совместимость процедур, минимальный или
+      максимальный интервал и обязательное число процедур; не применяется к
+      canonical_service как курс и не приводится как такое основание.
+      Шаблон — предложение; значение действует только после подтверждения
+      человеком. Runtime-носитель — каталог wellness.PlanTemplate
+      (beautygo_backend wellness/plan_lite_templates.py, сид = эта таблица).
+
+  - rule_id: PR-PLAN_CADENCE-RECHARGE
+    kind: PLAN_CADENCE
+    status: KNOWN
+    value:
+      actions:
+        - action_type: book_service
+          cadence: per_week
+          target_count: 1
+        - action_type: log_food
+          cadence: per_week
+          target_count: 3
+        - action_type: log_water
+          cadence: per_day
+          target_count: 5
+    unit: plan_action_count_per_cadence
+    applicability:
+      scope: GENERAL
+      subject_kind: plan_template
+      subject_ids: ["recharge"]
+      conditions: []
+    provenance:
+      source: "ayla-knowledge:00 Foundation/Canon Governance/OWNER_DECISION_REGISTER.md:AYLA-DEC-0089"
+      version: "0.4"
+    note: >-
+      PLAN_CADENCE — только подтверждённая человеком организационная регулярность
+      действия в его плане (AYLA-DEC-0093). Не доказывает медицинскую или
+      косметологическую пользу, совместимость процедур, минимальный или
+      максимальный интервал и обязательное число процедур; не применяется к
+      canonical_service как курс и не приводится как такое основание.
+      Шаблон — предложение; значение действует только после подтверждения
+      человеком. Runtime-носитель — каталог wellness.PlanTemplate
+      (beautygo_backend wellness/plan_lite_templates.py, сид = эта таблица).
+
+  - rule_id: PR-PLAN_CADENCE-RELAX
+    kind: PLAN_CADENCE
+    status: KNOWN
+    value:
+      actions:
+        - action_type: book_service
+          cadence: per_week
+          target_count: 1
+        - action_type: log_water
+          cadence: per_day
+          target_count: 4
+    unit: plan_action_count_per_cadence
+    applicability:
+      scope: GENERAL
+      subject_kind: plan_template
+      subject_ids: ["relax"]
+      conditions: []
+    provenance:
+      source: "ayla-knowledge:00 Foundation/Canon Governance/OWNER_DECISION_REGISTER.md:AYLA-DEC-0089"
+      version: "0.4"
+    note: >-
+      PLAN_CADENCE — только подтверждённая человеком организационная регулярность
+      действия в его плане (AYLA-DEC-0093). Не доказывает медицинскую или
+      косметологическую пользу, совместимость процедур, минимальный или
+      максимальный интервал и обязательное число процедур; не применяется к
+      canonical_service как курс и не приводится как такое основание.
+      Шаблон — предложение; значение действует только после подтверждения
+      человеком. Runtime-носитель — каталог wellness.PlanTemplate
+      (beautygo_backend wellness/plan_lite_templates.py, сид = эта таблица).
+
+  - rule_id: PR-PLAN_CADENCE-SELF_CARE
+    kind: PLAN_CADENCE
+    status: KNOWN
+    value:
+      actions:
+        - action_type: book_service
+          cadence: per_2_weeks
+          target_count: 1
+        - action_type: log_food
+          cadence: per_week
+          target_count: 3
+        - action_type: log_water
+          cadence: per_day
+          target_count: 5
+    unit: plan_action_count_per_cadence
+    applicability:
+      scope: GENERAL
+      subject_kind: plan_template
+      subject_ids: ["self_care"]
+      conditions: []
+    provenance:
+      source: "ayla-knowledge:00 Foundation/Canon Governance/OWNER_DECISION_REGISTER.md:AYLA-DEC-0089"
+      version: "0.4"
+    note: >-
+      PLAN_CADENCE — только подтверждённая человеком организационная регулярность
+      действия в его плане (AYLA-DEC-0093). Не доказывает медицинскую или
+      косметологическую пользу, совместимость процедур, минимальный или
+      максимальный интервал и обязательное число процедур; не применяется к
+      canonical_service как курс и не приводится как такое основание.
+      Шаблон — предложение; значение действует только после подтверждения
+      человеком. Runtime-носитель — каталог wellness.PlanTemplate
+      (beautygo_backend wellness/plan_lite_templates.py, сид = эта таблица).
+
+  - rule_id: PR-PLAN_CADENCE-SKIN_CARE
+    kind: PLAN_CADENCE
+    status: KNOWN
+    value:
+      actions:
+        - action_type: book_service
+          cadence: per_2_weeks
+          target_count: 1
+        - action_type: log_water
+          cadence: per_day
+          target_count: 6
+    unit: plan_action_count_per_cadence
+    applicability:
+      scope: GENERAL
+      subject_kind: plan_template
+      subject_ids: ["skin_care"]
+      conditions: []
+    provenance:
+      source: "ayla-knowledge:00 Foundation/Canon Governance/OWNER_DECISION_REGISTER.md:AYLA-DEC-0089"
+      version: "0.4"
+    note: >-
+      PLAN_CADENCE — только подтверждённая человеком организационная регулярность
+      действия в его плане (AYLA-DEC-0093). Не доказывает медицинскую или
+      косметологическую пользу, совместимость процедур, минимальный или
+      максимальный интервал и обязательное число процедур; не применяется к
+      canonical_service как курс и не приводится как такое основание.
+      Шаблон — предложение; значение действует только после подтверждения
+      человеком. Runtime-носитель — каталог wellness.PlanTemplate
+      (beautygo_backend wellness/plan_lite_templates.py, сид = эта таблица).
