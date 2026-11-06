@@ -38,6 +38,17 @@ ruling п.1 — operator-only capability, не пользовательский 
   вызывающим, через :func:`recording_refusals` (строка внутри
   откатившейся транзакции не пережила бы отказ).
 * **Секрет** читает только HTTP-клиент; сюда и в лог он не попадает.
+
+**DRF-2833 (B3) — каталожная половина ``receptionist``.** Решение владельца
+07.10 (лист решений п.22, вариант B): ресепшна в каталог проводит
+отдельное действие в Mini App — :func:`ensure_catalog_salon_receptionist`,
+не код приглашения (п.1 ruling'а не задет). Назначающий едет в каталог
+своей живой MAX-личностью (``assigned_by_external_user_id``), и каталог сам
+проверяет, что он активный admin ЭТОГО салона (``assigner_not_admin``):
+owner в боте ≠ admin в каталоге. Ключ повтора ресепшна — свой
+(:func:`idempotency_key_for` с ``role``): общий ключ с admin ответил бы
+``idempotency_key_reused`` человеку, которому выдают обе роли. Ключ
+``admin`` не изменился — уже заведённые связи отвечают ``replayed``.
 """
 
 from __future__ import annotations
@@ -78,6 +89,11 @@ HINTS: dict[str, str] = {
         "разрешает оператор каталога вручную"
     ),
     "idempotency_key_reused": "ключ повтора занят другим запросом — написать в техподдержку",
+    # DRF-2833: назначающий ресепшна не admin этого салона в каталоге.
+    "assigner_not_admin": (
+        "администратору салона нужна связь с каталогом — сначала оператор "
+        "связывает администратора с Ayla, затем повторить"
+    ),
     "bind_refused": "каталог отказал в связывании — написать в техподдержку с correlation_id",
     "readback_failed": (
         "каталог создал учётку, но не подтвердил её на салонной поверхности — "
@@ -101,9 +117,11 @@ class CatalogAdminLinkRefused(InviteError):
         tenant: Any,
         bot_user: Any,
         actor_label: str,
+        role: str = "admin",
     ) -> None:
         super().__init__(reason)
         self.reason = reason
+        self.role = role
         self.correlation_id = correlation_id
         # Предмет отказа едет с исключением: аудит пишется вызывающим ПОСЛЕ
         # отката его транзакции (см. recording_refusals), где ни tenant, ни
@@ -121,6 +139,12 @@ class CatalogAdminLinkRefused(InviteError):
         return HINTS.get(self.reason, "написать в техподдержку с correlation_id")
 
     def operator_text(self) -> str:
+        if self.role == "receptionist":
+            return (
+                f"Каталог не подтвердил ресепшна салона {self.tenant_slug}: "
+                f"{self.reason} — {self.hint}. Стойка записи не открыта "
+                f"(correlation_id {self.correlation_id})."
+            )
         return (
             f"Каталог не подтвердил администратора салона {self.tenant_slug}: "
             f"{self.reason} — {self.hint}. Роль в боте не выдана "
@@ -137,10 +161,11 @@ class CatalogAdminLinkOutcome:
     idempotency_key: str
 
 
-def idempotency_key_for(tenant_id: Any, external_user_id: str) -> str:
-    return str(
-        uuid.uuid5(_IDEMPOTENCY_NAMESPACE, f"salon-admin-link:{tenant_id}:{external_user_id}")
-    )
+def idempotency_key_for(tenant_id: Any, external_user_id: str, role: str = "admin") -> str:
+    # Строка ``admin`` — прежняя байт в байт: по ней каталог узнаёт уже
+    # заведённые связи (DRF-2085). Ресепшн — своё пространство (DRF-2833).
+    prefix = "salon-admin-link" if role == "admin" else f"salon-{role}-link"
+    return str(uuid.uuid5(_IDEMPOTENCY_NAMESPACE, f"{prefix}:{tenant_id}:{external_user_id}"))
 
 
 def ensure_catalog_salon_admin(
@@ -155,6 +180,50 @@ def ensure_catalog_salon_admin(
     Идемпотентно по (салон, личность). Отказ — :class:`CatalogAdminLinkRefused`
     с причиной по имени; ничего не создано ни там, ни здесь.
     """
+    return _link(
+        tenant=tenant,
+        bot_user=bot_user,
+        actor_label=actor_label,
+        http_client=http_client,
+        role="admin",
+        assigned_by=None,
+    )
+
+
+def ensure_catalog_salon_receptionist(
+    *,
+    tenant: Any,
+    bot_user: Any,
+    assigned_by: Any,
+    actor_label: str,
+    http_client: Any | None = None,
+) -> CatalogAdminLinkOutcome:
+    """Свежая учётка ресепшна в каталоге — стойка записи этого салона (DRF-2833).
+
+    ``assigned_by`` — ``BotUser`` того, кто назначает, из живого init-data;
+    его MAX-личность каталог проверяет как admin ЭТОГО салона. Идемпотентно
+    по (салон, личность) в своём пространстве ключей. Отказ —
+    :class:`CatalogAdminLinkRefused` с ``role="receptionist"``.
+    """
+    return _link(
+        tenant=tenant,
+        bot_user=bot_user,
+        actor_label=actor_label,
+        http_client=http_client,
+        role="receptionist",
+        assigned_by=assigned_by,
+    )
+
+
+def _link(
+    *,
+    tenant: Any,
+    bot_user: Any,
+    actor_label: str,
+    http_client: Any | None,
+    role: str,
+    assigned_by: Any | None,
+) -> CatalogAdminLinkOutcome:
     from apps.catalog.services.http_client import (
         CatalogAdminLinkRefused as _HttpRefused,
         CatalogAdminLinkTokenMissing,
@@ -166,14 +235,16 @@ def ensure_catalog_salon_admin(
 
     external_user_id = external_user_id_for(bot_user)
     correlation_id = uuid.uuid4().hex
-    idempotency_key = idempotency_key_for(tenant.id, external_user_id)
+    idempotency_key = idempotency_key_for(tenant.id, external_user_id, role)
 
     def _refuse(reason: str) -> CatalogAdminLinkRefused:
         # Внешний id — идентификатор канала, в лог не пишется; зацепки —
         # pk человека, slug и correlation_id (он же в логе каталога).
         logger.warning(
-            "identity.salon_admin_link.refused reason=%s tenant=%s person=%s correlation_id=%s",
+            "identity.salon_admin_link.refused reason=%s role=%s tenant=%s person=%s "
+            "correlation_id=%s",
             reason,
+            role,
             tenant.slug,
             bot_user.pk,
             correlation_id,
@@ -184,7 +255,16 @@ def ensure_catalog_salon_admin(
             tenant=tenant,
             bot_user=bot_user,
             actor_label=actor_label,
+            role=role,
         )
+
+    extra: dict[str, str] = {}
+    if role != "admin":
+        # Без назначающего каталог ответил бы assigner_not_admin; пустую
+        # личность не отправляем — отказ здесь, по тому же имени.
+        if assigned_by is None:
+            raise _refuse("assigner_not_admin")
+        extra = {"role": role, "assigned_by_external_user_id": external_user_id_for(assigned_by)}
 
     try:
         with http_client if http_client is not None else CatalogHttpClient() as http:
@@ -194,6 +274,7 @@ def ensure_catalog_salon_admin(
                 actor=actor_label,
                 correlation_id=correlation_id,
                 idempotency_key=idempotency_key,
+                **extra,
             )
     except CatalogAdminLinkTokenMissing:
         raise _refuse("token_missing") from None
@@ -205,8 +286,10 @@ def ensure_catalog_salon_admin(
         raise _refuse("transport_error") from exc
 
     logger.info(
-        "identity.salon_admin_link.%s tenant=%s person=%s ayla_user_id=%s correlation_id=%s",
+        "identity.salon_admin_link.%s role=%s tenant=%s person=%s ayla_user_id=%s "
+        "correlation_id=%s",
         "created" if dto.created else "replayed",
+        role,
         tenant.slug,
         bot_user.pk,
         dto.ayla_user_id,
@@ -222,7 +305,12 @@ def ensure_catalog_salon_admin(
 
 
 def audit_linked(
-    outcome: CatalogAdminLinkOutcome, *, tenant: Any, bot_user: Any, actor_label: str
+    outcome: CatalogAdminLinkOutcome,
+    *,
+    tenant: Any,
+    bot_user: Any,
+    actor_label: str,
+    role: str = "admin",
 ) -> None:
     """Строка аудита успеха — вызывать ВНУТРИ транзакции, пишущей TenantStaff."""
     from apps.audit.services import write_audit
@@ -237,6 +325,7 @@ def audit_linked(
             payload={
                 "surface": actor_label.split(":", 1)[0],
                 "actor_label": actor_label,
+                "role": role,
                 "tenant_id": str(tenant.id),
                 "person_id": str(bot_user.pk),
                 "ayla_user_id": str(outcome.ayla_user_id),
@@ -271,6 +360,7 @@ def recording_refusals() -> Iterator[None]:
                 payload={
                     "surface": exc.actor_label.split(":", 1)[0],
                     "actor_label": exc.actor_label,
+                    "role": exc.role,
                     "tenant_id": str(exc.tenant.id),
                     "person_id": str(exc.bot_user.pk),
                     "reason": exc.reason,
@@ -286,6 +376,7 @@ __all__ = [
     "CatalogAdminLinkRefused",
     "audit_linked",
     "ensure_catalog_salon_admin",
+    "ensure_catalog_salon_receptionist",
     "idempotency_key_for",
     "recording_refusals",
 ]

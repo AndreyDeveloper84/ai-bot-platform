@@ -2196,6 +2196,28 @@ export const restoreStaffAccess = (
     body: JSON.stringify(payload),
   });
 
+// --- /api/v1/admin/staff/receptionist/link/ ------------------------------
+//
+// DRF-2833 (B3, the owner's decision 07.10, variant B). Opens the booking
+// desk in the catalog for a person who already holds the receptionist role
+// here — the bot role came from a code or «Сменить роль», the catalog half
+// did not. OWNER ONLY. The catalog checks the owner again (an admin of
+// this salon in the catalog); its refusal is `catalog_admin_link_refused`
+// with `details.hint`. `created: false` — the desk was already open.
+
+export interface ReceptionistLinkResponse {
+  linked: true;
+  created: boolean;
+}
+
+export const linkReceptionistDesk = (payload: {
+  bot_user_id: string;
+}): Promise<ReceptionistLinkResponse> =>
+  request("/api/v1/admin/staff/receptionist/link/", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+
 // --- /api/v1/admin/staff/revoke/ -----------------------------------------
 //
 // The other half of `issueStaffInvite`. The endpoint has existed since
