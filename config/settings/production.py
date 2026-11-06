@@ -17,9 +17,38 @@ import os
 from django.core.exceptions import ImproperlyConfigured
 
 from .base import *  # noqa: F401,F403
-from .base import booking_via_ayla_rest_from, payments_test_mode_from
+from .base import (
+    booking_via_ayla_rest_from,
+    dev_bypass_enabled_from,
+    payments_test_mode_from,
+    secret_key_or_refuse,
+)
 
 DEBUG = False
+
+# Mini App dev-bypass is DEAD here, and an environment that says otherwise is
+# a misconfiguration worth a refused boot, not a silent override: the bypass
+# lets a caller pick any BotUser + tenant by header, skipping init-data HMAC.
+# (It also needs DEBUG=True, which is False above — the refusal is the
+# second lock, so that one wrong line in an env file is noticed.)
+if dev_bypass_enabled_from(os.environ.get("MINIAPP_DEV_BYPASS_ENABLED")):
+    raise ImproperlyConfigured(
+        "MINIAPP_DEV_BYPASS_ENABLED must not be enabled in production: it lets a caller "
+        "skip Mini App init-data verification by header. Remove it from the environment."
+    )
+MINIAPP_DEV_BYPASS_ENABLED = False
+
+
+# SECRET_KEY — the one every other secret rests on (sessions, CSRF, the
+# master session signer, the HMAC of every encrypted field per ADR-0006).
+# ``base.py`` falls back to a scaffold default that is public in this
+# repository; a production worker that booted on it, or on the
+# `.env.example` line, or on a `django-insecure-...` startproject key,
+# would sign with a key anyone can read. Refused at import like the
+# service tokens below. On a server with data the value is never rotated
+# (DRF-2555) — this guard only refuses the known-bad values, it does not
+# ask for a new one.
+SECRET_KEY = secret_key_or_refuse(os.environ.get("DJANGO_SECRET_KEY"), contour="production")
 
 
 # S3B (#1044) — Catalog sync now pulls Ayla's internal Bearer catalog

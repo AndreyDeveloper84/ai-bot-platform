@@ -52,10 +52,54 @@ from config.security import (
 
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 
-SECRET_KEY = os.environ.get(
-    "DJANGO_SECRET_KEY",
-    "django-insecure-sprint0-scaffold-only-replace-before-staging",
+# The scaffold default exists for local dev and CI only. ``production.py``
+# and ``staging.py`` call :func:`secret_key_or_refuse` so a deployed contour
+# cannot boot on it — see that function for what is refused.
+_SCAFFOLD_SECRET_KEY = (
+    "django-insecure-sprint0-scaffold-only-replace-before-staging"  # pragma: allowlist secret
 )
+
+SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY", _SCAFFOLD_SECRET_KEY)
+
+# Values that are a placeholder by construction: the committed scaffold
+# default above, the `.env.example` line, and anything Django's own
+# ``startproject`` marks as insecure. ``django-insecure-`` is a prefix check
+# so a copy-pasted startproject key is refused as well.
+_PLACEHOLDER_SECRET_KEYS = frozenset({_SCAFFOLD_SECRET_KEY, "replace-me-in-staging-and-prod"})
+_INSECURE_SECRET_KEY_PREFIX = "django-insecure-"  # pragma: allowlist secret
+
+
+def secret_key_or_refuse(raw: str | None, *, contour: str) -> str:
+    """``DJANGO_SECRET_KEY`` for a deployed contour, or ``ImproperlyConfigured``.
+
+    Refused: unset, empty / whitespace, a known placeholder, or a value
+    starting with ``django-insecure-``. ``SECRET_KEY`` signs sessions, CSRF
+    tokens, the master session signer and the HMAC of every encrypted field
+    (ADR-0006), so a deploy that silently fell back to the committed scaffold
+    default would be signing with a key that is public in this repository.
+    Same form as the service-token guards in ``production.py``:
+    ``ImproperlyConfigured`` at import, not ``assert`` (``python -O`` strips
+    asserts).
+
+    ``contour`` is only for the message («production» / «staging»).
+    """
+    from django.core.exceptions import ImproperlyConfigured
+
+    value = (raw or "").strip()
+    if (
+        not value
+        or value in _PLACEHOLDER_SECRET_KEYS
+        or value.startswith(_INSECURE_SECRET_KEY_PREFIX)
+    ):
+        raise ImproperlyConfigured(
+            f"DJANGO_SECRET_KEY is required in {contour} and must be a real key: it is "
+            "unset, empty, the committed placeholder, or starts with 'django-insecure-'. "
+            "Generate one with python -c 'import secrets; print(secrets.token_urlsafe(64))' "
+            "— on a server that already has data keep the CURRENT value (DRF-2555: "
+            "encrypted fields are signed with it and a new key makes them unreadable)."
+        )
+    return value
+
 
 # DRF-2555 — ключ шифрования полей (`encrypt(...)`; сегодня одно поле — MemoryEntry.content).
 #
@@ -78,6 +122,21 @@ SECRET_KEY = os.environ.get(
 CRYPTOGRAPHY_KEY = os.environ.get("DJANGO_CRYPTOGRAPHY_KEY") or None
 
 DEBUG = os.environ.get("DJANGO_DEBUG", "False").lower() == "true"
+
+
+def dev_bypass_enabled_from(raw: str | None) -> bool:
+    """``"true"/"1"`` → True; anything else (including unset) → False."""
+    return (raw or "").strip().lower() in {"true", "1"}
+
+
+# Mini App dev-bypass (apps/miniapp_api/dev_bypass.py) — the header-opt-in
+# path that skips MAX init-data HMAC for local browser dev. It used to be
+# gated on ``DEBUG`` alone, so any contour that ended up with DEBUG=True
+# (DRF-1447 measured one on staging) also had HMAC skippable by header.
+# Now BOTH are required: ``DEBUG`` and this explicit flag. Default False;
+# ``production.py`` / ``staging.py`` pin it to False and refuse to boot if
+# the environment tries to enable it.
+MINIAPP_DEV_BYPASS_ENABLED = dev_bypass_enabled_from(os.environ.get("MINIAPP_DEV_BYPASS_ENABLED"))
 
 ALLOWED_HOSTS: list[str] = os.environ.get("DJANGO_ALLOWED_HOSTS", "").split(",")
 ALLOWED_HOSTS = [h.strip() for h in ALLOWED_HOSTS if h.strip()]
@@ -1161,6 +1220,17 @@ YCLIENTS_BASE_URL = os.environ.get("YCLIENTS_BASE_URL", "https://api.yclients.co
 # Empty default keeps the receiver dormant: payloads get an audit row
 # + 200 (still no retries from YClients) until ops configures the slug.
 YCLIENTS_WEBHOOK_TENANT_SLUG = os.environ.get("YCLIENTS_WEBHOOK_TENANT_SLUG", "")
+
+# Shared secret for the YClients admin webhook (``POST /api/v1/yclients/webhook/``).
+# YClients' public API does not sign webhooks, so the receiver was reachable by
+# anyone who knew the URL: an unauthenticated POST could write BookingRequest /
+# BookingReminder rows and the response body said whether a phone matched a
+# BotUser. The value is sent by YClients (webhook URL settings → custom header)
+# as ``X-Webhook-Secret`` and compared with ``hmac.compare_digest``.
+# Empty default FAILS CLOSED: the receiver answers 404 to everything and logs a
+# warning once — not required in production, because the pilot runs with
+# ``BOOKING_VIA_AYLA_REST=true`` where this receiver stands down anyway.
+YCLIENTS_WEBHOOK_SECRET = os.environ.get("YCLIENTS_WEBHOOK_SECRET", "")
 
 # #428 (Bucket 6) — YooKassa settings RETIRED. Per ADR-0009 §Domain
 # ownership matrix, YooKassa payment lifecycle (create, capture,

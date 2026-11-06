@@ -199,7 +199,7 @@ class TestIdentityBlock:
 
 @pytest.mark.django_db
 class TestDevBypassIsNamedAsSuch:
-    @override_settings(DEBUG=True)
+    @override_settings(DEBUG=True, MINIAPP_DEV_BYPASS_ENABLED=True)
     def test_channel_is_dev_bypass_not_identified(
         self, client: Client, tenant: Tenant, bot_user: BotUser, stub_resolve
     ) -> None:
