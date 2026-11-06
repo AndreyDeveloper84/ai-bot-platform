@@ -62,7 +62,7 @@ jobs:
   # стартует, и прогон читается `skipped`: «ничего не пытались», своим знаком.
   preflight:
     name: preflight — is there a deploy target
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 2
     if: >-
       github.event_name == 'workflow_dispatch' ||
@@ -87,7 +87,7 @@ jobs:
   # прекращаются молча, под зелёным.
   not-configured:
     name: deploy target NOT configured — nothing was deployed
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 2
     needs: preflight
     if: needs.preflight.outputs.ready != 'true'
@@ -98,7 +98,7 @@ jobs:
 
   deploy:
     name: deploy-dev
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # 15 → 25 (DRF-2574, 28.09): шаги до отправки Mini App съедают 2–3 мин
     # (прогон 13:14:50 → отправка 13:17), отправка без карты ~1,1 МБ при
     # ~4,5 КБ/с — ≈4 мин, но скорость канала переменная. Зависание держит

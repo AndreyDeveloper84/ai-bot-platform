@@ -115,7 +115,7 @@ jobs:
   # ---------------------------------------------------------------------
   changes:
     name: change set (docs-only or code)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 2
     outputs:
       code: ${{ steps.detect.outputs.code }}
@@ -251,7 +251,7 @@ jobs:
   # The aggregate `test` below refuses a docs-only PR unless this job passed.
   secret-scan:
     name: secret scan (detect-secrets)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: changes
     # 3m37s measured (above). 15 is ~4x: enough to absorb an apt/pip
     # stall, small enough that a hang is cheap.
@@ -277,7 +277,7 @@ jobs:
       # WHY FIRST IN THE JOB: the same argument that keeps the "eventbus
       # booking lifecycle tests" step below as its own fast-fail gate — a
       # cheap gate must not sit behind "pytest apps/ (full suite)"
-      # (~30 min). Measured on ubuntu-latest: the three steps below add
+      # (~30 min). Measured on ubuntu-latest (then 24.04): the three steps below add
       # ~2 min to a green run (the scan itself is ~1m45s over ~1800
       # tracked files), and turn a leaked-credential run red at ~2 min
       # instead of ~25. That ~2 min is a real, recurring cost on every
@@ -361,7 +361,7 @@ jobs:
   # ---------------------------------------------------------------------
   checks:
     name: lint + guards + cross-cutting tests + mypy
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: changes
     if: needs.changes.outputs.code == 'true'
     # Measured parts (above): 22s lint+guards, 4s smoke, 3m20s tests/, 2s
@@ -962,7 +962,7 @@ jobs:
   # ---------------------------------------------------------------------
   apps-shard:
     name: apps shard ${{ matrix.shard.id }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: changes
     if: needs.changes.outputs.code == 'true'
     # ~8 min estimated (above), against ~29 min for the unsharded step.
@@ -1290,7 +1290,7 @@ jobs:
       # seen was a Windows-clock created_at tie in one PII test, not
       # reproducible on Linux timing).
       #
-      # `-n 4`, not `-n auto`: ubuntu-latest is 4 vCPU today, and
+      # `-n 4`, not `-n auto`: ubuntu-24.04 is 4 vCPU, and
       # `auto` would silently change the run the day GitHub changes
       # the runner — the measurement above is pinned to 4.
       # `--dist load`: any idle worker takes the next test; per-worker
@@ -1440,7 +1440,7 @@ jobs:
   # ---------------------------------------------------------------------
   test:
     name: pytest + ruff + mypy
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: [changes, secret-scan, checks, apps-shard]
     if: always()
     # Downloads a handful of small XML files and adds up integers.
@@ -1659,7 +1659,7 @@ jobs:
     # выше), и переименование сделало бы требуемую проверку несуществующей, то
     # есть тихо отключило бы её для всех PR. Состав шагов ниже.
     name: miniapp (typecheck + vitest)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # Замерено 24.09 на этом раннере: весь job ~2 мин 35 с — npm ci, eslint,
     # tsc, **2068 узлов в 208 файлах** vitest, vite build и загрузка артефакта.
     # Прежняя запись («259 vitest tests ~40s») устарела в восемь раз по числу

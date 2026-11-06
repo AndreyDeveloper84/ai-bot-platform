@@ -136,7 +136,7 @@ concurrency:
 jobs:
   drift:
     name: served bundle matches sources
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     # A deploy that did not happen must not produce a red guard. `deploy-dev`
     # ends in exactly three ways and only one of them published anything:
