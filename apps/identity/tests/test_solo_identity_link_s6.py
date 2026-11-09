@@ -207,3 +207,78 @@ class TestOperatorRejectsWithATaxonomyAndASafeMessage:
         assert "поддержк" in low
         for word in ("мошен", "злоупотреб", "не мастер", "дубл", "not_a_master", "fraud"):
             assert word not in low, word
+
+
+class TestTheAutomaticAttemptIsRecordedOnlyOnAPendingLink:
+    """``record_attempt`` — исход автопопытки (регистрация и дозвон ``solo_link_retry``).
+
+    Пишет условно: только связь, которая в базе всё ещё ``PENDING``, и только
+    свои столбцы. До этого была запись целой строкой из экземпляра,
+    прочитанного до похода в каталог, — она могла затереть отказ оператора.
+    """
+
+    def test_a_real_key_links_with_catalog_provenance_and_one_audit_row(self, result, bot_user):
+        link = svc.open_link(result.master, bot_user=bot_user, tenant=result.tenant)
+        real = uuid.uuid4()
+
+        svc.record_attempt(link, refusal=None, ayla_user_id=real)
+
+        row = SoloIdentityLink.objects.get(pk=link.pk)
+        assert row.status == SoloIdentityLink.Status.LINKED
+        assert row.provenance == SoloIdentityLink.Provenance.CATALOG_RESOLVED
+        assert row.ayla_user_id == real
+        assert row.decided_at is not None and row.decided_at == row.last_attempt_at
+        assert row.last_attempt_refusal == ""
+        assert row.operator_id is None
+        # экземпляр вызывающего согласован с базой — по нему читают исход
+        assert link.status == SoloIdentityLink.Status.LINKED and link.ayla_user_id == real
+        audits = AuditLog.all_tenants.filter(action="identity.solo_link.linked")
+        assert audits.count() == 1
+        assert audits.get().payload["provenance"] == SoloIdentityLink.Provenance.CATALOG_RESOLVED
+
+    def test_a_second_record_on_a_linked_row_changes_nothing(self, result, bot_user):
+        link = svc.open_link(result.master, bot_user=bot_user, tenant=result.tenant)
+        real = uuid.uuid4()
+        svc.record_attempt(link, refusal=None, ayla_user_id=real)
+        decided_at = SoloIdentityLink.objects.get(pk=link.pk).decided_at
+
+        svc.record_attempt(link, refusal="ayla_unreachable")
+
+        row = SoloIdentityLink.objects.get(pk=link.pk)
+        assert row.status == SoloIdentityLink.Status.LINKED
+        assert row.ayla_user_id == real and row.decided_at == decided_at
+        assert row.last_attempt_refusal == ""
+        assert AuditLog.all_tenants.filter(action="identity.solo_link.linked").count() == 1
+
+    def test_a_refusal_stays_pending_names_why_and_writes_no_linked_audit(self, result, bot_user):
+        link = svc.open_link(result.master, bot_user=bot_user, tenant=result.tenant)
+
+        svc.record_attempt(link, refusal="proxy_identity")
+
+        row = SoloIdentityLink.objects.get(pk=link.pk)
+        assert row.status == SoloIdentityLink.Status.PENDING
+        assert row.last_attempt_refusal == "proxy_identity"
+        assert row.last_attempt_at is not None
+        assert row.ayla_user_id is None and row.decided_at is None
+        assert AuditLog.all_tenants.filter(action="identity.solo_link.pending").count() == 1
+        assert AuditLog.all_tenants.filter(action="identity.solo_link.linked").count() == 0
+
+    def test_an_operators_rejection_is_not_overwritten_by_a_stale_instance(
+        self, result, bot_user, operator
+    ):
+        """Экземпляр прочитан как PENDING, оператор отклонил, каталог ответил настоящим ключом."""
+        link = svc.open_link(result.master, bot_user=bot_user, tenant=result.tenant)
+        stale = SoloIdentityLink.objects.get(pk=link.pk)
+        svc.reject_by_operator(link, operator=operator, reason="fraud_suspected")
+
+        svc.record_attempt(stale, refusal=None, ayla_user_id=uuid.uuid4())
+
+        row = SoloIdentityLink.objects.get(pk=link.pk)
+        assert row.status == SoloIdentityLink.Status.REJECTED
+        assert row.reject_reason == "fraud_suspected"
+        assert row.operator_username == "operator-s6"
+        assert row.ayla_user_id is None
+        assert row.last_attempt_at is None
+        assert stale.status == SoloIdentityLink.Status.REJECTED, "вызывающий видит настоящий статус"
+        assert AuditLog.all_tenants.filter(action="identity.solo_link.rejected").count() == 1
+        assert AuditLog.all_tenants.filter(action="identity.solo_link.linked").count() == 0

@@ -84,15 +84,56 @@ def open_link(master, *, bot_user, tenant, phone: str = "") -> SoloIdentityLink:
 
 
 def record_attempt(link: SoloIdentityLink, *, refusal: str | None, ayla_user_id=None) -> None:
-    """Зафиксировать исход автопопытки (при регистрации)."""
-    link.last_attempt_at = timezone.now()
-    link.last_attempt_refusal = refusal or ""
-    if refusal is None and link.status != SoloIdentityLink.Status.LINKED:
-        link.status = SoloIdentityLink.Status.LINKED
-        link.provenance = SoloIdentityLink.Provenance.CATALOG_RESOLVED
-        link.decided_at = link.last_attempt_at
-        link.ayla_user_id = ayla_user_id
-    link.save()
+    """Зафиксировать исход автопопытки — при регистрации и при дозвоне.
+
+    Пишет ТОЛЬКО по связи, которая в базе всё ещё ``PENDING``, и только свои
+    столбцы. Раньше здесь был ``link.save()`` целой строкой из экземпляра,
+    прочитанного до похода в каталог: пока шли сетевые вызовы (десятки
+    секунд), оператор мог отклонить связь, и запись вернула бы её в
+    ``PENDING`` или ``LINKED``, стерев отказ. При регистрации окно было
+    теоретическим (связь заведена мгновение назад); с дозвоном
+    (``solo_link_retry``) попытка идёт на обычном трафике неделями, и правило
+    «отказ оператора автоматика не отменяет» должно держаться записью, а не
+    порядком событий.
+
+    Запись не прошла (связь уже не ``PENDING``) — экземпляр перечитывается, и
+    вызывающий видит настоящий статус, а не свой устаревший.
+    """
+    now = timezone.now()
+    changes: dict = {"last_attempt_at": now, "last_attempt_refusal": refusal or ""}
+    if refusal is None:
+        changes.update(
+            status=SoloIdentityLink.Status.LINKED,
+            provenance=SoloIdentityLink.Provenance.CATALOG_RESOLVED,
+            decided_at=now,
+            ayla_user_id=ayla_user_id,
+        )
+    written = SoloIdentityLink.objects.filter(
+        pk=link.pk, status=SoloIdentityLink.Status.PENDING
+    ).update(**changes)
+    if not written:
+        link.refresh_from_db()
+        logger.warning(
+            "identity.solo_link.attempt_not_recorded master=%s status=%s",
+            link.master_id,
+            link.status,
+        )
+        return
+    for field, value in changes.items():
+        setattr(link, field, value)
+    if refusal is None:
+        # Аудит-пакет на каждую связь (докстринг модели): до сих пор его писал
+        # только путь оператора, а автоматический — теперь основной.
+        write_audit(
+            "identity.solo_link.linked",
+            target="CatalogMaster",
+            target_id=link.master_id,
+            payload={
+                "provenance": link.provenance,
+                "solo_registration_id": str(link.solo_registration_id),
+                "tenant_id": str(link.tenant_id_snapshot),
+            },
+        )
 
 
 def confirm_by_operator(link: SoloIdentityLink, *, bot_user, operator) -> OperatorLinkOutcome:
