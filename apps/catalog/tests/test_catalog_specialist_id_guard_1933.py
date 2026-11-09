@@ -56,8 +56,9 @@ CONVERTED = {
     # услуг) + портфолио (список, загрузка, удаление) — все шесть через колонку.
     ("apps/master_api/views_profile_card.py", 6),
     # DRF-2370: пункт «Место работы» готовности читает service-locations
-    # каталога под субъектом мастера — один вызов через колонку.
-    ("apps/master_api/services/onboarding_readiness.py", 1),
+    # каталога под субъектом мастера — один вызов через колонку. Второй —
+    # пункт «Услуги»: выбор услуг мастера (services/selection), тем же путём.
+    ("apps/master_api/services/onboarding_readiness.py", 2),
     # DRF-2607: отгул и изменение на дату на токене администратора — четыре
     # записи, каждая зовёт резолвер прямо в вызове.
     ("apps/admin_api/views_salon_schedule_writes.py", 4),
