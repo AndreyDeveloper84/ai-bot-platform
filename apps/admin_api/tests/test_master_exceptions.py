@@ -27,12 +27,13 @@ from django.test import Client
 from django.urls import reverse
 
 from apps.catalog.models import CatalogMaster
+from apps.channels.bot_registry import SALON_STREAM, BotEntry
 from apps.identity.models import BotUser
 from apps.integrations.ayla.salon_client import SalonUnavailable
 from apps.tenancy.models import Tenant
 from tests.support.catalog_mirror import sync_shaped
 
-from .conftest import init_data_header
+from .conftest import BOT_TOKEN, init_data_header
 
 pytestmark = pytest.mark.django_db
 
@@ -151,6 +152,21 @@ def _get(client: Client, master: CatalogMaster, *, user_id: str = "5001", **para
     return client.get(_url(master), params, HTTP_AUTHORIZATION=init_data_header(user_id))
 
 
+@pytest.fixture
+def salon_bot_signs(settings, tenant: Tenant) -> None:
+    """The test initData signed by the SALON bot (DRF-2936: ``writable``)."""
+
+    settings.MAX_BOT_REGISTRY = (
+        BotEntry(
+            slug="signer",
+            webhook_secret="",
+            api_token=BOT_TOKEN,
+            tenant_slug=tenant.slug,
+            stream=SALON_STREAM,
+        ),
+    )
+
+
 class TestTheSalonSeesWhatIsAlreadyBooked:
     def test_all_three_lists_come_back(
         self, client: Client, owner_bot_user: BotUser, synced_master: CatalogMaster, ayla
@@ -234,15 +250,45 @@ class TestTheSalonSeesWhatIsAlreadyBooked:
         assert row["start"] is None
         assert row["end"] is None
 
-    def test_the_view_says_it_cannot_write(
+    def test_the_owner_from_the_salon_bot_may_write(
+        self,
+        client: Client,
+        owner_bot_user: BotUser,
+        synced_master: CatalogMaster,
+        ayla,
+        salon_bot_signs,
+    ) -> None:
+        # DRF-2936: экран «Рабочее время» рисует правку по этому полю — и
+        # ответ тот же, что даст запись (роль + салонный бот).
+        ayla()
+
+        assert _get(client, synced_master).json()["writable"] is True
+
+    def test_the_same_owner_from_another_bot_may_not(
         self, client: Client, owner_bot_user: BotUser, synced_master: CatalogMaster, ayla
     ) -> None:
-        # Экран не должен рисовать кнопок, которых сервер не примет: все
-        # записывающие маршруты салонной поверхности SERVICE_READ_ONLY, а
-        # §117 разрешает креденшел условно — сначала три проверки.
+        # Пара к предыдущему: запись из не-салонного бота каталог не примет
+        # (подпись не та), и кнопки под неё не рисуют.
         ayla()
 
         assert _get(client, synced_master).json()["writable"] is False
+
+    def test_the_front_desk_reads_and_may_not_write(
+        self,
+        client: Client,
+        owner_bot_user: BotUser,  # the salon reads on its owner's name
+        receptionist_bot_user: BotUser,
+        synced_master: CatalogMaster,
+        ayla,
+        salon_bot_signs,
+    ) -> None:
+        # §141: ресепшн видит график, не меняет.
+        ayla()
+
+        resp = _get(client, synced_master, user_id="5003")
+
+        assert resp.status_code == 200, resp.content
+        assert resp.json()["writable"] is False
 
     def test_a_master_of_another_salon_is_not_found(
         self, client: Client, owner_bot_user: BotUser, other_tenant: Tenant, ayla

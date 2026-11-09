@@ -248,12 +248,14 @@ ADMIN_ROUTES: dict[str, Entry] = {
     # DRF-2607 — writes on the administrator's own token; the body is what Ayla
     # answered about the one row just written.
     "master_time_off": third_party(
-        "data (the time-off row Ayla stored: id, start_at, end_at, reason)",
-        via=A + "views_salon_schedule_writes:salon_person_write",
+        "data (the time-off row Ayla stored: id, start_at, end_at, reason) — the one just "
+        "written, or, on a repeat of the same window, the one already stored (existing: true)",
+        via=A + "views_salon_schedule_writes:master_time_off",
         whose="the master whose absence was just recorded",
         why=(
-            "the operator who created the absence gets back the row as stored, including the "
-            "reason text the operator typed a moment ago — nothing the request did not carry"
+            "the operator who created the absence gets back the row as stored, in the salon's "
+            "clock; on a repeat (DRF-2936) the identical absence already on file — the same row "
+            "and reason the operator already reads in master_exceptions"
         ),
     ),
     "master_time_off_detail": none(

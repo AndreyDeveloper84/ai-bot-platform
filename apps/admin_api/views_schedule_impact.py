@@ -10,8 +10,15 @@
 применять от названного человека.
 
 Это срез В. Вид показывает, какие живые записи закрытие вытеснит, — и
-останавливается. Решение по записям и само закрытие — в Pro App, где
-администратор вошёл под своим именем.
+останавливается. Решение по каждой записи — в Pro App, где администратор
+вошёл под своим именем (``next_step``).
+
+С DRF-2607 закрытие времени, которое НИКОГО не вытесняет, пишется и из
+Mini App — от имени человека (``views_salon_schedule_writes``). Экран
+«Рабочее время» салона (DRF-2936) зовёт этот предпросмотр ДО записи: есть
+затронутые записи — ничего не пишет и показывает их. Поэтому ``writable``
+здесь — не константа, а ответ :func:`schedule_writable`: может ли этот
+человек отсюда менять время мастера.
 
 # Почему граница ровно здесь, а не «пока не сделали»
 
@@ -46,8 +53,8 @@ on a surface where a named human is the actor, not a shared service token».
 
 # Окно приходит датой и часами САЛОНА
 
-``date=YYYY-MM-DD&from=HH:MM&to=HH:MM``, смещение к ним прикладывает сервер
-по часовому поясу салона. Не ISO со смещением от браузера: экран не знает
+``date=YYYY-MM-DD&from=HH:MM&to=HH:MM`` (``to=24:00`` — до конца суток),
+смещение к ним прикладывает сервер по часовому поясу салона. Не ISO со смещением от браузера: экран не знает
 пояса салона иначе как строкой IANA, а вычислять смещение в браузере —
 ровно та ошибка, из-за которой хронология салона показывала «11:00» вместо
 «14:00» (11.09.2026). Администратор думает «15-го с 10 до 14», и запрос
@@ -58,8 +65,6 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import date as date_cls
-from datetime import datetime, time
 from typing import Any
 
 from django.http import HttpRequest, HttpResponse, JsonResponse
@@ -67,6 +72,8 @@ from django.views.decorators.http import require_http_methods
 
 from apps.admin_api.auth import require_admin_or_reception_read
 from apps.tenancy.timezones import salon_zone
+from apps.admin_api.services.salon_window import WindowRefusal, parse_local_window
+from apps.admin_api.services.salon_write_access import schedule_writable
 from apps.admin_api.services.schedule_impact import impact_for_window
 from apps.catalog.models import CatalogMaster
 
@@ -88,39 +95,20 @@ def _master_or_none(master_id: str) -> CatalogMaster | None:
     return CatalogMaster.objects.filter(id=mid).first()
 
 
-def _date_or_none(value: str | None) -> date_cls | None:
-    try:
-        return date_cls.fromisoformat(value) if value else None
-    except ValueError:
-        return None
-
-
-def _time_or_none(value: str | None) -> time | None:
-    try:
-        return time.fromisoformat(value) if value else None
-    except ValueError:
-        return None
-
-
 def _parse_window(request: HttpRequest, tenant: Any) -> tuple[str, str] | JsonResponse:
-    """``date`` + ``from`` + ``to`` в часах салона → два ISO со смещением салона."""
+    """``date`` + ``from`` + ``to`` в часах салона → два ISO со смещением салона.
 
-    day = _date_or_none(request.GET.get("date"))
-    start = _time_or_none(request.GET.get("from"))
-    end = _time_or_none(request.GET.get("to"))
-    if day is None or start is None or end is None:
-        return _error(
-            "bad_window",
-            "date (YYYY-MM-DD), from (HH:MM) and to (HH:MM) are required",
-            400,
-        )
-    if end <= start:
-        return _error("bad_window", "to must be after from", 400)
-    tz = salon_zone(tenant)
-    return (
-        datetime.combine(day, start, tzinfo=tz).isoformat(),
-        datetime.combine(day, end, tzinfo=tz).isoformat(),
+    Разбор общий с отгулом в местной форме (``services.salon_window``):
+    ``to=24:00`` — конец суток, иначе «весь день» (выходной на дату,
+    DRF-2936) не выразить.
+    """
+
+    parsed = parse_local_window(
+        request.GET.get("date"), request.GET.get("from"), request.GET.get("to"), salon_zone(tenant)
     )
+    if isinstance(parsed, WindowRefusal):
+        return _error("bad_window", parsed.detail, 400)
+    return parsed
 
 
 @require_http_methods(["GET"])
@@ -159,9 +147,10 @@ def master_schedule_impact(request: HttpRequest, master_id: str) -> HttpResponse
             "end_at": end_at,
             "timezone": impact.timezone,
             "bookings": impact.bookings,
-            # Записи отсюда нет — см. докстринг модуля. Экран рисует показ и
-            # подсказку, а не кнопку, которую сервер не примет.
-            "writable": False,
+            # Может ли этот человек отсюда менять время мастера — роль и
+            # салонный бот, тот же ответ, что у записи (DRF-2936). Решение по
+            # каждой записи — по-прежнему ``next_step``.
+            "writable": schedule_writable(request),
             "next_step": NEXT_STEP,
         }
     )
