@@ -249,13 +249,35 @@ STRANGER_REPLY_TTL_SECONDS = 3600
 #: «Кабинет создан» без второй половины было бы той самой тишиной, ради
 #: которой заводилось `setup_state`: человек ушёл бы считать себя
 #: работающим и узнал бы обратное, не дождавшись ни одной записи.
+#:
+#: §77 п.38 (24.09.2026): «мне не надо участия человека в регистрации
+#: мастеров». До этой правки текст отправлял человека к администратору за
+#: связыванием — то есть называл ручной шаг, которого решением владельца нет,
+#: и не говорил о единственном, что на деле происходит: бот довязывает сам
+#: (``_heal_solo_link``). ЧЕРНОВИК ТЕКСТА — формулировку утверждает владелец.
 SOLO_CREATED_PENDING = (
     "Кабинет создан: вы владелец и мастер в нём.\n\n"
-    "Пока вас не видно клиентам — нужно связать кабинет с вашей учётной "
-    "записью Ayla, это делает администратор. Напишите в поддержку салона, "
-    "с которым работаете, или в поддержку Ayla.\n\n"
-    "Записи к вам начнут приходить сразу после связывания."
+    "Пока вас не видно клиентам: связь кабинета с каталогом Ayla ещё не "
+    "завершилась. Делать для этого ничего не нужно — бот повторит её сам, "
+    "как только вы напишете сюда в следующий раз.\n\n"
+    "Если через несколько минут ничего не изменится — напишите в поддержку Ayla."
 )
+
+#: NOT_LINKED у соло-мастера, когда повтор связи снова не прошёл. Отдельный
+#: текст, а не :data:`NOT_LINKED_TEXT`: тот говорит про «доступ к салону»,
+#: которого у соло-мастера нет, и молчит о том, что повтор идёт сам.
+#: ЧЕРНОВИК ТЕКСТА — формулировку утверждает владелец.
+SOLO_NOT_LINKED_TEXT = (
+    "Кабинет создан, но связь с каталогом Ayla пока не завершилась — "
+    "клиентам вас ещё не видно.\n\n"
+    "Бот повторяет её сам при каждой проверке. Нажмите «Повторить проверку» "
+    "чуть позже; если не поможет — напишите в поддержку."
+)
+
+#: Обычная реплика дозванивается до каталога не чаще раза в столько секунд:
+#: повтор — это до трёх вызовов каталога, а NOT_LINKED отвечает на каждое
+#: сообщение. «Повторить проверку» и «/start» — явная просьба, их не тормозим.
+SOLO_LINK_RETRY_COOLDOWN_SECONDS = 60
 
 #: Повторное нажатие — не ошибка и не повод молчать.
 SOLO_ALREADY_REGISTERED = (
@@ -668,6 +690,11 @@ def _handle_salon_event_inner(event: CanonicalEvent, trace_id: str | uuid.UUID |
 
     try:
         verdict = salon_entry.precheck(event, chosen_slug=chosen)
+        if verdict.code == salon_entry.NOT_LINKED and _heal_solo_link(event, verdict):
+            # Связь дозвонилась в этом же ходе — пре-чек заново, и человек
+            # идёт дальше как персонал, а не читает «повторите проверку» о
+            # том, что уже сделано.
+            verdict = salon_entry.precheck(event, chosen_slug=chosen)
     except SalonChoiceRequired as exc:
         _ask_which_salon(event, exc.tenants)
         return
@@ -696,6 +723,91 @@ def _handle_salon_event_inner(event: CanonicalEvent, trace_id: str | uuid.UUID |
     # here: a stranger's tenant is decided by the code they type, or by
     # «Я работаю сам» — never by the salon the entry happens to name.
     _serve_stranger(event, trace_id)
+
+
+def _solo_link_of(bot_user):
+    """Связь соло-кабинета этой рабочей строки; ``None`` — не соло или не прочитать.
+
+    Сбой чтения — «не знаю», а не исключение: вызывающие стоят на пути ответа
+    человеку, и отвечают они общим честным состоянием, а не молчанием.
+    """
+
+    from apps.identity.services.solo_link_retry import solo_workspace_link
+
+    try:
+        return solo_workspace_link(bot_user)
+    except Exception:  # noqa: BLE001 — см. докстринг
+        logger.exception("channels.max.salon.solo_link_read_failed")
+        return None
+
+
+def _solo_link_retry_due(event: CanonicalEvent) -> bool:
+    """Можно ли дозваниваться по обычной реплике — не чаще раза в интервал."""
+
+    from django.core.cache import cache
+
+    key = f"salon_solo_link_retry:{event.channel}:{event.channel_user_id}"
+    try:
+        return bool(cache.add(key, 1, timeout=SOLO_LINK_RETRY_COOLDOWN_SECONDS))
+    except Exception:  # noqa: BLE001 — кэш недоступен → пробуем, как без тормоза
+        return True
+
+
+def _heal_solo_link(event: CanonicalEvent, verdict) -> bool:
+    """NOT_LINKED у соло-мастера с недоделанной связью — довязать самим.
+
+    ``True`` — связь появилась в этом ходе, пре-чек надо пройти заново.
+
+    §77 п.38: человека в регистрации мастеров нет. Первый ход связывает сам
+    (DRF-2450), но у его неудачи не было продолжения: повтор жил в ветке
+    ``created=False`` у :func:`_register_solo_provider`, куда человек с
+    кабинетом не попадает — он уже не незнакомец. «Повторить проверку»
+    перечитывала состояние и ничего не дозванивала, и довести связь мог только
+    оператор. Теперь дозванивается сам вход.
+
+    Отказ оператора (``REJECTED``) не трогается: дорожка повтора берёт только
+    ``PENDING``. Сбой повтора не валит ответ — человек получает честное
+    состояние ниже, а причина остаётся в журнале и на связи.
+    """
+
+    from apps.identity.services.solo_link_retry import retry_solo_link
+
+    found = _solo_link_of(verdict.bot_user)
+    if found is None or not found.is_pending:
+        return False
+    explicit = event.text.strip() == CB_SALON_RECHECK or _is_entry_start(event.text)
+    if not explicit and not _solo_link_retry_due(event):
+        return False
+    try:
+        retry = retry_solo_link(
+            found.link, master=found.master, tenant=verdict.tenant, bot_user=verdict.bot_user
+        )
+    except Exception:  # noqa: BLE001 — ошибка настройки или базы: не молчим человеку
+        logger.exception("channels.max.salon.solo_link_retry_failed")
+        return False
+
+    emit(
+        "channels.max.salon.solo_link_retried",
+        payload={
+            "bot_user_id": str(verdict.bot_user.id),
+            "linked": retry.linked,
+            "explicit": explicit,
+            "catalog_provisioning_refusal": retry.catalog_refusal,
+            "identity_link_refusal": retry.identity_link_refusal,
+            "link_refusal": retry.link_refusal,
+        },
+    )
+    logger.info(
+        "channels.max.salon.solo_link_retried bot_user=%s tenant=%s linked=%s "
+        "catalog_refusal=%s identity_link_refusal=%s link_refusal=%s",
+        verdict.bot_user.id,
+        verdict.tenant.slug,
+        retry.linked,
+        retry.catalog_refusal,
+        retry.identity_link_refusal,
+        retry.link_refusal,
+    )
+    return retry.linked
 
 
 def _open_menu_after_recheck(event: CanonicalEvent, verdict) -> None:
@@ -797,13 +909,27 @@ def _serve_unlinked(event: CanonicalEvent, verdict) -> None:
                 attachments=[outbound.make_inline_keyboard_attachment(buttons, columns=1)],
             )
             return
+        # Соло-мастер получает слова про СВОЁ состояние. «Доступ к салону»
+        # ему ни о чём, а отклонённому оператором «Повторить проверку»
+        # обещала бы исход, которого не будет: повтор отказ не отменяет.
+        solo = _solo_link_of(verdict.bot_user)
+        if solo is not None and solo.is_rejected:
+            from apps.identity.services.solo_identity_link import REJECTED_RECOVERY_TEXT
+
+            buttons = [{"label": SUPPORT_BUTTON, "callback": CB_SALON_SUPPORT}]
+            _reply(
+                event,
+                REJECTED_RECOVERY_TEXT,
+                attachments=[outbound.make_inline_keyboard_attachment(buttons, columns=1)],
+            )
+            return
         buttons = [
             {"label": RECHECK_BUTTON, "callback": CB_SALON_RECHECK},
             {"label": SUPPORT_BUTTON, "callback": CB_SALON_SUPPORT},
         ]
         _reply(
             event,
-            NOT_LINKED_TEXT,
+            SOLO_NOT_LINKED_TEXT if solo is not None and solo.is_pending else NOT_LINKED_TEXT,
             attachments=[outbound.make_inline_keyboard_attachment(buttons, columns=1)],
         )
 
@@ -1554,32 +1680,21 @@ def _register_solo_provider(
             SoloIdentityLink.objects.filter(master=master).first() if master is not None else None
         )
         if existing_link is not None:
-            catalog_refusal = provision_catalog_workspace(
-                existing_link,
-                tenant=result.tenant,
-                bot_user=result.bot_user,
-                display_name=result.bot_user.display_name or result.master.name,
-            )
             # DRF-2450: повтор — естественный дозвон связи, если первая попытка
             # упала (сеть, каталог). Только PENDING: отказ оператора
             # (REJECTED — fraud_suspected, duplicate_person) бот не отменяет.
-            if (
-                catalog_refusal is None
-                and master is not None
-                and existing_link.status == SoloIdentityLink.Status.PENDING
-            ):
-                from apps.identity.services.solo_identity_link import record_attempt
-                from apps.identity.services.solo_link_attempt import attempt_solo_link
+            #
+            # Дорожка повтора одна на оба входа — этот и вход человека с
+            # кабинетом (``_heal_solo_link``): до неё здесь жила своя копия, и
+            # она была единственной — при том, что с кабинетом сюда не дойти.
+            from apps.identity.services.solo_link_retry import retry_solo_link
 
-                existing_link.refresh_from_db(fields=["catalog_specialist_id"])
-                identity_link_refusal = bind_solo_identity_after_provisioning(
-                    existing_link, bot_user=result.bot_user
-                )
-                link_refusal = attempt_solo_link(master, result.bot_user)
-                master.refresh_from_db(fields=["ayla_user_id"])
-                record_attempt(
-                    existing_link, refusal=link_refusal, ayla_user_id=master.ayla_user_id
-                )
+            retry = retry_solo_link(
+                existing_link, master=master, tenant=result.tenant, bot_user=result.bot_user
+            )
+            catalog_refusal = retry.catalog_refusal
+            identity_link_refusal = retry.identity_link_refusal
+            link_refusal = retry.link_refusal
 
     emit(
         "channels.max.salon.solo_registered",
