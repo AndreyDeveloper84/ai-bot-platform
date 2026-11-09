@@ -81,6 +81,16 @@ def bot_user(salon):
     )
 
 
+#: STRANGER-текст без кнопки-ссылки: то же, что на листе, но с точкой в конце.
+_STRANGER_TEXT_NO_LINK = salon_handler.STRANGER_TEXT[:-1] + "."
+
+
+@pytest.fixture(autouse=True)
+def _no_client_bot_link(monkeypatch):
+    """Ссылки на клиентский бот здесь нет — названо, а не унаследовано от настроек прогона."""
+    monkeypatch.setattr(salon_handler, "_client_bot_link_button", lambda: None)
+
+
 @pytest.fixture
 def said(monkeypatch):
     out = []
@@ -98,7 +108,8 @@ class TestTheOfferAppearsForSomeoneWithNoTrace:
 
         assert len(said) == 1
         # DRF-2113: незнакомцу — STRANGER-текст (без имени: записи бота нет), не «пришлите код».
-        assert said[0]["text"].startswith(salon_handler.STRANGER_TEXT)
+        # Ссылки на клиентский бот в реестре теста нет — фраза кончается точкой.
+        assert said[0]["text"].startswith(_STRANGER_TEXT_NO_LINK)
         assert salon_handler.SOLO_OFFER.strip() in said[0]["text"]
 
     def test_the_offer_carries_a_button_not_a_guessable_word(self, bot_user, said):
@@ -143,7 +154,8 @@ class TestSomeoneWithATraceIsNotOffered:
         with tenant_scope(salon):
             salon_handler._ask_for_code_with_solo_offer(_Event("привет"), entry=None)
 
-        assert said[0]["text"] == salon_handler.STRANGER_TEXT  # DRF-2113
+        # DRF-2113; без кнопки-ссылки текст не обрывается на двоеточии.
+        assert said[0]["text"] == _STRANGER_TEXT_NO_LINK
         assert salon_handler.SOLO_OFFER.strip() not in said[0]["text"]
         assert not said[0]["attachments"]
 

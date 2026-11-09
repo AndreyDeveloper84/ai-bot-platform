@@ -194,21 +194,34 @@ class TestFreshOnboarding:
         result = create_solo_provider(**channel_identity)
         # display_name='Ольга Иванова' → first token 'Ольга' → «Студия Ольга»
         assert result.tenant.name == "Студия Ольга"
-        # Master name mirrors tenant name at seed time
-        assert result.master.name == "Студия Ольга"
+        # The master card is the person, not the workspace (live run 2026-11-09:
+        # the card said «Студия Ольга» and the bot greeted «Здравствуйте, Студия!»).
+        assert result.master.name == "Ольга Иванова"
 
     def test_explicit_tenant_name_overrides_default(self, bootstrap_tenant, channel_identity):
         result = create_solo_provider(**channel_identity, tenant_name="Salon Maxima")
         assert result.tenant.name == "Salon Maxima"
-        assert result.master.name == "Salon Maxima"
+        # The override names the workspace only.
+        assert result.master.name == "Ольга Иванова"
 
-    def test_empty_display_name_fallback(self, bootstrap_tenant):
+    def test_master_name_is_normalised_like_the_catalog_does(self, bootstrap_tenant):
         result = create_solo_provider(
             channel="max",
             channel_user_id=f"max-{uuid.uuid4().hex[:8]}",
-            display_name="",
+            display_name="  Ольга   Иванова ",
+        )
+        assert result.master.name == "Ольга Иванова"
+
+    @pytest.mark.parametrize("display_name", ["", "   "], ids=["empty", "blank"])
+    def test_empty_display_name_fallback(self, bootstrap_tenant, display_name):
+        result = create_solo_provider(
+            channel="max",
+            channel_user_id=f"max-{uuid.uuid4().hex[:8]}",
+            display_name=display_name,
         )
         assert result.tenant.name == "Студия мастера"
+        # No name to give the card — the placeholder shape stays, never an empty name.
+        assert result.master.name == "Студия мастера"
 
 
 # ─── TestIdempotency — second call returns existing ────────────────────
