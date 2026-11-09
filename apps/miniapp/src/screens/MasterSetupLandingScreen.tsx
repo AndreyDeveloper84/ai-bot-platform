@@ -124,16 +124,7 @@ export const PUBLISH_ENTRY_LABEL = "Отправить профиль на пр�
 export function canSubmitProfile(readiness: OnboardingReadiness): boolean {
   return readiness.ready && readiness.identity.state === "linked";
 }
-/**
- * §77 п.38 (24.09.2026): человека в регистрации мастеров нет. Связь ставит бот
- * сам — при регистрации, при входе и по «Повторить проверку»; «ожидает
- * оператора» называло шаг, которого решением владельца не существует, и
- * оставляло мастера ждать того, кто не придёт.
- *
- * ЧЕРНОВИК ТЕКСТА: формулировку утверждает владелец.
- */
-export const IDENTITY_PENDING_NOTE =
-  "Связь с каталогом Ayla ещё не завершена. Напишите боту — он повторит её сам.";
+export const IDENTITY_PENDING_NOTE = "Подтверждение личности — ожидает оператора.";
 export const IDENTITY_UNLINKED_NOTE =
   "Отправить профиль на проверку можно будет после подтверждения личности.";
 export const IDENTITY_REJECTED_NOTE = "Подтверждение личности отклонено — напишите в поддержку.";

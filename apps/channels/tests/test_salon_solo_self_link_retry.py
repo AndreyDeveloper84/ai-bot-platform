@@ -70,6 +70,11 @@ class _Event:
         self.raw: dict = {}
 
 
+def _event() -> Any:
+    """Стоит на месте ``CanonicalEvent``: регистрация читает только эти поля."""
+    return _Event()
+
+
 class _FakeCatalog:
     """Каталог в одном месте: провижининг, представление личности, дверь."""
 
@@ -197,7 +202,7 @@ def _row() -> BotUser:
 def _registered_with_a_failed_link(catalog: _FakeCatalog, sent) -> None:
     """Кабинет создан, а каталог в этот момент связь не принял."""
     catalog.door_refusal = "transport_error"
-    salon_handler._register_solo_provider(_Event(), entry=SALON_BOT, display_name="Ольга")
+    salon_handler._register_solo_provider(_event(), entry=SALON_BOT, display_name="Ольга")
     assert _link().status == SoloIdentityLink.Status.PENDING
     assert _text(sent) == salon_handler.SOLO_CREATED_PENDING
     sent.reset_mock()
@@ -665,7 +670,7 @@ class TestSalonStaffAreUntouched:
 
 class TestTheRetryLane:
     def test_a_linked_workspace_is_not_bound_again(self, catalog, sent, emitted) -> None:
-        salon_handler._register_solo_provider(_Event(), entry=SALON_BOT, display_name="Ольга")
+        salon_handler._register_solo_provider(_event(), entry=SALON_BOT, display_name="Ольга")
         assert _link().status == SoloIdentityLink.Status.LINKED
         doors_before = catalog.doors()
         found = solo_link_retry.solo_workspace_link(_row())
