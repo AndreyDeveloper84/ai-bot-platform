@@ -250,6 +250,32 @@ class TestTheSalonSeesWhatIsAlreadyBooked:
         assert row["start"] is None
         assert row["end"] is None
 
+    def test_the_dates_break_and_note_come_back(
+        self, client: Client, owner_bot_user: BotUser, synced_master: CatalogMaster, ayla
+    ) -> None:
+        # DRF-2936: чем изменение отличается от шаблона кроме часов — иначе
+        # «10–19 без обеда» выглядит повтором шаблона и снимается правкой.
+        ayla(
+            exceptions=[
+                _exception_row(
+                    start_time="10:00",
+                    end_time="19:00",
+                    break_start="15:00:00",
+                    break_end="16:00:00",
+                    note="Свадьба",
+                )
+            ]
+        )
+
+        row = _get(client, synced_master).json()["exceptions"]["rows"][0]
+
+        assert (row["start"], row["break_start"], row["break_end"], row["note"]) == (
+            "10:00",
+            "15:00",
+            "16:00",
+            "Свадьба",
+        )
+
     def test_the_owner_from_the_salon_bot_may_write(
         self,
         client: Client,

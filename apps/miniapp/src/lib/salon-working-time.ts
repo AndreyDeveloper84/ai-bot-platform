@@ -24,6 +24,7 @@
  */
 
 import type {
+  MasterDay,
   MasterDayBooking,
   MasterExceptionRow,
   MasterExceptions,
@@ -58,6 +59,8 @@ export const WT_COPY = {
     unavailable: "Недоступность",
     /** Добавление по контракту: «просмотр существующих исключений». */
     override: "только эта дата",
+    /** Список не разобран — «изменений нет» сказать нельзя. */
+    unreadable: "Показано не всё: часть графика не удалось разобрать.",
     prev: "Предыдущая неделя",
     next: "Следующая неделя",
   },
@@ -78,6 +81,11 @@ export const WT_COPY = {
     past: "Прошедшую дату изменить нельзя.",
     closed: "В этот день салон закрыт",
     readOnly: "Изменить можно в Pro App",
+    /** Список даты не разобран — запись по такому снимку стёрла бы невидимое. */
+    unreadable: "Часть графика на эту дату не удалось разобрать — изменять её пока нельзя.",
+    /** Черновик пережил переоткрытие (окно записи ~10 минут). */
+    restored: "Изменения этой даты, которые вы не сохранили, восстановлены.",
+    reset: "Сбросить",
     noHours: "Не задано",
     nothingToSave: "Этот день остаётся как в графике — сохранять нечего.",
     invalidInterval: "Начало должно быть раньше конца.",
@@ -195,8 +203,11 @@ const MONTHS_SHORT = [
 
 const YMD = /^(\d{4})-(\d{2})-(\d{2})$/;
 
+/** Настоящая дата: «2026-13-45» формой похожа, но такого дня нет. */
 export function isYmd(value: string): boolean {
-  return YMD.test(value);
+  const m = YMD.exec(value);
+  if (!m) return false;
+  return fromUtc(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]))) === value;
 }
 
 function parts(ymd: string): [number, number, number] {
@@ -341,16 +352,20 @@ export interface DayLayer {
 
 const OFF: DayLayer = { working: false, start: null, end: null };
 
+function weekdayRow(schedule: MasterSchedule, ymd: string) {
+  return schedule.days.find((d) => d.day_of_week === weekdayOf(ymd));
+}
+
 /** День недели из шаблона. */
 export function templateLayer(schedule: MasterSchedule, ymd: string): DayLayer {
-  const row = schedule.days.find((d) => d.day_of_week === weekdayOf(ymd));
+  const row = weekdayRow(schedule, ymd);
   if (!row || !row.is_working_day) return OFF;
   return { working: true, start: hm(row.start_time), end: hm(row.end_time) };
 }
 
-/** Перерыв дня недели — только показ (отдельной сущности «перерыв» нет). */
+/** Перерыв дня недели — только для сверки (отдельной сущности «перерыв» нет). */
 export function templateBreak(schedule: MasterSchedule, ymd: string): [string, string] | null {
-  const row = schedule.days.find((d) => d.day_of_week === weekdayOf(ymd));
+  const row = weekdayRow(schedule, ymd);
   const from = hm(row?.break_start);
   const to = hm(row?.break_end);
   return row?.is_working_day && from && to ? [from, to] : null;
@@ -361,14 +376,7 @@ export function exceptionOn(exceptions: MasterExceptions, ymd: string): MasterEx
 }
 
 export function exceptionLayer(row: MasterExceptionRow): DayLayer {
-  return row.is_working_day
-    ? { working: true, start: hm(row.start), end: hm(row.end) }
-    : OFF;
-}
-
-/** Действующий слой: изменение на дату заменяет день шаблона целиком. */
-export function liveLayer(schedule: MasterSchedule, exception: MasterExceptionRow | null, ymd: string): DayLayer {
-  return exception ? exceptionLayer(exception) : templateLayer(schedule, ymd);
+  return row.is_working_day ? { working: true, start: hm(row.start), end: hm(row.end) } : OFF;
 }
 
 export function sameLayer(a: DayLayer, b: DayLayer): boolean {
@@ -393,7 +401,7 @@ export interface DayTimeOff {
   from: string;
   to: string;
   reason: string;
-  /** Начинается и кончается в этой дате — можно править и удалять. */
+  /** Начинается и кончается в этой дате — можно править и снимать. */
   editable: boolean;
   startYmd: string;
   endYmd: string;
@@ -401,7 +409,7 @@ export interface DayTimeOff {
 
 /**
  * Недоступность, задевающая дату. Многодневная и переходящая через полночь
- * — только чтение: корзина на ней удалила бы весь отпуск, а не одну дату.
+ * — только чтение: корзина на ней сняла бы весь отпуск, а не одну дату.
  */
 export function timeOffOn(rows: readonly MasterTimeOffRow[], ymd: string): DayTimeOff[] {
   const out: DayTimeOff[] = [];
@@ -413,12 +421,10 @@ export function timeOffOn(rows: readonly MasterTimeOffRow[], ymd: string): DayTi
     const endsAtNextMidnight = end.ymd === next && end.hm === "00:00";
     if (start.ymd > ymd) continue;
     if (end.ymd < ymd || (end.ymd === ymd && end.hm === "00:00" && start.ymd < ymd)) continue;
-    const from = start.ymd < ymd ? "00:00" : start.hm;
-    const to = end.ymd > ymd ? END_OF_DAY : end.hm;
     out.push({
       id: row.id,
-      from,
-      to,
+      from: start.ymd < ymd ? "00:00" : start.hm,
+      to: end.ymd > ymd ? END_OF_DAY : end.hm,
       reason: row.reason,
       editable: start.ymd === ymd && (end.ymd === ymd || endsAtNextMidnight),
       startYmd: start.ymd,
@@ -432,11 +438,23 @@ export function closureOn(rows: readonly SalonClosureRow[], ymd: string): SalonC
   return rows.find((r) => r.date === ymd) ?? null;
 }
 
-/** Недоступность закрывает весь рабочий день (или все сутки у выходного). */
-export function coversWholeDay(layer: DayLayer, offs: readonly DayTimeOff[]): boolean {
-  const from = layer.working && layer.start ? toMinutes(layer.start) : 0;
-  const to = layer.working && layer.end ? toMinutes(layer.end) : 24 * 60;
-  return offs.some((o) => toMinutes(o.from) <= from && toMinutes(o.to) >= to);
+/**
+ * Недоступность закрывает весь рабочий день — в том числе несколькими
+ * смежными строками (13–15 и 15–19 вместе закрывают 13–19).
+ */
+export function coversWholeDay(
+  hours: { start: string; end: string } | null,
+  offs: ReadonlyArray<{ from: string; to: string }>,
+): boolean {
+  let cursor = hours ? toMinutes(hours.start) : 0;
+  const end = hours ? toMinutes(hours.end) : 24 * 60;
+  const sorted = [...offs].sort((a, b) => toMinutes(a.from) - toMinutes(b.from));
+  for (const off of sorted) {
+    if (toMinutes(off.from) > cursor) break;
+    cursor = Math.max(cursor, toMinutes(off.to));
+    if (cursor >= end) return true;
+  }
+  return cursor >= end;
 }
 
 // ---------------------------------------------------------------------------
@@ -455,32 +473,42 @@ export interface WeekRow {
   override: boolean;
   /** Недоступность внутри рабочего дня: «13:00–15:00». */
   partial: string[];
+  /** Салон закрыт часть дня: «10:00–14:00». */
+  closedPart: string | null;
 }
 
+/**
+ * Неделя — ЧАСАМИ СЕРВЕРА: `working_hours` дня из `day-schedule` (их считает
+ * сервер по шаблону и изменениям на даты, по ним и продают). Сверху — только
+ * пометки из списков того же сервера: изменение на дату, недоступность,
+ * закрытие салона. Свободного времени экран не считает.
+ */
 export function weekRows(
   monday: string,
-  schedule: MasterSchedule,
+  days: readonly MasterDay[],
   exceptions: MasterExceptions,
   today: string,
 ): WeekRow[] {
   return weekDates(monday).map((ymd) => {
-    const exception = exceptionOn(exceptions, ymd);
-    const layer = liveLayer(schedule, exception, ymd);
+    const hours = days.find((d) => d.date === ymd)?.working_hours ?? null;
     const offs = timeOffOn(exceptions.time_off.rows, ymd);
     const closure = closureOn(exceptions.closures.rows, ymd);
-    const base = { ymd, past: ymd < today, override: exception !== null };
-    if (closure && !closure.start && !closure.end) {
-      return { ...base, status: "closed", hours: null, partial: [] };
-    }
-    if (!layer.working) return { ...base, status: "off", hours: null, partial: [] };
-    if (coversWholeDay(layer, offs)) {
-      return { ...base, status: "unavailable", hours: null, partial: [] };
-    }
+    const base = {
+      ymd,
+      past: ymd < today,
+      override: exceptionOn(exceptions, ymd) !== null,
+      partial: [] as string[],
+      closedPart: null as string | null,
+    };
+    if (closure && !(closure.start && closure.end)) return { ...base, status: "closed", hours: null };
+    if (!hours) return { ...base, status: "off", hours: null };
+    if (coversWholeDay(hours, offs)) return { ...base, status: "unavailable", hours: null };
     return {
       ...base,
       status: "working",
-      hours: layer.start && layer.end ? `${layer.start} – ${layer.end}` : null,
+      hours: `${hours.start} – ${hours.end}`,
       partial: offs.map((o) => `${o.from}–${o.to}`),
+      closedPart: closure?.start && closure.end ? `${closure.start}–${closure.end}` : null,
     };
   });
 }
@@ -490,31 +518,23 @@ export function scheduleNotSet(schedule: MasterSchedule, exceptions: MasterExcep
   return !schedule.has_working_day && exceptions.exceptions.rows.length === 0;
 }
 
-// ---------------------------------------------------------------------------
-// Черновик дня и план записи
-// ---------------------------------------------------------------------------
-
-export interface DraftTimeOff {
-  /** Ключ строки на экране. */
-  key: string;
-  /** Есть у сохранённой недоступности; у новой — `null`. */
-  id: string | null;
-  from: string;
-  to: string;
-  reason: string;
+/** Списки, по которым пишется дата, разобраны не целиком. */
+export function listsUnreadable(exceptions: MasterExceptions): boolean {
+  return (
+    exceptions.exceptions.state === "unreadable" ||
+    exceptions.time_off.state === "unreadable" ||
+    exceptions.unreadable_lists.some((k) => k === "exceptions" || k === "time_off")
+  );
 }
 
-export interface DayDraft {
-  working: boolean;
-  /** Часы хранятся и у выходного: тумблер назад их возвращает. */
-  start: string;
-  end: string;
-  timeOff: DraftTimeOff[];
-}
+// ---------------------------------------------------------------------------
+// Снимок даты и черновик-намерение
+// ---------------------------------------------------------------------------
 
 export interface DaySnapshot {
   ymd: string;
   template: DayLayer;
+  templateBreak: [string, string] | null;
   exception: MasterExceptionRow | null;
   timeOff: DayTimeOff[];
 }
@@ -524,11 +544,11 @@ export function snapshotOf(
   schedule: MasterSchedule,
   exceptions: MasterExceptions,
 ): DaySnapshot {
-  const exception = exceptionOn(exceptions, ymd);
   return {
     ymd,
     template: templateLayer(schedule, ymd),
-    exception,
+    templateBreak: templateBreak(schedule, ymd),
+    exception: exceptionOn(exceptions, ymd),
     timeOff: timeOffOn(exceptions.time_off.rows, ymd),
   };
 }
@@ -537,15 +557,65 @@ export function snapshotLayer(snap: DaySnapshot): DayLayer {
   return snap.exception ? exceptionLayer(snap.exception) : snap.template;
 }
 
-export function initialDraft(snap: DaySnapshot, fallback: [string, string]): DayDraft {
+/**
+ * Отпечаток снимка — «на чём человек правил». Черновик несёт его с собой:
+ * разошёлся с живым — значит, дату кто-то менял, и писать по черновику
+ * вслепую нельзя.
+ */
+export function snapshotKey(snap: DaySnapshot): string {
+  const layer = (l: DayLayer) => (l.working ? `${l.start}-${l.end}` : "off");
+  const ex = snap.exception
+    ? `${layer(exceptionLayer(snap.exception))}|${snap.exception.break_start ?? ""}-${snap.exception.break_end ?? ""}|${snap.exception.note ?? ""}`
+    : "none";
+  const offs = snap.timeOff
+    .map((o) => `${o.id}:${o.from}-${o.to}:${o.reason}:${o.editable ? "e" : "r"}`)
+    .sort()
+    .join(",");
+  return [layer(snap.template), snap.templateBreak?.join("-") ?? "", ex, offs].join("#");
+}
+
+export function snapshotsDiffer(a: DaySnapshot, b: DaySnapshot): boolean {
+  return snapshotKey(a) !== snapshotKey(b);
+}
+
+export interface AddedTimeOff {
+  /** Ключ строки на экране. */
+  key: string;
+  from: string;
+  to: string;
+  reason: string;
+}
+
+/**
+ * Черновик — НАМЕРЕНИЯ, а не «желаемое состояние целиком»: что добавить,
+ * какие существующие строки снять, трогали ли часы. Снимается только то, что
+ * человек снял сам: чужая недоступность, появившаяся после открытия, правкой
+ * не задевается.
+ */
+export interface DayDraft {
+  /** Отпечаток снимка, на котором правили (`snapshotKey`). */
+  basis: string;
+  /** Часы или «рабочий день» меняли. Нет — о дне черновик ничего не говорит. */
+  hoursTouched: boolean;
+  working: boolean;
+  /** Часы хранятся и у выходного: тумблер назад их возвращает. */
+  start: string;
+  end: string;
+  added: AddedTimeOff[];
+  /** Сохранённые строки, которые человек снял (правка = снятие + новая). */
+  removedIds: string[];
+}
+
+export function freshDraft(snap: DaySnapshot, fallback: [string, string]): DayDraft {
   const layer = snapshotLayer(snap);
   return {
+    basis: snapshotKey(snap),
+    hoursTouched: false,
     working: layer.working,
     start: layer.start ?? fallback[0],
     end: layer.end ?? fallback[1],
-    timeOff: snap.timeOff
-      .filter((o) => o.editable)
-      .map((o) => ({ key: o.id, id: o.id, from: o.from, to: o.to, reason: o.reason })),
+    added: [],
+    removedIds: [],
   };
 }
 
@@ -553,61 +623,123 @@ export function draftLayer(draft: DayDraft): DayLayer {
   return draft.working ? { working: true, start: draft.start, end: draft.end } : OFF;
 }
 
+export function hasIntent(draft: DayDraft): boolean {
+  return draft.hoursTouched || draft.added.length > 0 || draft.removedIds.length > 0;
+}
+
+function sameOff(
+  a: { from: string; to: string; reason: string },
+  b: { from: string; to: string; reason: string },
+): boolean {
+  return a.from === b.from && a.to === b.to && a.reason.trim() === b.reason.trim();
+}
+
+export interface VisibleTimeOff {
+  key: string;
+  /** Сохранённая строка — её номер; новая — `null`. */
+  id: string | null;
+  from: string;
+  to: string;
+  reason: string;
+}
+
+/** Что на экране: сохранённые правимые строки минус снятые, плюс новые. */
+export function visibleTimeOff(snap: DaySnapshot, draft: DayDraft): VisibleTimeOff[] {
+  const kept = snap.timeOff
+    .filter((o) => o.editable && !draft.removedIds.includes(o.id))
+    .map((o) => ({ key: o.id, id: o.id, from: o.from, to: o.to, reason: o.reason }));
+  const fresh = draft.added.map((a) => ({ key: a.key, id: null, from: a.from, to: a.to, reason: a.reason }));
+  return [...kept, ...fresh].sort((a, b) => toMinutes(a.from) - toMinutes(b.from));
+}
+
+/**
+ * Перенести намерения на снимок — после «Расписание могло измениться», после
+ * частичной записи, при восстановлении черновика:
+ *
+ * * снятие строки, которой больше нет, — уже сделано;
+ * * новая строка, которая уже есть, — уже сделана;
+ * * новая строка, равная снятой, — пара ничего не меняет;
+ * * часы, совпавшие с живыми, — больше не изменение; не тронутые — живые.
+ */
+export function rebaseDraft(snap: DaySnapshot, draft: DayDraft): DayDraft {
+  const live = snap.timeOff.filter((o) => o.editable);
+  let removedIds = draft.removedIds.filter((id) => live.some((o) => o.id === id));
+  const added: AddedTimeOff[] = [];
+  for (const item of draft.added) {
+    const pair = live.find((o) => removedIds.includes(o.id) && sameOff(o, item));
+    if (pair) {
+      removedIds = removedIds.filter((id) => id !== pair.id);
+      continue;
+    }
+    if (live.some((o) => !removedIds.includes(o.id) && sameOff(o, item))) continue;
+    added.push(item);
+  }
+  const layer = snapshotLayer(snap);
+  const hoursTouched = draft.hoursTouched && !sameLayer(draftLayer(draft), layer);
+  return {
+    basis: snapshotKey(snap),
+    hoursTouched,
+    working: hoursTouched ? draft.working : layer.working,
+    start: hoursTouched ? draft.start : (layer.start ?? draft.start),
+    end: hoursTouched ? draft.end : (layer.end ?? draft.end),
+    added,
+    removedIds,
+  };
+}
+
 export type DateAction =
   | { kind: "none" }
   | { kind: "put"; layer: DayLayer }
   | { kind: "delete" };
 
+/** Изменение на дату несёт что-то, кроме часов: свой перерыв или заметку. */
+function exceptionCarriesMore(snap: DaySnapshot): boolean {
+  const ex = snap.exception;
+  if (!ex) return false;
+  const own = ex.break_start && ex.break_end ? `${ex.break_start}-${ex.break_end}` : "";
+  const weekday = snap.templateBreak ? snap.templateBreak.join("-") : "";
+  return own !== weekday || (ex.note ?? "").trim() !== "";
+}
+
 /**
- * Что сделать с изменением на дату — против ШАБЛОНА, а не против текущих
- * часов: черновик, равный шаблону, — это «вернуть к шаблону» (если изменение
- * есть) или «ничего» (если его нет). Лишний override привязал бы дату к
- * себе: будущая правка недели её бы не тронула.
+ * Что сделать с изменением на дату. Часы не трогали — ничего (даже если
+ * изменение совпадает с шаблоном: снимать его молча — терять его перерыв и
+ * заметку). Вернули к шаблону — снять изменение, если оно ничего, кроме
+ * часов, не несёт; несёт — переписать часы, сохранив остальное.
  */
 export function dateActionFor(snap: DaySnapshot, draft: DayDraft): DateAction {
+  if (!draft.hoursTouched) return { kind: "none" };
   const desired = draftLayer(draft);
-  if (sameLayer(desired, snap.template)) {
-    return snap.exception ? { kind: "delete" } : { kind: "none" };
-  }
-  if (snap.exception && sameLayer(desired, exceptionLayer(snap.exception))) {
-    return { kind: "none" };
+  if (sameLayer(desired, snapshotLayer(snap))) return { kind: "none" };
+  if (snap.exception && sameLayer(desired, snap.template) && !exceptionCarriesMore(snap)) {
+    return { kind: "delete" };
   }
   return { kind: "put", layer: desired };
 }
 
 export interface TimeOffPlan {
-  create: DraftTimeOff[];
+  create: AddedTimeOff[];
   remove: DayTimeOff[];
 }
 
-function sameWindow(a: { from: string; to: string; reason: string }, b: { from: string; to: string; reason: string }): boolean {
-  return a.from === b.from && a.to === b.to && a.reason.trim() === b.reason.trim();
-}
-
-/** Правка недоступности — новая строка и снятие старой (PATCH нет). */
 export function timeOffPlanFor(snap: DaySnapshot, draft: DayDraft): TimeOffPlan {
   if (!draft.working) return { create: [], remove: [] };
-  const live = snap.timeOff.filter((o) => o.editable);
-  const create: DraftTimeOff[] = [];
-  const remove: DayTimeOff[] = [];
-  const kept = new Set<string>();
-  for (const item of draft.timeOff) {
-    const old = item.id ? live.find((o) => o.id === item.id) : undefined;
-    if (old && sameWindow(old, item)) {
-      kept.add(old.id);
-      continue;
-    }
-    create.push(item);
-  }
-  for (const old of live) {
-    if (!kept.has(old.id)) remove.push(old);
-  }
-  return { create, remove };
+  const rebased = rebaseDraft(snap, draft);
+  return {
+    create: rebased.added,
+    remove: snap.timeOff.filter((o) => o.editable && rebased.removedIds.includes(o.id)),
+  };
 }
 
 export interface Window {
   from: string;
   to: string;
+}
+
+function layerAfter(snap: DaySnapshot, action: DateAction): DayLayer {
+  if (action.kind === "put") return action.layer;
+  if (action.kind === "delete") return snap.template;
+  return snapshotLayer(snap);
 }
 
 /**
@@ -617,28 +749,22 @@ export interface Window {
  */
 export function closingWindows(snap: DaySnapshot, draft: DayDraft): Window[] {
   const before = snapshotLayer(snap);
-  const after = draftLayer(draft);
+  const after = layerAfter(snap, dateActionFor(snap, draft));
   const out: Window[] = [];
   if (before.working && before.start && before.end) {
     if (!after.working) {
       out.push({ from: "00:00", to: END_OF_DAY });
     } else if (after.start && after.end) {
-      if (toMinutes(after.start) > toMinutes(before.start)) {
-        out.push({ from: before.start, to: after.start });
-      }
-      if (toMinutes(after.end) < toMinutes(before.end)) {
-        out.push({ from: after.end, to: before.end });
-      }
+      if (toMinutes(after.start) > toMinutes(before.start)) out.push({ from: before.start, to: after.start });
+      if (toMinutes(after.end) < toMinutes(before.end)) out.push({ from: after.end, to: before.end });
     }
   }
-  for (const item of timeOffPlanFor(snap, draft).create) {
-    out.push({ from: item.from, to: item.to });
-  }
+  for (const item of timeOffPlanFor(snap, draft).create) out.push({ from: item.from, to: item.to });
   return out;
 }
 
 export type Step =
-  | { kind: "time_off_create"; item: DraftTimeOff }
+  | { kind: "time_off_create"; item: AddedTimeOff }
   | { kind: "time_off_delete"; item: DayTimeOff }
   | { kind: "date_put"; layer: DayLayer }
   | { kind: "date_delete" };
@@ -659,15 +785,13 @@ function narrows(before: DayLayer, after: DayLayer): boolean {
 export function stepsFor(snap: DaySnapshot, draft: DayDraft): Step[] {
   const action = dateActionFor(snap, draft);
   const plan = timeOffPlanFor(snap, draft);
-  const before = snapshotLayer(snap);
   const dateStep: Step | null =
     action.kind === "put"
       ? { kind: "date_put", layer: action.layer }
       : action.kind === "delete"
         ? { kind: "date_delete" }
         : null;
-  const after = action.kind === "delete" ? snap.template : draftLayer(draft);
-  const dateCloses = dateStep !== null && narrows(before, after);
+  const dateCloses = dateStep !== null && narrows(snapshotLayer(snap), layerAfter(snap, action));
   const closing: Step[] = plan.create.map((item) => ({ kind: "time_off_create", item }));
   const opening: Step[] = plan.remove.map((item) => ({ kind: "time_off_delete", item }));
   if (dateStep && dateCloses) closing.push(dateStep);
@@ -675,35 +799,13 @@ export function stepsFor(snap: DaySnapshot, draft: DayDraft): Step[] {
   return [...closing, ...opening];
 }
 
-/** Живое состояние даты совпало с черновиком — правка применена. */
+/** Живое состояние даты исполнило намерения — правка применена. */
 export function draftApplied(snap: DaySnapshot, draft: DayDraft): boolean {
-  if (!sameLayer(snapshotLayer(snap), draftLayer(draft))) return false;
+  if (draft.hoursTouched && !sameLayer(snapshotLayer(snap), draftLayer(draft))) return false;
   if (!draft.working) return true;
   const live = snap.timeOff.filter((o) => o.editable);
-  if (live.length !== draft.timeOff.length) return false;
-  return draft.timeOff.every((item) => live.some((o) => sameWindow(o, item)));
-}
-
-/** Живое состояние даты разошлось с тем, на котором человек правил. */
-export function snapshotsDiffer(a: DaySnapshot, b: DaySnapshot): boolean {
-  if (!sameLayer(a.template, b.template)) return true;
-  if ((a.exception === null) !== (b.exception === null)) return true;
-  if (a.exception && b.exception && !sameLayer(exceptionLayer(a.exception), exceptionLayer(b.exception))) {
-    return true;
-  }
-  const key = (o: DayTimeOff) => `${o.id}|${o.from}|${o.to}|${o.reason}`;
-  const left = a.timeOff.map(key).sort().join(";");
-  const right = b.timeOff.map(key).sort().join(";");
-  return left !== right;
-}
-
-export function draftsEqual(a: DayDraft, b: DayDraft): boolean {
-  if (a.working !== b.working || a.start !== b.start || a.end !== b.end) return false;
-  if (a.timeOff.length !== b.timeOff.length) return false;
-  return a.timeOff.every((item, i) => {
-    const other = b.timeOff[i];
-    return other !== undefined && item.id === other.id && sameWindow(item, other);
-  });
+  if (draft.removedIds.some((id) => live.some((o) => o.id === id))) return false;
+  return draft.added.every((item) => live.some((o) => sameOff(o, item)));
 }
 
 // ---------------------------------------------------------------------------
@@ -766,19 +868,26 @@ export type WriteFailure =
   | { kind: "forbidden" }
   /** Ушло, ответ потерян: могло записаться. Только перечитывание скажет. */
   | { kind: "unknown" }
+  /** Снимать уже нечего — сделано (404 на снятии). */
+  | { kind: "gone" }
   | { kind: "break_crosses"; from: string; to: string }
   | { kind: "failed" };
 
-export function classifyWriteError(err: unknown): WriteFailure {
+/**
+ * `step` — что делали: 404 на СНЯТИИ значит «уже снято», а на записи —
+ * «мастер не найден», ничего не записано.
+ */
+export function classifyWriteError(err: unknown, step: Step["kind"] = "date_put"): WriteFailure {
   if (err instanceof ApiError) {
     if (err.status === 409 && err.slug === "has_active_appointments") return { kind: "conflict" };
     if (err.status === 401) return { kind: "stale" };
     if (err.status === 403) return { kind: "forbidden" };
     if (err.status === 503 && err.slug === "salon_write_outcome_unknown") return { kind: "unknown" };
-    // 502/504 без тела — ответ потерян по дороге; 404 на снятии — уже снято
-    // или не было: решает перечитывание, а не догадка.
+    // 502/504 без тела — ответ потерян по дороге.
     if ((err.status === 502 || err.status === 504) && err.slug === "http_error") return { kind: "unknown" };
-    if (err.status === 404) return { kind: "unknown" };
+    if (err.status === 404) {
+      return step === "time_off_delete" || step === "date_delete" ? { kind: "gone" } : { kind: "failed" };
+    }
     if (err.status === 400 && err.details?.reason === "template_break_crosses_hours") {
       const from = typeof err.details.break_start === "string" ? err.details.break_start : "";
       const to = typeof err.details.break_end === "string" ? err.details.break_end : "";
@@ -799,25 +908,29 @@ export function classifyWriteError(err: unknown): WriteFailure {
 export const WRITE_WINDOW_S = 600;
 export const WRITE_MARGIN_S = 60;
 
-/** Сколько секунд назад открыто Mini App; `authDate` — `launchAuthDate()` из max-sdk. */
-export function launchAgeSeconds(authDate: number | null, nowMs: number = Date.now()): number | null {
-  if (authDate === null) return null;
-  return Math.floor(nowMs / 1000) - authDate;
+/**
+ * Сколько секунд назад открыто Mini App — по часам ТОГО ЖЕ устройства, что и
+ * «сейчас» (`startedAtMs` — момент загрузки приложения). Не по `auth_date`:
+ * спешащие часы телефона дали бы вечное «откройте заново», и переоткрытие бы
+ * не помогло. Последнее слово — за сервером (`401 stale`).
+ */
+export function launchAgeSeconds(startedAtMs: number, nowMs: number = Date.now()): number {
+  return Math.floor((nowMs - startedAtMs) / 1000);
 }
 
-export function writeWindowClosed(authDate: number | null, nowMs: number = Date.now()): boolean {
-  const age = launchAgeSeconds(authDate, nowMs);
-  return age !== null && age > WRITE_WINDOW_S - WRITE_MARGIN_S;
+export function writeWindowClosed(startedAtMs: number, nowMs: number = Date.now()): boolean {
+  return launchAgeSeconds(startedAtMs, nowMs) > WRITE_WINDOW_S - WRITE_MARGIN_S;
 }
 
 const DRAFT_PREFIX = "max:wt-draft:";
-/** Черновик переживает переоткрытие Mini App — но не дольше часа. */
+/** Черновик переживает переоткрытие Mini App — но не дольше часа с последней правки. */
 export const DRAFT_TTL_MS = 60 * 60 * 1000;
 
 function draftKey(masterId: string, ymd: string): string {
   return `${DRAFT_PREFIX}${masterId}:${ymd}`;
 }
 
+/** Пишется только по правке человека: открытие даты срок черновика не продлевает. */
 export function saveDraft(masterId: string, ymd: string, draft: DayDraft, nowMs: number = Date.now()): void {
   try {
     window.localStorage.setItem(draftKey(masterId, ymd), JSON.stringify({ savedAt: nowMs, draft }));
@@ -826,18 +939,39 @@ export function saveDraft(masterId: string, ymd: string, draft: DayDraft, nowMs:
   }
 }
 
+function isText(v: unknown): v is string {
+  return typeof v === "string";
+}
+
+function isDraft(v: unknown): v is DayDraft {
+  if (!v || typeof v !== "object") return false;
+  const d = v as Record<string, unknown>;
+  return (
+    isText(d.basis) &&
+    typeof d.hoursTouched === "boolean" &&
+    typeof d.working === "boolean" &&
+    isText(d.start) &&
+    isText(d.end) &&
+    Array.isArray(d.removedIds) &&
+    d.removedIds.every(isText) &&
+    Array.isArray(d.added) &&
+    d.added.every((a) => {
+      const r = a as Record<string, unknown> | null;
+      return !!r && isText(r.key) && isText(r.from) && isText(r.to) && isText(r.reason);
+    })
+  );
+}
+
 export function loadDraft(masterId: string, ymd: string, nowMs: number = Date.now()): DayDraft | null {
   try {
     const raw = window.localStorage.getItem(draftKey(masterId, ymd));
     if (!raw) return null;
     const parsed = JSON.parse(raw) as { savedAt?: unknown; draft?: unknown };
-    if (typeof parsed.savedAt !== "number" || nowMs - parsed.savedAt > DRAFT_TTL_MS) {
+    if (typeof parsed.savedAt !== "number" || nowMs - parsed.savedAt > DRAFT_TTL_MS || !isDraft(parsed.draft)) {
       window.localStorage.removeItem(draftKey(masterId, ymd));
       return null;
     }
-    const draft = parsed.draft as DayDraft | undefined;
-    if (!draft || typeof draft.working !== "boolean" || !Array.isArray(draft.timeOff)) return null;
-    return draft;
+    return parsed.draft;
   } catch {
     return null;
   }

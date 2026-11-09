@@ -4,12 +4,12 @@
  * Адрес `/admin/working-time/:masterId?week=YYYY-MM-DD` (понедельник). Неделя
  * — ДАТАМИ, а не днями недели: правка на макете всегда «Вторник, 5 августа».
  *
- * Строка даты повторяет то, как день считает каталог, и ничего сверху не
- * вычисляет (`lib/salon-working-time.weekRows`): изменение на дату заменяет
- * день шаблона, полнодневная недоступность закрывает, закрытие салона
- * закрывает. Две пометки — добавления по контракту, а не по картинке:
- * «только эта дата» у даты с изменением (контракт: «просмотр существующих
- * исключений») и часы недоступности внутри рабочего дня.
+ * Часы даты — СЕРВЕРА: `working_hours` дня из `day-schedule`, по ним и
+ * продают (`lib/salon-working-time.weekRows`). Сверху — только пометки из
+ * списков того же сервера: полнодневная недоступность и закрытие салона
+ * закрывают дату; «только эта дата» у даты с изменением (контракт:
+ * «просмотр существующих исключений») и часы недоступности внутри рабочего
+ * дня — добавления по контракту, а не по картинке.
  *
  * Обычная неделя здесь только читается — её запись ждёт DRF-2605 (Андрей,
  * 20.10: «оставить только для чтения с явным объяснением»). Объяснение —
@@ -27,6 +27,7 @@ import {
   getMasterDetail,
   getMasterExceptions,
   getMasterSchedule,
+  type MasterDay,
   type MasterDetail,
   type MasterExceptions,
   type MasterSchedule,
@@ -37,6 +38,7 @@ import {
   WT_COPY,
   addDays,
   isYmd,
+  listsUnreadable,
   rowLabel,
   salonToday,
   scheduleNotSet,
@@ -63,6 +65,7 @@ type Phase =
       detail: MasterDetail;
       schedule: MasterSchedule;
       exceptions: MasterExceptions;
+      days: MasterDay[];
       today: string;
     }
   | { kind: "error"; err: unknown };
@@ -88,8 +91,10 @@ export function SalonPilotWorkingTimeWeekScreen() {
   const back = useScreenBack(backByAction(toList));
 
   const [phase, setPhase] = useState<Phase>({ kind: "loading" });
+  const [reload, setReload] = useState(0);
   const [openWeekAnyway, setOpenWeekAnyway] = useState(false);
   const ready = useRef(false);
+  const weekGiven = params.has("week");
 
   const load = useCallback(
     async (signal: AbortSignal) => {
@@ -104,17 +109,25 @@ export function SalonPilotWorkingTimeWeekScreen() {
             { from: addDays(monday, -1), to: addDays(monday, 7) },
             { signal },
           ),
-          // Только ради пояса салона: «сегодня» — по его часам.
-          getMasterDaySchedule(masterId, { from: monday, to: monday }, { signal }),
+          // Часы дат — серверные; заодно пояс салона: «сегодня» — по его часам.
+          getMasterDaySchedule(masterId, { from: monday, to: addDays(monday, 6) }, { signal }),
         ]);
         if (signal.aborted) return;
+        const today = salonToday(frame.tenant_tz);
+        // Без явной недели — неделя САЛОНА: у браузера в другом поясе
+        // «сегодня» могло оказаться вчерашним понедельником.
+        if (!weekGiven && weekStart(today) !== monday) {
+          setParams({ week: weekStart(today) }, { replace: true });
+          return;
+        }
         setPhase({
           kind: "ready",
           monday,
           detail,
           schedule,
           exceptions,
-          today: salonToday(frame.tenant_tz),
+          days: frame.days,
+          today,
         });
       } catch (err) {
         if (signal.aborted) return;
@@ -126,7 +139,7 @@ export function SalonPilotWorkingTimeWeekScreen() {
         }
       }
     },
-    [masterId, monday],
+    [masterId, monday, weekGiven, setParams],
   );
 
   useEffect(() => {
@@ -134,12 +147,10 @@ export function SalonPilotWorkingTimeWeekScreen() {
     setPhase({ kind: "loading" });
     void load(controller.signal);
     return () => controller.abort();
-  }, [load]);
+  }, [load, reload]);
 
-  const retry = () => {
-    setPhase({ kind: "loading" });
-    void load(new AbortController().signal);
-  };
+  // Повтор — через тот же эффект: поздний ответ прежней недели отменён им.
+  const retry = () => setReload((n) => n + 1);
 
   const shiftWeek = (days: number) => setParams({ week: addDays(monday, days) });
 
@@ -185,6 +196,9 @@ export function SalonPilotWorkingTimeWeekScreen() {
         (!scheduleNotSet(phase.schedule, phase.exceptions) || openWeekAnyway) ? (
           <>
             <p className="wt-note">{WT_COPY.week.note}</p>
+            {listsUnreadable(phase.exceptions) ? (
+              <p className="wt-note wt-note--warn">{WT_COPY.week.unreadable}</p>
+            ) : null}
             <div className="wt-weeknav">
               <button
                 type="button"
@@ -209,7 +223,7 @@ export function SalonPilotWorkingTimeWeekScreen() {
               </button>
             </div>
             <ul className="wt-week" aria-label={weekRangeLabel(phase.monday)}>
-              {weekRows(phase.monday, phase.schedule, phase.exceptions, phase.today).map((row) => (
+              {weekRows(phase.monday, phase.days, phase.exceptions, phase.today).map((row) => (
                 <li key={row.ymd}>
                   <WeekDayRow
                     row={row}
@@ -271,6 +285,9 @@ function WeekDayRow({
         ) : null}
         {row.partial.length > 0 ? (
           <span className="wt-day__note">{`${WT_COPY.week.unavailable} ${row.partial.join(", ")}`}</span>
+        ) : null}
+        {row.closedPart ? (
+          <span className="wt-day__note">{`${WT_COPY.week.closed} ${row.closedPart}`}</span>
         ) : null}
         {row.override ? <span className="wt-day__note">{WT_COPY.week.override}</span> : null}
       </span>

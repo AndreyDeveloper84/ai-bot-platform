@@ -18,7 +18,9 @@ import re
 from dataclasses import dataclass
 from datetime import date as date_cls, datetime, time, timedelta, tzinfo
 
-_HHMM = re.compile(r"([01][0-9]|2[0-3]):[0-5][0-9]")
+#: ``HH:MM``; секунды допускаются — прежний разбор (``time.fromisoformat``)
+#: их принимал, и сужать контракт ради отказа нечем.
+_HHMM = re.compile(r"([01][0-9]|2[0-3]):[0-5][0-9](:[0-5][0-9])?")
 
 #: Конец суток в ``to``: следующая полночь.
 END_OF_DAY = "24:00"

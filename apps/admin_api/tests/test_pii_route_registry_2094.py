@@ -230,14 +230,16 @@ ADMIN_ROUTES: dict[str, Entry] = {
         ),
     ),
     "master_exceptions": third_party(
-        "exceptions[] (date, hours)",
+        "exceptions[] (date, hours, break, note)",
         "time_off[].reason",
         "closures[].reason",
         via=A + "views_master_exceptions:master_exceptions",
         whose="the master whose off-days and time-off are listed",
         why=(
             "the operator reads why the master is unavailable in the window; the reason is "
-            "the master's own free-text note as Ayla stores it (_time_off_row, _closure_row)"
+            "the master's own free-text note as Ayla stores it (_time_off_row, _closure_row); "
+            "the date's note (_exception_row) is shown so an edit of the date's hours does "
+            "not silently drop it (DRF-2936)"
         ),
     ),
     "master_schedule_impact": none(

@@ -1,14 +1,17 @@
 /**
  * DRF-2936 — расчёты экрана «Рабочее время мастеров».
  *
- * Держится то, на чём стоит запись: правка сверяется с ШАБЛОНОМ (лишний
- * override привязал бы дату к себе), окна предпросмотра — ровно то, что правка
- * отнимает, шаги — сначала закрывающие время, и записи из предпросмотра
- * получают имя клиента по ТОМУ ЖЕ номеру, а не по времени.
+ * Черновик — НАМЕРЕНИЯ: снимается только то, что человек снял сам. Здесь
+ * держатся три потери данных, найденные ревью, и то, что их закрывает:
+ *
+ * * добавленная недоступность не снимается следующим сохранением;
+ * * правка одной причины — новая строка и снятие старой, а не «снять всё»;
+ * * чужая недоступность, появившаяся после открытия, не снимается вовсе.
  */
 import { describe, expect, it } from "vitest";
 
 import type {
+  MasterDay,
   MasterDayBooking,
   MasterExceptions,
   MasterSchedule,
@@ -20,15 +23,19 @@ import {
   classifyWriteError,
   closingWindows,
   conflictRows,
+  coversWholeDay,
   dateActionFor,
   dayTitle,
   draftApplied,
-  initialDraft,
+  freshDraft,
+  isYmd,
   launchAgeSeconds,
+  rebaseDraft,
+  snapshotKey,
   snapshotOf,
   stepsFor,
   timeOffOn,
-  timeOffPlanFor,
+  visibleTimeOff,
   weekRangeLabel,
   weekRows,
   weekStart,
@@ -39,7 +46,7 @@ import {
 /** Пятница. */
 const DAY = "2031-01-10";
 
-function schedule(patch: Partial<MasterSchedule> = {}): MasterSchedule {
+function schedule(): MasterSchedule {
   return {
     source: "ayla",
     has_working_day: true,
@@ -51,48 +58,49 @@ function schedule(patch: Partial<MasterSchedule> = {}): MasterSchedule {
       break_start: null,
       break_end: null,
     })),
-    confirmation: {
-      confirmed_at: null,
-      confirmed_by: null,
-      is_current: false,
-      fingerprint: "f",
-      block: null,
-    },
-    ...patch,
+    confirmation: { confirmed_at: null, confirmed_by: null, is_current: false, fingerprint: "f", block: null },
   };
 }
 
+const NONE = { state: "none" as const, rows: [], seen_fields: [] };
+
 function exceptions(patch: Partial<MasterExceptions> = {}): MasterExceptions {
-  const empty = { state: "none" as const, rows: [], seen_fields: [] };
   return {
     from: "2031-01-09",
     to: "2031-01-11",
-    exceptions: empty,
-    time_off: empty,
-    closures: empty,
+    exceptions: NONE,
+    time_off: NONE,
+    closures: NONE,
     unreadable_lists: [],
     writable: true,
     ...patch,
   };
 }
 
-function offRow(start: string, end: string, id = "off-1", reason = "Личные дела"): MasterTimeOffRow {
-  return { id, start_at: start, end_at: end, reason };
+function off(from: string, to: string, id: string, reason = "Личные дела"): MasterTimeOffRow {
+  return { id, start_at: `${DAY}T${from}:00+03:00`, end_at: `${DAY}T${to}:00+03:00`, reason };
 }
 
-function withTimeOff(rows: MasterTimeOffRow[]): MasterExceptions {
-  return exceptions({ time_off: { state: "parsed", rows, seen_fields: [] } });
+function withOffs(rows: MasterTimeOffRow[], patch: Partial<MasterExceptions> = {}): MasterExceptions {
+  return exceptions({ time_off: { state: "parsed", rows, seen_fields: [] }, ...patch });
 }
 
-function withException(isWorking: boolean, start: string | null, end: string | null): MasterExceptions {
+function withException(
+  start: string,
+  end: string,
+  extra: { break_start?: string | null; break_end?: string | null; note?: string } = {},
+): MasterExceptions {
   return exceptions({
     exceptions: {
       state: "parsed",
-      rows: [{ id: "exc-1", date: DAY, is_working_day: isWorking, start, end }],
+      rows: [{ id: "exc-1", date: DAY, is_working_day: true, start, end, ...extra }],
       seen_fields: [],
     },
   });
 }
+
+const snap = (ex: MasterExceptions = exceptions()) => snapshotOf(DAY, schedule(), ex);
+const fresh = (ex?: MasterExceptions) => freshDraft(snap(ex), ["", ""]);
 
 describe("даты макета", () => {
   it("неделя — с понедельника; подпись как на макете", () => {
@@ -102,8 +110,11 @@ describe("даты макета", () => {
     expect(weekRangeLabel("2030-12-30")).toBe("30 дек. 2030 – 5 янв. 2031");
   });
 
-  it("заголовок дня — «Пятница, 10 января»", () => {
+  it("заголовок дня — «Пятница, 10 января»; несуществующая дата — не дата", () => {
     expect(dayTitle(DAY)).toBe("Пятница, 10 января");
+    expect(isYmd(DAY)).toBe(true);
+    expect(isYmd("2026-13-45")).toBe(false);
+    expect(isYmd("2031-02-30")).toBe(false);
   });
 });
 
@@ -111,8 +122,8 @@ describe("недоступность внутри даты", () => {
   it("однодневная правится, многодневная — только читается с периодом", () => {
     const rows = timeOffOn(
       [
-        offRow("2031-01-10T13:00:00+03:00", "2031-01-10T15:00:00+03:00", "one"),
-        offRow("2031-01-05T00:00:00+03:00", "2031-01-14T00:00:00+03:00", "vacation", "Отпуск"),
+        off("13:00", "15:00", "one"),
+        { id: "vacation", start_at: "2031-01-05T00:00:00+03:00", end_at: "2031-01-14T00:00:00+03:00", reason: "Отпуск" },
       ],
       DAY,
     );
@@ -122,30 +133,100 @@ describe("недоступность внутри даты", () => {
     ]);
   });
 
-  it("конец в полночь следующих суток — это «до 24:00» этой даты, и она правится", () => {
-    const [row] = timeOffOn([offRow("2031-01-10T20:00:00+03:00", "2031-01-11T00:00:00+03:00")], DAY);
-    expect(row).toMatchObject({ from: "20:00", to: "24:00", editable: true });
+  it("смежные строки вместе закрывают весь день", () => {
+    const hours = { start: "10:00", end: "19:00" };
+    expect(coversWholeDay(hours, [{ from: "10:00", to: "14:00" }, { from: "14:00", to: "19:00" }])).toBe(true);
+    expect(coversWholeDay(hours, [{ from: "10:00", to: "13:00" }, { from: "14:00", to: "19:00" }])).toBe(false);
   });
 });
 
-describe("правка сверяется с шаблоном, а не с текущими часами", () => {
-  const snap = (ex = exceptions()) => snapshotOf(DAY, schedule(), ex);
-
-  it("равна шаблону и изменения нет — ничего", () => {
-    const s = snap();
-    expect(dateActionFor(s, initialDraft(s, ["", ""]))).toEqual({ kind: "none" });
+describe("снимается только снятое человеком", () => {
+  it("правка одной причины — новая строка и снятие ровно старой", () => {
+    const ex = withOffs([off("13:00", "15:00", "old")]);
+    const draft: DayDraft = {
+      ...fresh(ex),
+      removedIds: ["old"],
+      added: [{ key: "n", from: "13:00", to: "15:00", reason: "Врач" }],
+    };
+    expect(stepsFor(snap(ex), draft)).toEqual([
+      { kind: "time_off_create", item: { key: "n", from: "13:00", to: "15:00", reason: "Врач" } },
+      expect.objectContaining({ kind: "time_off_delete", item: expect.objectContaining({ id: "old" }) }),
+    ]);
   });
 
-  it("равна шаблону, а изменение есть — вернуть к шаблону, не писать override", () => {
-    const s = snap(withException(true, "12:00", "16:00"));
-    const draft: DayDraft = { working: true, start: "10:00", end: "19:00", timeOff: [] };
-    expect(dateActionFor(s, draft)).toEqual({ kind: "delete" });
+  it("чужая строка, появившаяся после открытия, не снимается и видна на экране", () => {
+    const opened = withOffs([off("13:00", "15:00", "mine")]);
+    const draft: DayDraft = { ...fresh(opened), hoursTouched: true, start: "11:00" };
+    const now = withOffs([off("13:00", "15:00", "mine"), off("16:00", "17:00", "foreign", "Больничный")]);
+
+    expect(snapshotKey(snap(now))).not.toBe(draft.basis);
+    const rebased = rebaseDraft(snap(now), draft);
+    expect(rebased.basis).toBe(snapshotKey(snap(now)));
+    expect(visibleTimeOff(snap(now), rebased).map((v) => v.key)).toEqual(["mine", "foreign"]);
+    expect(stepsFor(snap(now), rebased).map((s) => s.kind)).toEqual(["date_put"]);
   });
 
-  it("отличается от шаблона — изменение на дату", () => {
-    const s = snap();
-    const draft: DayDraft = { working: false, start: "10:00", end: "19:00", timeOff: [] };
-    expect(dateActionFor(s, draft)).toEqual({
+  it("после записи исполненное выпадает: повторное сохранение ничего не снимает", () => {
+    const before = exceptions();
+    const draft: DayDraft = {
+      ...fresh(before),
+      added: [{ key: "n", from: "13:00", to: "15:00", reason: "Личные дела" }],
+    };
+    const after = snap(withOffs([off("13:00", "15:00", "created")]));
+
+    expect(draftApplied(after, draft)).toBe(true);
+    const rebased = rebaseDraft(after, draft);
+    expect(rebased.added).toEqual([]);
+    expect(stepsFor(after, rebased)).toEqual([]);
+  });
+
+  it("снятая и заново добавленная та же строка — пара ничего не меняет", () => {
+    const ex = withOffs([off("13:00", "15:00", "old")]);
+    const draft: DayDraft = {
+      ...fresh(ex),
+      removedIds: ["old"],
+      added: [{ key: "n", from: "13:00", to: "15:00", reason: " Личные дела " }],
+    };
+    expect(stepsFor(snap(ex), draft)).toEqual([]);
+  });
+
+  it("снятие строки, которой уже нет, — сделано", () => {
+    const draft: DayDraft = { ...fresh(withOffs([off("13:00", "15:00", "gone")])), removedIds: ["gone"] };
+    expect(rebaseDraft(snap(), draft).removedIds).toEqual([]);
+  });
+});
+
+describe("изменение на дату — по намерению, с сохранением чужого", () => {
+  it("часы не трогали — изменения нет, даже если оно равно шаблону", () => {
+    const ex = withException("10:00", "19:00", { note: "Свадьба" });
+    const draft: DayDraft = {
+      ...fresh(ex),
+      added: [{ key: "n", from: "13:00", to: "15:00", reason: "Личные дела" }],
+    };
+    expect(dateActionFor(snap(ex), draft)).toEqual({ kind: "none" });
+    expect(stepsFor(snap(ex), draft).map((s) => s.kind)).toEqual(["time_off_create"]);
+  });
+
+  it("вернули к шаблону — снять изменение, если оно ничего, кроме часов, не несёт", () => {
+    const ex = withException("12:00", "16:00");
+    const draft: DayDraft = { ...fresh(ex), hoursTouched: true, start: "10:00", end: "19:00" };
+    expect(dateActionFor(snap(ex), draft)).toEqual({ kind: "delete" });
+  });
+
+  it("вернули к шаблону, а у даты своя заметка или перерыв — переписать часы, не снимая", () => {
+    for (const extra of [{ note: "Свадьба" }, { break_start: "15:00", break_end: "16:00" }]) {
+      const ex = withException("12:00", "16:00", extra);
+      const draft: DayDraft = { ...fresh(ex), hoursTouched: true, start: "10:00", end: "19:00" };
+      expect(dateActionFor(snap(ex), draft)).toEqual({
+        kind: "put",
+        layer: { working: true, start: "10:00", end: "19:00" },
+      });
+    }
+  });
+
+  it("выходной — изменение на дату", () => {
+    const draft: DayDraft = { ...fresh(), hoursTouched: true, working: false };
+    expect(dateActionFor(snap(), draft)).toEqual({
       kind: "put",
       layer: { working: false, start: null, end: null },
     });
@@ -154,90 +235,62 @@ describe("правка сверяется с шаблоном, а не с тек
 
 describe("окна предпросмотра — ровно то, что правка отнимает", () => {
   it("выходной из рабочего — сутки целиком", () => {
-    const s = snapshotOf(DAY, schedule(), exceptions());
-    const draft: DayDraft = { working: false, start: "10:00", end: "19:00", timeOff: [] };
-    expect(closingWindows(s, draft)).toEqual([{ from: "00:00", to: "24:00" }]);
+    const draft: DayDraft = { ...fresh(), hoursTouched: true, working: false };
+    expect(closingWindows(snap(), draft)).toEqual([{ from: "00:00", to: "24:00" }]);
   });
 
   it("сокращение — отрезанные края; расширение — ничего", () => {
-    const s = snapshotOf(DAY, schedule(), exceptions());
-    expect(
-      closingWindows(s, { working: true, start: "11:00", end: "18:00", timeOff: [] }),
-    ).toEqual([
+    expect(closingWindows(snap(), { ...fresh(), hoursTouched: true, start: "11:00", end: "18:00" })).toEqual([
       { from: "10:00", to: "11:00" },
       { from: "18:00", to: "19:00" },
     ]);
-    expect(closingWindows(s, { working: true, start: "09:00", end: "20:00", timeOff: [] })).toEqual([]);
+    expect(closingWindows(snap(), { ...fresh(), hoursTouched: true, start: "09:00", end: "20:00" })).toEqual([]);
   });
 
   it("новая недоступность — её окно", () => {
-    const s = snapshotOf(DAY, schedule(), exceptions());
-    const draft: DayDraft = {
-      working: true,
-      start: "10:00",
-      end: "19:00",
-      timeOff: [{ key: "n", id: null, from: "13:00", to: "15:00", reason: "Личные дела" }],
-    };
-    expect(closingWindows(s, draft)).toEqual([{ from: "13:00", to: "15:00" }]);
+    const draft: DayDraft = { ...fresh(), added: [{ key: "n", from: "13:00", to: "15:00", reason: "Личные дела" }] };
+    expect(closingWindows(snap(), draft)).toEqual([{ from: "13:00", to: "15:00" }]);
   });
 });
 
 describe("порядок шагов: сначала закрыть время, потом открыть", () => {
-  it("правка недоступности — новая строка раньше снятия старой", () => {
-    const ex = withTimeOff([offRow("2031-01-10T13:00:00+03:00", "2031-01-10T15:00:00+03:00", "old")]);
-    const s = snapshotOf(DAY, schedule(), ex);
-    const draft: DayDraft = {
-      working: true,
-      start: "10:00",
-      end: "19:00",
-      timeOff: [{ key: "old", id: "old", from: "14:00", to: "16:00", reason: "Личные дела" }],
-    };
-    expect(timeOffPlanFor(s, draft).create.map((c) => c.from)).toEqual(["14:00"]);
-    expect(stepsFor(s, draft).map((st) => st.kind)).toEqual(["time_off_create", "time_off_delete"]);
+  it("сокращение (закрывает) раньше снятия недоступности (открывает)", () => {
+    const ex = withOffs([off("13:00", "15:00", "old")]);
+    const draft: DayDraft = { ...fresh(ex), hoursTouched: true, start: "11:00", removedIds: ["old"] };
+    expect(stepsFor(snap(ex), draft).map((s) => s.kind)).toEqual(["date_put", "time_off_delete"]);
   });
 
-  it("выходной (закрывает) идёт раньше снятия недоступности (открывает)", () => {
-    const ex = withTimeOff([offRow("2031-01-10T13:00:00+03:00", "2031-01-10T15:00:00+03:00", "old")]);
-    const s = snapshotOf(DAY, schedule(), ex);
-    const draft: DayDraft = { working: true, start: "11:00", end: "19:00", timeOff: [] };
-    expect(stepsFor(s, draft).map((st) => st.kind)).toEqual(["date_put", "time_off_delete"]);
-  });
-
-  it("расширение часов открывает — идёт после", () => {
-    const ex = withTimeOff([offRow("2031-01-10T13:00:00+03:00", "2031-01-10T15:00:00+03:00", "old")]);
-    const s = snapshotOf(DAY, schedule(), ex);
+  it("расширение часов открывает — идёт последним", () => {
+    const ex = withOffs([off("13:00", "15:00", "old")]);
     const draft: DayDraft = {
-      working: true,
+      ...fresh(ex),
+      hoursTouched: true,
       start: "09:00",
-      end: "19:00",
-      timeOff: [{ key: "n", id: null, from: "16:00", to: "17:00", reason: "Личные дела" }],
+      removedIds: ["old"],
+      added: [{ key: "n", from: "16:00", to: "17:00", reason: "Личные дела" }],
     };
-    expect(stepsFor(s, draft).map((st) => st.kind)).toEqual([
+    expect(stepsFor(snap(ex), draft).map((s) => s.kind)).toEqual([
       "time_off_create",
       "time_off_delete",
       "date_put",
     ]);
   });
-
-  it("перечитанное состояние совпало с черновиком — правка применена", () => {
-    const after = snapshotOf(
-      DAY,
-      schedule(),
-      withTimeOff([offRow("2031-01-10T13:00:00+03:00", "2031-01-10T15:00:00+03:00", "new")]),
-    );
-    const draft: DayDraft = {
-      working: true,
-      start: "10:00",
-      end: "19:00",
-      timeOff: [{ key: "n", id: null, from: "13:00", to: "15:00", reason: "Личные дела" }],
-    };
-    expect(draftApplied(after, draft)).toBe(true);
-    expect(draftApplied(after, { ...draft, timeOff: [] })).toBe(false);
-  });
 });
 
-describe("строки недели", () => {
-  it("выходной, закрытие, полнодневная недоступность, изменение даты", () => {
+describe("строки недели — часами сервера", () => {
+  function days(hours: Record<string, [string, string] | null>): MasterDay[] {
+    return Object.entries(hours).map(([date, h]) => ({
+      date,
+      is_off_day: h === null,
+      working_hours: h ? { start: h[0], end: h[1] } : null,
+      bookings: [],
+      blocks: [],
+      free_windows: [],
+      conflicts: [],
+    }));
+  }
+
+  it("выходной, закрытие, полнодневная недоступность, изменение даты, частичное закрытие", () => {
     const ex = exceptions({
       exceptions: {
         state: "parsed",
@@ -247,28 +300,45 @@ describe("строки недели", () => {
       time_off: {
         state: "parsed",
         rows: [
-          offRow("2031-01-08T00:00:00+03:00", "2031-01-09T00:00:00+03:00", "all-day"),
-          offRow("2031-01-09T13:00:00+03:00", "2031-01-09T15:00:00+03:00", "part"),
+          { id: "all", start_at: "2031-01-08T00:00:00+03:00", end_at: "2031-01-09T00:00:00+03:00", reason: "" },
+          { id: "part", start_at: "2031-01-09T13:00:00+03:00", end_at: "2031-01-09T15:00:00+03:00", reason: "" },
         ],
         seen_fields: [],
       },
       closures: {
         state: "parsed",
-        rows: [{ id: "c", date: "2031-01-10", start: null, end: null, reason: "" }],
+        rows: [
+          { id: "c", date: "2031-01-10", start: null, end: null, reason: "" },
+          { id: "c2", date: "2031-01-11", start: "10:00", end: "14:00", reason: "" },
+        ],
         seen_fields: [],
       },
     });
-    const rows = weekRows("2031-01-06", schedule(), ex, "2031-01-07");
+    const rows = weekRows(
+      "2031-01-06",
+      days({
+        "2031-01-06": ["10:00", "19:00"],
+        "2031-01-07": ["12:00", "16:00"],
+        "2031-01-08": ["10:00", "19:00"],
+        "2031-01-09": ["10:00", "19:00"],
+        "2031-01-10": ["10:00", "19:00"],
+        "2031-01-11": ["10:00", "18:00"],
+        "2031-01-12": null,
+      }),
+      ex,
+      "2031-01-07",
+    );
     expect(rows.map((r) => [r.ymd, r.status, r.hours, r.override, r.past])).toEqual([
       ["2031-01-06", "working", "10:00 – 19:00", false, true],
       ["2031-01-07", "working", "12:00 – 16:00", true, false],
       ["2031-01-08", "unavailable", null, false, false],
       ["2031-01-09", "working", "10:00 – 19:00", false, false],
       ["2031-01-10", "closed", null, false, false],
-      ["2031-01-11", "working", "10:00 – 19:00", false, false],
+      ["2031-01-11", "working", "10:00 – 18:00", false, false],
       ["2031-01-12", "off", null, false, false],
     ]);
     expect(rows[3]?.partial).toEqual(["13:00–15:00"]);
+    expect(rows[5]?.closedPart).toBe("10:00–14:00");
   });
 });
 
@@ -311,8 +381,7 @@ describe("записи из предпросмотра", () => {
   it("без повторов; имя — по номеру записи, а не по времени", () => {
     const one = { id: "a-1", start: "2031-01-10T13:00:00+03:00", end: "2031-01-10T14:00:00+03:00" };
     const other = { id: "a-2", start: "2031-01-10T14:30:00+03:00", end: "2031-01-10T15:30:00+03:00" };
-    const rows = conflictRows([impact([one]), impact([one, other])], [booking]);
-    expect(rows).toEqual([
+    expect(conflictRows([impact([one]), impact([one, other])], [booking])).toEqual([
       { appointmentId: "a-1", from: "13:00", to: "14:00", service: "Маникюр", client: "Анна К.", linkable: true },
       { appointmentId: "a-2", from: "14:30", to: "15:30", service: "Маникюр", client: null, linkable: false },
     ]);
@@ -331,6 +400,7 @@ describe("отказы записи", () => {
     expect(classifyWriteError(new ApiError(503, "salon_write_outcome_unknown", ""))).toEqual({ kind: "unknown" });
     expect(classifyWriteError(new ApiError(504, "http_error", ""))).toEqual({ kind: "unknown" });
     expect(classifyWriteError(new TypeError("Failed to fetch"))).toEqual({ kind: "unknown" });
+    expect(classifyWriteError(new ApiError(503, "salon_unavailable", ""))).toEqual({ kind: "failed" });
     expect(
       classifyWriteError(
         new ApiError(400, "validation", "", {
@@ -340,21 +410,26 @@ describe("отказы записи", () => {
         }),
       ),
     ).toEqual({ kind: "break_crosses", from: "13:00", to: "14:00" });
-    expect(classifyWriteError(new ApiError(503, "salon_unavailable", ""))).toEqual({ kind: "failed" });
+  });
+
+  it("404 на снятии — уже снято; на записи — отказ, ничего не записано", () => {
+    const notFound = new ApiError(404, "not_found", "");
+    expect(classifyWriteError(notFound, "time_off_delete")).toEqual({ kind: "gone" });
+    expect(classifyWriteError(notFound, "date_delete")).toEqual({ kind: "gone" });
+    expect(classifyWriteError(notFound, "time_off_create")).toEqual({ kind: "failed" });
+    expect(classifyWriteError(notFound, "date_put")).toEqual({ kind: "failed" });
   });
 });
 
-describe("окно записи — 10 минут от открытия Mini App", () => {
-  const now = Date.UTC(2031, 0, 10, 12, 0, 0);
-  const launched = (secondsAgo: number) => now / 1000 - secondsAgo;
+describe("окно записи — 10 минут от открытия, по часам устройства", () => {
+  const started = Date.UTC(2031, 0, 10, 12, 0, 0);
 
-  it("возраст запуска — по auth_date", () => {
-    expect(launchAgeSeconds(launched(120), now)).toBe(120);
-    expect(launchAgeSeconds(null, now)).toBeNull();
+  it("возраст — разность двух отметок одних часов", () => {
+    expect(launchAgeSeconds(started, started + 120_000)).toBe(120);
   });
 
   it("за минуту до края окно считается закрытым", () => {
-    expect(writeWindowClosed(launched(500), now)).toBe(false);
-    expect(writeWindowClosed(launched(560), now)).toBe(true);
+    expect(writeWindowClosed(started, started + 500_000)).toBe(false);
+    expect(writeWindowClosed(started, started + 560_000)).toBe(true);
   });
 });

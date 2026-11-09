@@ -200,6 +200,18 @@ class TestTheSalonSeesWhatTheBlockWouldDisplace:
         assert body["writable"] is True
         assert body["next_step"] == "pro_app"
 
+    def test_seconds_in_the_window_still_parse(
+        self, client: Client, owner_bot_user: BotUser, synced_master: CatalogMaster, ayla
+    ) -> None:
+        # Прежний разбор (time.fromisoformat) принимал секунды — контракт не сужен.
+        fake = ayla()
+
+        resp = _get(client, synced_master, **{"from": "10:00:00", "to": "14:00:00"})
+
+        assert resp.status_code == 200, resp.content
+        (call,) = fake.calls
+        assert call["start_at"] == "2026-09-15T10:00:00+03:00"
+
     def test_end_of_day_reaches_the_next_midnight(
         self, client: Client, owner_bot_user: BotUser, synced_master: CatalogMaster, ayla
     ) -> None:

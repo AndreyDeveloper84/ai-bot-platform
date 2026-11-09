@@ -1306,6 +1306,13 @@ export interface MasterExceptionRow {
   /** Часы только у рабочего дня: «не работаю» с часами — противоречие. */
   start: string | null;
   end: string | null;
+  /**
+   * Перерыв и заметка даты (DRF-2936) — чем изменение отличается от шаблона
+   * кроме часов. Необязательны: прежний сервер их не отдавал.
+   */
+  break_start?: string | null;
+  break_end?: string | null;
+  note?: string;
 }
 
 export interface MasterTimeOffRow {

@@ -11098,3 +11098,14 @@ a {
   border-radius: var(--r-sm);
   cursor: pointer;
 }
+
+/* «Сбросить» в строке восстановленного черновика. */
+.wt-link {
+  padding: 0;
+  font: inherit;
+  color: var(--c-accent);
+  background: transparent;
+  border: none;
+  text-decoration: underline;
+  cursor: pointer;
+}

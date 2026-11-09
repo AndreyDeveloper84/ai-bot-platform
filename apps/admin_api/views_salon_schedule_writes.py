@@ -45,8 +45,10 @@
   иначе закрывал время дважды, а каталог сверяет новый отгул только с
   записями клиентов.
 * **Изменение даты не стирает чужое.** PUT каталога заменяет строку даты
-  целиком; бот дописывает перерыв дня недели из шаблона и прежнюю заметку
-  даты (:func:`_prepare_date_exception`).
+  целиком; бот дописывает перерыв (самой даты, а если изменения на неё нет —
+  дня недели из шаблона) и прежнюю заметку даты (:func:`_prepare_date_exception`).
+* **Повтор — тот же интервал И та же причина.** Отгул с другой причиной —
+  новая строка, а не «такой уже есть».
 * **Можно ли писать** — один ответ с чтениями
   (``services.salon_write_access.schedule_writable``).
 """
@@ -358,9 +360,14 @@ def _time_off_window(body: dict[str, Any], tenant: Any) -> tuple[str, str] | Jso
 
 
 def _same_window_time_off(
-    client: Any, master: CatalogMaster, start_at: str, end_at: str
+    client: Any, master: CatalogMaster, start_at: str, end_at: str, reason: str
 ) -> dict[str, Any] | None:
-    """Отгул с ровно этим интервалом у мастера уже есть — его строка.
+    """Ровно такой отгул у мастера уже есть — его строка.
+
+    «Такой» — тот же интервал И та же причина. Только интервал был бы
+    ловушкой: правка причины («Личные дела» → «Врач») — это новая строка и
+    снятие старой; ответ «такой уже есть» со старой строкой и следом её
+    снятие оставили бы мастера без отгула вовсе.
 
     Страховка от дубля, а не условие записи: не прочиталось — дубля не знаем,
     и запись идёт. Окно чтения — сутки до и после по поясу салона: каталог
@@ -401,7 +408,7 @@ def _same_window_time_off(
             )
         except (TypeError, ValueError):
             continue
-        if same:
+        if same and str(row.get("reason") or "").strip() == reason.strip():
             return row
     return None
 
@@ -423,12 +430,16 @@ def master_time_off(request: HttpRequest, master_id: str) -> HttpResponse:
         return window
     start_at, end_at = window
 
+    reason = str(body.get("reason") or "")
+
     def existing(client: Any, master: CatalogMaster) -> HttpResponse | None:
-        row = _same_window_time_off(client, master, start_at, end_at)
+        row = _same_window_time_off(client, master, start_at, end_at, reason)
         if row is None:
             return None
         logger.info(
-            "admin_api.salon_write.deduplicated op=time_off_create tenant=%s", master.tenant.slug
+            "admin_api.salon_write.deduplicated op=time_off_create actor=%s tenant=%s",
+            request.bot_user.pk,  # type: ignore[attr-defined]
+            master.tenant.slug,
         )
         mirrored = _time_off_row(row, salon_zone(master.tenant))
         return JsonResponse({"data": {**row, **(mirrored or {})}, "existing": True}, status=200)
@@ -449,7 +460,7 @@ def master_time_off(request: HttpRequest, master_id: str) -> HttpResponse:
             specialist_id=catalog_specialist_id(master),
             start_at=start_at,
             end_at=end_at,
-            reason=str(body.get("reason") or ""),
+            reason=reason,
         ),
         success_status=201,
         on_success=in_salon_zone,
@@ -529,17 +540,22 @@ def _prepare_date_exception(
     """Что сохранить вместе с изменением даты, чтобы не стереть чужое (DRF-2936).
 
     PUT каталога заменяет строку даты целиком: всё, чего нет в теле, станет
-    пустым. Два поля бот поэтому дописывает сам, в ``kept``.
+    пустым. Поэтому бот сначала читает строку этой даты и дописывает в ``kept``
+    то, чего экран не правит.
 
-    * **Перерыв дня недели.** Рабочий день на дату без перерыва — это обед,
-      ставший временем для записи. Перерыв из шаблона переносится, если он
-      целиком внутри новых часов; целиком снаружи — не нужен; поперёк —
-      отказ с названной причиной: обрезать его или выбросить значило бы
-      решить за салон. Шаблон не прочитан — не пишем: неизвестный перерыв
-      не то же, что «перерыва нет».
+    * **Перерыв.** Рабочий день без перерыва — это обед, ставший временем для
+      записи. Источник — сама дата, если на неё уже есть изменение: её
+      перерыв — правда о ней, включая «без перерыва» (поставленное в Pro App
+      «10–19 без обеда» правкой часов не превращается обратно в обед шаблона).
+      Изменения на дату нет — перерыв дня недели из шаблона. Перерыв
+      переносится, если он целиком внутри новых часов; целиком снаружи — не
+      нужен; поперёк — отказ с названной причиной: обрезать или выбросить его
+      значило бы решить за салон. Строка даты или шаблон не прочитаны — не
+      пишем: неизвестный перерыв не то же, что «перерыва нет».
     * **Заметка даты.** Экран её не правит; тело без ``note`` сохраняет
-      прежнюю. Не прочиталась — пишется пустая: заметка не время, и запрет
-      записи из-за неё был бы хуже её потери.
+      прежнюю. У выходного (часов нет) строка не прочиталась — пишется пустая
+      заметка: заметка не время, и запрет записи из-за неё был бы хуже её
+      потери.
     """
 
     tenant = master.tenant
@@ -547,8 +563,13 @@ def _prepare_date_exception(
     actor = external_user_id_for(actor_user) if actor_user is not None else None
     specialist = catalog_specialist_id(master)
     day = str(body["date"])
+    start = _hhmm(body.get("start_time"))
+    end = _hhmm(body.get("end_time"))
+    with_hours = bool(body["is_working_day"]) and start is not None and end is not None
 
-    if "note" not in body and actor is not None:
+    current: dict[str, Any] | None = None
+    current_known = False
+    if actor is not None:
         try:
             rows = client.list_schedule_exceptions(
                 actor_external_id=actor,
@@ -559,19 +580,17 @@ def _prepare_date_exception(
             )
         except (SalonAPIError, ValueError) as exc:
             logger.warning(
-                "admin_api.salon_write.note_unread tenant=%s err=%s",
+                "admin_api.salon_write.date_row_unread tenant=%s err=%s",
                 tenant.slug,
                 type(exc).__name__,
             )
         else:
-            for row in rows:
-                if str(row.get("date")) == day:
-                    kept["note"] = row.get("note") or ""
-                    break
+            current_known = True
+            current = next((r for r in rows if str(r.get("date")) == day), None)
+    if "note" not in body and current is not None:
+        kept["note"] = current.get("note") or ""
 
-    start = _hhmm(body.get("start_time"))
-    end = _hhmm(body.get("end_time"))
-    if not body["is_working_day"] or start is None or end is None:
+    if not with_hours or start is None or end is None:
         # Выходной перерыва не несёт; кривые часы отклонит каталог (400).
         return None
     try:
@@ -582,39 +601,55 @@ def _prepare_date_exception(
         return JsonResponse(
             {
                 "error": "schedule_source_not_configured",
-                "detail": f"no active owner/admin staff to read the weekly template for {tenant.slug}; nothing was written",
+                "detail": f"no active owner/admin staff to read the schedule for {tenant.slug}; nothing was written",
             },
             status=503,
         )
-    try:
-        template = client.get_master_schedule(
-            actor_external_id=actor, tenant_slug=tenant.slug, specialist_id=specialist
-        )
-    except SalonAPIError as exc:
-        logger.warning(
-            "admin_api.salon_write.template_unread tenant=%s err=%s",
-            tenant.slug,
-            type(exc).__name__,
-        )
+    if not current_known:
         return JsonResponse(
             {
                 "error": "schedule_unavailable",
-                "detail": "could not read the weekly template to keep its break; nothing was written",
+                "detail": "could not read the date's row to keep its break; nothing was written",
             },
             status=503,
         )
-    row = next((r for r in template if r.get("day_of_week") == weekday), None)
-    if row is None:
-        return JsonResponse(
-            {
-                "error": "schedule_unavailable",
-                "detail": f"the weekly template has no row for weekday {weekday}; nothing was written",
-            },
-            status=503,
-        )
-    break_start = _hhmm(row.get("break_start"))
-    break_end = _hhmm(row.get("break_end"))
-    if not row.get("is_working_day") or break_start is None or break_end is None:
+
+    if current is not None and current.get("is_working_day"):
+        break_start = _hhmm(current.get("break_start"))
+        break_end = _hhmm(current.get("break_end"))
+    else:
+        try:
+            template = client.get_master_schedule(
+                actor_external_id=actor, tenant_slug=tenant.slug, specialist_id=specialist
+            )
+        except SalonAPIError as exc:
+            logger.warning(
+                "admin_api.salon_write.template_unread tenant=%s err=%s",
+                tenant.slug,
+                type(exc).__name__,
+            )
+            return JsonResponse(
+                {
+                    "error": "schedule_unavailable",
+                    "detail": "could not read the weekly template to keep its break; nothing was written",
+                },
+                status=503,
+            )
+        row = next((r for r in template if r.get("day_of_week") == weekday), None)
+        if row is None:
+            return JsonResponse(
+                {
+                    "error": "schedule_unavailable",
+                    "detail": f"the weekly template has no row for weekday {weekday}; nothing was written",
+                },
+                status=503,
+            )
+        if not row.get("is_working_day"):
+            return None
+        break_start = _hhmm(row.get("break_start"))
+        break_end = _hhmm(row.get("break_end"))
+
+    if break_start is None or break_end is None:
         return None
     if start <= break_start and break_end <= end:
         kept["break_start"], kept["break_end"] = break_start, break_end
@@ -624,8 +659,10 @@ def _prepare_date_exception(
     return JsonResponse(
         {
             "error": "validation",
-            "detail": "the weekday's break crosses the new hours",
+            "detail": "the day's break crosses the new hours",
             "details": {
+                # Имя причины прежнее: экран уже его знает. Перерыв — даты или
+                # дня недели, смысл для человека один.
                 "reason": "template_break_crosses_hours",
                 "break_start": break_start,
                 "break_end": break_end,

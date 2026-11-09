@@ -5,23 +5,31 @@
  * меняется (freeze MUST FIX 3, подпись «Изменение только на эту дату»):
  *
  * * рабочий день и его часы — изменение на дату (`PUT date-exceptions`), а
- *   совпавшее с шаблоном — возврат к нему (`DELETE`) или «сохранять нечего»;
- * * недоступность внутри дня — `POST/DELETE time-off`; правка = новая строка
- *   и снятие старой (PATCH нет).
+ *   возврат к шаблону — снятие изменения (`DELETE`), если оно ничего, кроме
+ *   часов, не несёт;
+ * * недоступность внутри дня — `POST/DELETE time-off`; правка строки =
+ *   новая строка и снятие старой (PATCH нет).
+ *
+ * # Черновик — намерения, а не состояние
+ *
+ * Черновик помнит, ЧТО человек сделал: тронул ли часы, что добавил, какие
+ * строки снял — и на каком снимке даты (`basis`). Снимается только снятое
+ * им самим: чужая недоступность, появившаяся после открытия, правкой не
+ * задевается. Черновик живёт на устройстве до часа с последней правки и
+ * переживает переоткрытие Mini App (запись принимается ~10 минут от
+ * открытия).
  *
  * # Как сохраняется
  *
- * 1. Окно записи: каталог принимает изменения ~10 минут от открытия Mini App.
- *    Закрылось — экран просит открыть заново, черновик дня остаётся.
- * 2. Живое состояние даты перечитывается: кто-то правил её, пока человек
- *    думал, — «Расписание могло измениться», без записи.
+ * 1. Окно записи закрылось — экран просит открыть заново, черновик остаётся.
+ * 2. Живое состояние даты перечитывается. Снимок разошёлся с тем, на котором
+ *    правили, — «Расписание могло измениться»: намерения переносятся на
+ *    живое, человек видит новое и жмёт ещё раз.
  * 3. Предпросмотр записей для каждого окна, которое правка ОТНИМАЕТ. Есть
- *    записи — кадр 7, ничего не записано. Предпросмотр не прочитан — отказ:
- *    «записей нет» сказать нельзя.
+ *    записи — кадр 7, ничего не записано. Не прочитан — отказ.
  * 4. Шаги — сначала закрывающие время, потом открывающие; на первом сбое —
  *    стоп и перечитывание. Успех (кадр 8) — только когда перечитанное
- *    совпало с черновиком; ответ потерян — кадр 9 («Проверяем результат»),
- *    повторной записи без проверки нет.
+ *    исполнило намерения; ответ потерян — кадр 9 («Проверяем результат»).
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
@@ -49,12 +57,11 @@ import {
   type MasterDetail,
   type MasterExceptions,
   type MasterSchedule,
-  type SalonClosureRow,
 } from "../../lib/admin-api";
-import { launchAuthDate, signalReady } from "../../lib/max-sdk";
+import { appStartedAtMs } from "../../lib/app-clock";
+import { signalReady } from "../../lib/max-sdk";
 import {
   WT_COPY,
-  addDays,
   classifyWriteError,
   clearDraft,
   closingWindows,
@@ -63,19 +70,24 @@ import {
   dayMonth,
   dayTitle,
   draftApplied,
-  draftsEqual,
   durationLabel,
   fallbackInterval,
-  initialDraft,
+  freshDraft,
+  hasIntent,
   isYmd,
+  listsUnreadable,
   loadDraft,
+  rebaseDraft,
   salonToday,
   saveDraft,
+  snapshotKey,
+  snapshotLayer,
   snapshotOf,
   snapshotsDiffer,
   stepsFor,
   timeOptions,
   toMinutes,
+  visibleTimeOff,
   weekStart,
   workingTimeDayPath,
   workingTimeWeekPath,
@@ -83,9 +95,8 @@ import {
   type ConflictRow,
   type DayDraft,
   type DaySnapshot,
-  type DayTimeOff,
-  type DraftTimeOff,
   type Step,
+  type VisibleTimeOff,
 } from "../../lib/salon-working-time";
 import { backByAction } from "../../lib/screen-back";
 import {
@@ -120,15 +131,17 @@ type Mode =
   | { kind: "edit" }
   | { kind: "saving" }
   | { kind: "conflict"; rows: ConflictRow[] }
-  | { kind: "success" }
+  | { kind: "success"; snap: DaySnapshot }
   | { kind: "pending" }
   | { kind: "partial" }
   | { kind: "reopen" }
   | { kind: "forbidden" };
 
 interface SheetState {
-  /** Ключ правимой строки; `null` — новая. */
+  /** Ключ правимой строки на экране; `null` — новая. */
   key: string | null;
+  /** Сохранённая строка — её номер; новая или ещё не сохранённая — `null`. */
+  id: string | null;
   from: string;
   to: string;
   reason: string;
@@ -143,9 +156,15 @@ async function readDay(masterId: string, ymd: string, signal?: AbortSignal) {
   // поясе и иначе мог бы выпасть из ответа.
   const [schedule, exceptions] = await Promise.all([
     getMasterSchedule(masterId, { signal }),
-    getMasterExceptions(masterId, { from: addDays(ymd, -1), to: addDays(ymd, 1) }, { signal }),
+    getMasterExceptions(masterId, { from: addDaysSafe(ymd, -1), to: addDaysSafe(ymd, 1) }, { signal }),
   ]);
   return { schedule, exceptions, snap: snapshotOf(ymd, schedule, exceptions) };
+}
+
+function addDaysSafe(ymd: string, days: number): string {
+  const [y, m, d] = ymd.split("-").map(Number);
+  const t = new Date(Date.UTC(y ?? 1970, (m ?? 1) - 1, d ?? 1) + days * 86_400_000);
+  return `${t.getUTCFullYear()}-${`${t.getUTCMonth() + 1}`.padStart(2, "0")}-${`${t.getUTCDate()}`.padStart(2, "0")}`;
 }
 
 async function readBookings(masterId: string, ymd: string, signal?: AbortSignal) {
@@ -162,12 +181,15 @@ export function SalonPilotWorkingTimeDayScreen() {
   const navigate = useNavigate();
   const online = useOnline();
   const ymd = isYmd(date) ? date : "";
-  const weekHref = `${workingTimeWeekPath(masterId)}?week=${ymd ? weekStart(ymd) : ""}`;
+  const weekHref = ymd
+    ? `${workingTimeWeekPath(masterId)}?week=${weekStart(ymd)}`
+    : workingTimeWeekPath(masterId);
 
   const [phase, setPhase] = useState<Phase>({ kind: "loading" });
+  const [reload, setReload] = useState(0);
   const [mode, setMode] = useState<Mode>({ kind: "edit" });
   const [draft, setDraft] = useState<DayDraft | null>(null);
-  const [base, setBase] = useState<DayDraft | null>(null);
+  const [restored, setRestored] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [stale, setStale] = useState(false);
   const [sheet, setSheet] = useState<SheetState | null>(null);
@@ -175,6 +197,8 @@ export function SalonPilotWorkingTimeDayScreen() {
   /** «Проверить снова» — не чаще раза в 10 с (общий троттл DRF-2938). */
   const [cooldown, setCooldown] = useState(false);
   const cooldownTimer = useRef<number | null>(null);
+  /** Снимок даты перед записью: по нему видно, легло ли хоть что-то. */
+  const beforeWrite = useRef<DaySnapshot | null>(null);
   const addRef = useRef<HTMLButtonElement | null>(null);
   const ready = useRef(false);
 
@@ -183,6 +207,21 @@ export function SalonPilotWorkingTimeDayScreen() {
       if (cooldownTimer.current !== null) window.clearTimeout(cooldownTimer.current);
     },
     [],
+  );
+
+  // Такой даты нет — неделя мастера, а не вечная ошибка загрузки.
+  useEffect(() => {
+    if (!ymd) navigate(workingTimeWeekPath(masterId), { replace: true });
+  }, [ymd, masterId, navigate]);
+
+  /** Правка человека: черновик и его копия на устройстве (срок — от неё). */
+  const editDraft = useCallback(
+    (next: DayDraft) => {
+      setDraft(next);
+      if (hasIntent(next)) saveDraft(masterId, ymd, next);
+      else clearDraft(masterId, ymd);
+    },
+    [masterId, ymd],
   );
 
   const toWeek = useCallback(
@@ -196,6 +235,8 @@ export function SalonPilotWorkingTimeDayScreen() {
   }, [masterId, ymd, toWeek]);
 
   const onBack = useCallback(() => {
+    // Посреди записи не уходим: сбой шага без экрана никто бы не увидел.
+    if (mode.kind === "saving") return;
     if (sheet) {
       setSheet(null);
       return;
@@ -204,8 +245,9 @@ export function SalonPilotWorkingTimeDayScreen() {
       setMode({ kind: "edit" });
       return;
     }
-    // Ответ потерян — черновик остаётся: вернувшись, человек увидит, что легло.
-    if (mode.kind === "pending" || mode.kind === "partial" || mode.kind === "reopen") {
+    // Исход не полный или неизвестен — черновик остаётся: вернувшись, человек
+    // увидит, что легло, и сохранит оставшееся.
+    if (mode.kind !== "edit") {
       toWeek();
       return;
     }
@@ -213,12 +255,12 @@ export function SalonPilotWorkingTimeDayScreen() {
   }, [sheet, mode.kind, toWeek, leave]);
   const back = useScreenBack(backByAction(onBack));
 
-  const load = useCallback(
-    async (signal: AbortSignal) => {
-      if (!ymd) {
-        setPhase({ kind: "error", err: new Error("bad date") });
-        return;
-      }
+  useEffect(() => {
+    if (!ymd) return;
+    const controller = new AbortController();
+    const signal = controller.signal;
+    setPhase({ kind: "loading" });
+    void (async () => {
       try {
         const [detail, day, book] = await Promise.all([
           getMasterDetail(masterId, { signal }),
@@ -226,18 +268,36 @@ export function SalonPilotWorkingTimeDayScreen() {
           readBookings(masterId, ymd, signal),
         ]);
         if (signal.aborted) return;
-        const data: Ready = {
-          detail,
-          schedule: day.schedule,
-          exceptions: day.exceptions,
-          bookings: book.bookings,
-          today: salonToday(book.tz),
-          snap: day.snap,
-        };
-        const fresh = initialDraft(day.snap, fallbackInterval(day.schedule));
-        setBase(fresh);
-        setDraft(loadDraft(masterId, ymd) ?? fresh);
-        setPhase({ kind: "ready", data });
+        let next = freshDraft(day.snap, fallbackInterval(day.schedule));
+        let wasRestored = false;
+        let wasStale = false;
+        const stored = loadDraft(masterId, ymd);
+        if (stored) {
+          // Черновик сделан на другом снимке — переносим намерения на живое и
+          // говорим об этом; исполненный или пустой — выбрасываем.
+          const rebased = rebaseDraft(day.snap, stored);
+          if (hasIntent(rebased)) {
+            next = rebased;
+            wasRestored = true;
+            wasStale = stored.basis !== snapshotKey(day.snap);
+          } else {
+            clearDraft(masterId, ymd);
+          }
+        }
+        setDraft(next);
+        setRestored(wasRestored);
+        setStale(wasStale);
+        setPhase({
+          kind: "ready",
+          data: {
+            detail,
+            schedule: day.schedule,
+            exceptions: day.exceptions,
+            bookings: book.bookings,
+            today: salonToday(book.tz),
+            snap: day.snap,
+          },
+        });
       } catch (err) {
         if (signal.aborted) return;
         setPhase({ kind: "error", err });
@@ -247,27 +307,16 @@ export function SalonPilotWorkingTimeDayScreen() {
           signalReady();
         }
       }
-    },
-    [masterId, ymd],
-  );
-
-  useEffect(() => {
-    const controller = new AbortController();
-    void load(controller.signal);
+    })();
     return () => controller.abort();
-  }, [load]);
-
-  // Черновик переживает переоткрытие Mini App (окно записи ~10 минут).
-  useEffect(() => {
-    if (!draft || !base) return;
-    if (draftsEqual(draft, base)) clearDraft(masterId, ymd);
-    else saveDraft(masterId, ymd, draft);
-  }, [draft, base, masterId, ymd]);
+  }, [masterId, ymd, reload]);
 
   const data = phase.kind === "ready" ? phase.data : null;
-  const closure: SalonClosureRow | null = data ? closureOn(data.exceptions.closures.rows, ymd) : null;
-  const readOnly = data ? ymd < data.today || !data.exceptions.writable : true;
-  const readOnlyOffs: DayTimeOff[] = data ? data.snap.timeOff.filter((o) => !o.editable) : [];
+  const closure = data ? closureOn(data.exceptions.closures.rows, ymd) : null;
+  const unreadable = data ? listsUnreadable(data.exceptions) : false;
+  const past = data ? ymd < data.today : false;
+  const readOnly = !data || past || !data.exceptions.writable || unreadable;
+  const visible: VisibleTimeOff[] = data && draft ? visibleTimeOff(data.snap, draft) : [];
 
   const replaceData = useCallback(
     (next: { schedule: MasterSchedule; exceptions: MasterExceptions; snap: DaySnapshot }) => {
@@ -278,17 +327,30 @@ export function SalonPilotWorkingTimeDayScreen() {
     [],
   );
 
-  /** Перечитать и решить исход: совпало с черновиком — успех, иначе — частичный. */
+  /**
+   * Перечитать и решить исход: намерения исполнены — успех; ничего не легло
+   * (снимок как до записи) — правка цела, можно повторить; легла часть —
+   * «Сохранено не всё», и черновик переносится на живое.
+   */
   const settle = useCallback(async () => {
     if (!draft) return;
     setChecking(true);
     try {
-      const live = await readDay(masterId, ymd);
-      replaceData(live);
-      if (draftApplied(live.snap, draft)) {
+      const after = await readDay(masterId, ymd);
+      replaceData(after);
+      if (draftApplied(after.snap, draft)) {
         clearDraft(masterId, ymd);
-        setBase(initialDraft(live.snap, fallbackInterval(live.schedule)));
-        setMode({ kind: "success" });
+        setDraft(freshDraft(after.snap, fallbackInterval(after.schedule)));
+        setRestored(false);
+        setStale(false);
+        setMode({ kind: "success", snap: after.snap });
+        return;
+      }
+      editDraft(rebaseDraft(after.snap, draft));
+      const before = beforeWrite.current;
+      if (before && !snapshotsDiffer(before, after.snap)) {
+        setMessage(WT_COPY.day.saveFailed);
+        setMode({ kind: "edit" });
       } else {
         setMode({ kind: "partial" });
       }
@@ -300,7 +362,7 @@ export function SalonPilotWorkingTimeDayScreen() {
       if (cooldownTimer.current !== null) window.clearTimeout(cooldownTimer.current);
       cooldownTimer.current = window.setTimeout(() => setCooldown(false), RECHECK_MIN_INTERVAL_MS);
     }
-  }, [draft, masterId, ymd, replaceData]);
+  }, [draft, masterId, ymd, replaceData, editDraft]);
 
   // Кадр 9 обещает проверить самим: один раз — сразу после входа. Черновик в
   // «проверяем» не меняется, поэтому `settle` здесь стабилен.
@@ -311,20 +373,22 @@ export function SalonPilotWorkingTimeDayScreen() {
     return () => window.clearTimeout(timer);
   }, [pending, settle]);
 
+  /** Шаг записи; у новой недоступности — номер строки, которую сервер вернул. */
   const runStep = useCallback(
-    async (step: Step) => {
+    async (step: Step): Promise<string | null> => {
       switch (step.kind) {
-        case "time_off_create":
-          await createTimeOff(masterId, {
+        case "time_off_create": {
+          const res = await createTimeOff(masterId, {
             date: ymd,
             from: step.item.from,
             to: step.item.to,
             reason: step.item.reason.trim(),
           });
-          return;
+          return res.row.id || null;
+        }
         case "time_off_delete":
           await deleteTimeOff(masterId, step.item.id);
-          return;
+          return null;
         case "date_put":
           await putDateException(
             masterId,
@@ -337,10 +401,10 @@ export function SalonPilotWorkingTimeDayScreen() {
                 }
               : { date: ymd, is_working_day: false },
           );
-          return;
+          return null;
         case "date_delete":
           await deleteDateException(masterId, ymd);
-          return;
+          return null;
       }
     },
     [masterId, ymd],
@@ -349,121 +413,130 @@ export function SalonPilotWorkingTimeDayScreen() {
   const save = useCallback(async () => {
     if (!draft || !data) return;
     setMessage(null);
-    if (draft.working) {
-      if (!draft.start || !draft.end || toMinutes(draft.start) >= toMinutes(draft.end)) {
-        setMessage(WT_COPY.day.invalidInterval);
-        return;
-      }
+    if (
+      draft.hoursTouched &&
+      draft.working &&
+      (!draft.start || !draft.end || toMinutes(draft.start) >= toMinutes(draft.end))
+    ) {
+      setMessage(WT_COPY.day.invalidInterval);
+      return;
     }
     if (!data.exceptions.writable) {
       setMode({ kind: "forbidden" });
       return;
     }
-    if (writeWindowClosed(launchAuthDate())) {
+    if (writeWindowClosed(appStartedAtMs())) {
       saveDraft(masterId, ymd, draft);
       setMode({ kind: "reopen" });
       return;
     }
     setMode({ kind: "saving" });
-
-    let live: Awaited<ReturnType<typeof readDay>>;
     try {
-      live = await readDay(masterId, ymd);
-    } catch {
-      setMessage(WT_COPY.day.saveFailed);
-      setMode({ kind: "edit" });
-      return;
-    }
-    if (snapshotsDiffer(data.snap, live.snap)) {
-      replaceData(live);
-      setStale(true);
-      setMode({ kind: "edit" });
-      return;
-    }
-    setStale(false);
-
-    const steps = stepsFor(live.snap, draft);
-    if (steps.length === 0) {
-      setMessage(WT_COPY.day.nothingToSave);
-      setMode({ kind: "edit" });
-      return;
-    }
-
-    const windows = closingWindows(live.snap, draft);
-    if (windows.length > 0) {
-      let rows: ConflictRow[] | null;
-      try {
-        const [impacts, book] = await Promise.all([
-          Promise.all(
-            windows.map((w) => getScheduleImpact(masterId, { date: ymd, from: w.from, to: w.to })),
-          ),
-          readBookings(masterId, ymd),
-        ]);
-        rows = conflictRows(impacts, book.bookings);
-      } catch {
-        rows = null;
-      }
-      if (rows === null) {
-        setMessage(WT_COPY.day.impactFailed);
+      const live = await readDay(masterId, ymd);
+      if (snapshotKey(live.snap) !== draft.basis) {
+        // Дату меняли, пока правили: показать новое, а не писать вслепую.
+        replaceData(live);
+        editDraft(rebaseDraft(live.snap, draft));
+        setStale(true);
         setMode({ kind: "edit" });
         return;
       }
-      if (rows.length > 0) {
-        setMode({ kind: "conflict", rows });
+      setStale(false);
+
+      const steps = stepsFor(live.snap, draft);
+      if (steps.length === 0) {
+        setMessage(WT_COPY.day.nothingToSave);
+        setMode({ kind: "edit" });
         return;
       }
-    }
 
-    let done = 0;
-    for (const step of steps) {
-      try {
-        await runStep(step);
-        done += 1;
-      } catch (err) {
-        const failure = classifyWriteError(err);
-        if (failure.kind === "stale") {
-          saveDraft(masterId, ymd, draft);
-          setMode({ kind: "reopen" });
-          return;
+      const windows = closingWindows(live.snap, draft);
+      if (windows.length > 0) {
+        let rows: ConflictRow[] | null;
+        try {
+          const [impacts, book] = await Promise.all([
+            Promise.all(
+              windows.map((w) => getScheduleImpact(masterId, { date: ymd, from: w.from, to: w.to })),
+            ),
+            readBookings(masterId, ymd),
+          ]);
+          rows = conflictRows(impacts, book.bookings);
+        } catch {
+          rows = null;
         }
-        if (failure.kind === "forbidden") {
-          setMode({ kind: "forbidden" });
-          return;
-        }
-        if (failure.kind === "unknown") {
-          setMode({ kind: "pending" });
-          return;
-        }
-        if (done === 0 && failure.kind === "conflict") {
-          // Предпросмотр сказал «записей нет», а запись отказала: гонка или
-          // другой пояс. Ничего не записано — кадр 7 без строк.
-          setMode({ kind: "conflict", rows: [] });
-          return;
-        }
-        if (done === 0 && failure.kind === "break_crosses") {
-          setMessage(WT_COPY.day.breakCrosses(failure.from, failure.to));
+        if (rows === null) {
+          setMessage(WT_COPY.day.impactFailed);
           setMode({ kind: "edit" });
           return;
         }
-        if (done === 0) {
-          setMessage(WT_COPY.day.saveFailed);
-          setMode({ kind: "edit" });
+        if (rows.length > 0) {
+          setMode({ kind: "conflict", rows });
           return;
         }
-        // Что-то уже легло: только перечитывание скажет, что именно.
-        await settle();
-        return;
       }
-    }
-    await settle();
-  }, [draft, data, masterId, ymd, replaceData, runStep, settle]);
 
-  const openSheet = (item: DraftTimeOff | null) => {
+      beforeWrite.current = live.snap;
+      // Номера строк, которые сервер вернул на «добавить» (и «такая уже есть»):
+      // их не снимаем в этом же прогоне.
+      const created = new Set<string>();
+      let done = 0;
+      for (const step of steps) {
+        if (step.kind === "time_off_delete" && created.has(step.item.id)) continue;
+        try {
+          const id = await runStep(step);
+          if (id) created.add(id);
+          done += 1;
+        } catch (err) {
+          const failure = classifyWriteError(err, step.kind);
+          if (failure.kind === "gone") {
+            done += 1;
+            continue;
+          }
+          if (failure.kind === "stale") {
+            saveDraft(masterId, ymd, draft);
+            setMode({ kind: "reopen" });
+            return;
+          }
+          if (failure.kind === "forbidden") {
+            setMode({ kind: "forbidden" });
+            return;
+          }
+          if (failure.kind === "unknown") {
+            setMode({ kind: "pending" });
+            return;
+          }
+          if (failure.kind === "break_crosses") {
+            setMessage(WT_COPY.day.breakCrosses(failure.from, failure.to));
+          }
+          if (done === 0) {
+            if (failure.kind === "conflict") {
+              // Предпросмотр сказал «записей нет», а запись отказала: гонка
+              // или другой пояс. Ничего не записано — кадр 7 без строк.
+              setMode({ kind: "conflict", rows: [] });
+              return;
+            }
+            if (failure.kind !== "break_crosses") setMessage(WT_COPY.day.saveFailed);
+            setMode({ kind: "edit" });
+            return;
+          }
+          // Что-то уже легло: только перечитывание скажет, что именно.
+          await settle();
+          return;
+        }
+      }
+      await settle();
+    } catch {
+      setMessage(WT_COPY.day.saveFailed);
+      setMode({ kind: "edit" });
+    }
+  }, [draft, data, masterId, ymd, replaceData, editDraft, runStep, settle]);
+
+  const openSheet = (row: VisibleTimeOff | null) => {
     if (!draft) return;
     setSheet(
-      item
-        ? { key: item.key, from: item.from, to: item.to, reason: item.reason, error: null }
-        : { key: null, from: draft.start || "", to: draft.end || "", reason: "", error: null },
+      row
+        ? { key: row.key, id: row.id, from: row.from, to: row.to, reason: row.reason, error: null }
+        : { key: null, id: null, from: draft.start || "", to: draft.end || "", reason: "", error: null },
     );
   };
 
@@ -478,17 +551,54 @@ export function SalonPilotWorkingTimeDayScreen() {
       return;
     }
     const entry = { from: sheet.from, to: sheet.to, reason: sheet.reason.trim() };
-    const timeOff =
-      sheet.key === null
-        ? [...draft.timeOff, { key: newKey(), id: null, ...entry }]
-        : draft.timeOff.map((o) => (o.key === sheet.key ? { ...o, ...entry } : o));
-    timeOff.sort((a, b) => toMinutes(a.from) - toMinutes(b.from));
-    setDraft({ ...draft, timeOff });
+    let next: DayDraft;
+    if (sheet.key === null) {
+      next = { ...draft, added: [...draft.added, { key: newKey(), ...entry }] };
+    } else if (sheet.id === null) {
+      next = { ...draft, added: draft.added.map((a) => (a.key === sheet.key ? { ...a, ...entry } : a)) };
+    } else {
+      const old = visible.find((v) => v.id === sheet.id);
+      if (old && old.from === entry.from && old.to === entry.to && old.reason.trim() === entry.reason) {
+        setSheet(null);
+        return;
+      }
+      next = {
+        ...draft,
+        removedIds: [...draft.removedIds, sheet.id],
+        added: [...draft.added, { key: newKey(), ...entry }],
+      };
+    }
+    editDraft(next);
     setSheet(null);
+  };
+
+  const removeRow = (row: VisibleTimeOff) => {
+    if (!draft) return;
+    editDraft(
+      row.id === null
+        ? { ...draft, added: draft.added.filter((a) => a.key !== row.key) }
+        : { ...draft, removedIds: [...draft.removedIds, row.id] },
+    );
+  };
+
+  const setHours = (patch: Partial<Pick<DayDraft, "working" | "start" | "end">>) => {
+    if (!draft) return;
+    setMessage(null);
+    editDraft({ ...draft, ...patch, hoursTouched: true });
+  };
+
+  const resetDraft = () => {
+    if (!data) return;
+    clearDraft(masterId, ymd);
+    setDraft(freshDraft(data.snap, fallbackInterval(data.schedule)));
+    setRestored(false);
+    setStale(false);
+    setMessage(null);
   };
 
   const title = ymd ? dayTitle(ymd) : WT_COPY.title;
   const master = data?.detail ?? null;
+  const saving = mode.kind === "saving";
 
   return (
     <div className="screen wt-screen wt-screen--nested">
@@ -497,13 +607,7 @@ export function SalonPilotWorkingTimeDayScreen() {
         {!online ? <SystemState kind="offline" /> : null}
         {phase.kind === "loading" ? <SystemState kind="loading" lines={4} /> : null}
         {phase.kind === "error" ? (
-          <WtLoadError
-            err={phase.err}
-            onRetry={() => {
-              setPhase({ kind: "loading" });
-              void load(new AbortController().signal);
-            }}
-          />
+          <WtLoadError err={phase.err} onRetry={() => setReload((n) => n + 1)} />
         ) : null}
 
         {data && draft && mode.kind === "conflict" ? (
@@ -519,12 +623,12 @@ export function SalonPilotWorkingTimeDayScreen() {
           />
         ) : null}
 
-        {data && draft && mode.kind === "success" ? (
+        {mode.kind === "success" ? (
           <SuccessView
-            draft={draft}
+            snap={mode.snap}
             onHours={() => setMode({ kind: "edit" })}
             onWeek={() => toWeek()}
-            onAnother={() => toWeek(addDays(ymd, 1))}
+            onAnother={() => toWeek(addDaysSafe(ymd, 1))}
           />
         ) : null}
 
@@ -563,6 +667,7 @@ export function SalonPilotWorkingTimeDayScreen() {
             title={WT_COPY.partial.title}
             body={WT_COPY.partial.body}
           >
+            {message ? <p className="wt-message">{message}</p> : null}
             <button type="button" className="btn-primary wt-btn" onClick={() => void save()}>
               {WT_COPY.partial.retry}
             </button>
@@ -585,15 +690,28 @@ export function SalonPilotWorkingTimeDayScreen() {
         {mode.kind === "forbidden" ? (
           <>
             <SystemState kind="forbidden" />
-            <button type="button" className="btn-secondary wt-btn" onClick={() => setMode({ kind: "edit" })}>
+            <button
+              type="button"
+              className="btn-secondary wt-btn"
+              onClick={() => setMode({ kind: "edit" })}
+            >
               {WT_COPY.day.cancel}
             </button>
           </>
         ) : null}
 
-        {data && draft && (mode.kind === "edit" || mode.kind === "saving") ? (
+        {data && draft && (mode.kind === "edit" || saving) ? (
           <section className="wt-editor" aria-label={title}>
             {stale ? <SystemState kind="stale" /> : null}
+            {restored ? (
+              <p className="wt-note">
+                {WT_COPY.day.restored}{" "}
+                <button type="button" className="wt-link" onClick={resetDraft}>
+                  {WT_COPY.day.reset}
+                </button>
+              </p>
+            ) : null}
+            {unreadable ? <p className="wt-note wt-note--warn">{WT_COPY.day.unreadable}</p> : null}
             {closure ? (
               <p className="wt-note wt-note--warn">
                 {closure.start && closure.end
@@ -601,21 +719,16 @@ export function SalonPilotWorkingTimeDayScreen() {
                   : WT_COPY.day.closed}
               </p>
             ) : null}
-            {ymd < data.today ? <p className="wt-note">{WT_COPY.day.past}</p> : null}
-            {!data.exceptions.writable && ymd >= data.today ? <SystemState kind="forbidden" /> : null}
+            {past ? <p className="wt-note">{WT_COPY.day.past}</p> : null}
+            {!data.exceptions.writable && !past ? <SystemState kind="forbidden" /> : null}
 
             <div className="wt-card wt-row">
-              <span className="wt-row__label" id="wt-working-label">
-                {WT_COPY.day.working}
-              </span>
+              <span className="wt-row__label">{WT_COPY.day.working}</span>
               <ToggleSwitch
                 checked={draft.working}
                 ariaLabel={WT_COPY.day.working}
-                disabled={readOnly || mode.kind === "saving"}
-                onChange={(working) => {
-                  setMessage(null);
-                  setDraft({ ...draft, working });
-                }}
+                disabled={readOnly || saving}
+                onChange={(working) => setHours({ working })}
               />
             </div>
             <p className="wt-scope">{WT_COPY.day.scope}</p>
@@ -630,16 +743,15 @@ export function SalonPilotWorkingTimeDayScreen() {
                     id="wt-start"
                     label={WT_COPY.day.start}
                     value={draft.start}
-                    disabled={readOnly || mode.kind === "saving"}
-                    onChange={(start) => setDraft({ ...draft, start })}
+                    disabled={readOnly || saving}
+                    onChange={(start) => setHours({ start })}
                   />
                   <TimeField
                     id="wt-end"
                     label={WT_COPY.day.end}
                     value={draft.end}
-                    allowEndOfDay
-                    disabled={readOnly || mode.kind === "saving"}
-                    onChange={(end) => setDraft({ ...draft, end })}
+                    disabled={readOnly || saving}
+                    onChange={(end) => setHours({ end })}
                   />
                   <div className="wt-row wt-row--plain">
                     <span className="wt-row__label wt-row__label--muted">{WT_COPY.day.duration}</span>
@@ -652,7 +764,7 @@ export function SalonPilotWorkingTimeDayScreen() {
                     {WT_COPY.day.unavailability}
                   </h2>
                   <ul className="wt-offs">
-                    {draft.timeOff.map((item) => (
+                    {visible.map((item) => (
                       <li key={item.key} className="wt-off">
                         <span className="wt-off__text">
                           <span className="wt-off__time">{`${item.from} – ${item.to}`}</span>
@@ -664,7 +776,7 @@ export function SalonPilotWorkingTimeDayScreen() {
                               type="button"
                               className="wt-icon-btn"
                               aria-label={`${WT_COPY.day.edit}: ${item.from} – ${item.to}`}
-                              disabled={mode.kind === "saving"}
+                              disabled={saving}
                               onClick={() => openSheet(item)}
                             >
                               <IconPencil />
@@ -673,13 +785,8 @@ export function SalonPilotWorkingTimeDayScreen() {
                               type="button"
                               className="wt-icon-btn wt-icon-btn--danger"
                               aria-label={`${WT_COPY.day.remove}: ${item.from} – ${item.to}`}
-                              disabled={mode.kind === "saving"}
-                              onClick={() =>
-                                setDraft({
-                                  ...draft,
-                                  timeOff: draft.timeOff.filter((o) => o.key !== item.key),
-                                })
-                              }
+                              disabled={saving}
+                              onClick={() => removeRow(item)}
                             >
                               <IconTrash />
                             </button>
@@ -687,31 +794,33 @@ export function SalonPilotWorkingTimeDayScreen() {
                         )}
                       </li>
                     ))}
-                    {readOnlyOffs.map((item) => (
-                      <li key={`ro-${item.id}`} className="wt-off wt-off--readonly">
-                        <span className="wt-off__text">
-                          <span className="wt-off__time">{`${item.from} – ${item.to}`}</span>
-                          <span className="wt-off__reason">
-                            {[
-                              item.reason,
-                              item.startYmd === item.endYmd
-                                ? null
-                                : `${dayMonth(item.startYmd)} – ${dayMonth(item.endYmd)}`,
-                              WT_COPY.day.readOnly,
-                            ]
-                              .filter(Boolean)
-                              .join(" · ")}
+                    {data.snap.timeOff
+                      .filter((o) => !o.editable)
+                      .map((item) => (
+                        <li key={`ro-${item.id}`} className="wt-off wt-off--readonly">
+                          <span className="wt-off__text">
+                            <span className="wt-off__time">{`${item.from} – ${item.to}`}</span>
+                            <span className="wt-off__reason">
+                              {[
+                                item.reason,
+                                item.startYmd === item.endYmd
+                                  ? null
+                                  : `${dayMonth(item.startYmd)} – ${dayMonth(item.endYmd)}`,
+                                WT_COPY.day.readOnly,
+                              ]
+                                .filter(Boolean)
+                                .join(" · ")}
+                            </span>
                           </span>
-                        </span>
-                      </li>
-                    ))}
+                        </li>
+                      ))}
                   </ul>
                   {readOnly ? null : (
                     <button
                       type="button"
                       ref={addRef}
                       className="wt-add"
-                      disabled={mode.kind === "saving"}
+                      disabled={saving}
                       onClick={() => openSheet(null)}
                     >
                       <span className="wt-add__icon" aria-hidden="true">
@@ -742,18 +851,13 @@ export function SalonPilotWorkingTimeDayScreen() {
                 <button
                   type="button"
                   className="btn-primary wt-btn"
-                  disabled={mode.kind === "saving"}
-                  aria-busy={mode.kind === "saving" ? "true" : undefined}
+                  disabled={saving}
+                  aria-busy={saving ? "true" : undefined}
                   onClick={() => void save()}
                 >
                   {WT_COPY.day.save}
                 </button>
-                <button
-                  type="button"
-                  className="btn-secondary wt-btn"
-                  disabled={mode.kind === "saving"}
-                  onClick={leave}
-                >
+                <button type="button" className="btn-secondary wt-btn" disabled={saving} onClick={leave}>
                   {WT_COPY.day.cancel}
                 </button>
               </div>
@@ -912,17 +1016,20 @@ function ConflictView({
 }
 
 function SuccessView({
-  draft,
+  snap,
   onHours,
   onWeek,
   onAnother,
 }: {
-  draft: DayDraft;
+  /** Перечитанная дата — экран говорит то, что прочёл, а не то, что отправил. */
+  snap: DaySnapshot;
   onHours: () => void;
   onWeek: () => void;
   onAnother: () => void;
 }) {
-  const duration = draft.working ? durationLabel(draft.start, draft.end) : null;
+  const layer = snapshotLayer(snap);
+  const duration = layer.working && layer.start && layer.end ? durationLabel(layer.start, layer.end) : null;
+  const offs = snap.timeOff;
   return (
     <WtStateCard
       tone="success"
@@ -935,8 +1042,8 @@ function SuccessView({
           <span className="wt-summary__text">
             <span className="wt-summary__label">{WT_COPY.success.hours}</span>
             <span className="wt-summary__value">
-              {draft.working
-                ? `${draft.start} – ${draft.end}${duration ? `   (${duration})` : ""}`
+              {layer.working
+                ? `${layer.start} – ${layer.end}${duration ? `   (${duration})` : ""}`
                 : WT_COPY.success.dayOff}
             </span>
           </span>
@@ -948,8 +1055,8 @@ function SuccessView({
           <span className="wt-summary__text">
             <span className="wt-summary__label">{WT_COPY.success.unavailability}</span>
             <span className="wt-summary__value">
-              {draft.working && draft.timeOff.length > 0
-                ? draft.timeOff.map((o) => `${o.from} – ${o.to}`).join(", ")
+              {layer.working && offs.length > 0
+                ? offs.map((o) => `${o.from} – ${o.to}`).join(", ")
                 : WT_COPY.success.none}
             </span>
           </span>

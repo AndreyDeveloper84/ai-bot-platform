@@ -263,7 +263,7 @@ class TestARepeatDoesNotCloseTheTimeTwice:
     def test_the_same_window_already_stored_is_returned_and_nothing_is_written(
         self, client: Client, owner_bot_user: BotUser, synced_master: CatalogMaster, monkeypatch
     ) -> None:
-        # The same moments, in the catalog's UTC.
+        # The same moments, in the catalog's UTC, and the same reason.
         catalog = _Catalog(
             monkeypatch,
             time_off=[
@@ -276,7 +276,11 @@ class TestARepeatDoesNotCloseTheTimeTwice:
             ],
         )
 
-        resp = _post_time_off(client, synced_master, {"date": DAY, "from": "13:00", "to": "15:00"})
+        resp = _post_time_off(
+            client,
+            synced_master,
+            {"date": DAY, "from": "13:00", "to": "15:00", "reason": " Личные дела "},
+        )
 
         assert resp.status_code == 200, resp.content
         body = resp.json()
@@ -286,6 +290,31 @@ class TestARepeatDoesNotCloseTheTimeTwice:
             "2031-01-10T13:00:00+03:00",
         )
         assert (catalog.writes, catalog.exchanged) == ([], 0)
+
+    def test_the_same_window_with_another_reason_is_a_new_row(
+        self, client: Client, owner_bot_user: BotUser, synced_master: CatalogMaster, monkeypatch
+    ) -> None:
+        # Правка причины на экране — новая строка и снятие старой. «Такой уже
+        # есть» со старой строкой и следом её снятие оставили бы мастера без
+        # отгула вовсе.
+        catalog = _Catalog(
+            monkeypatch,
+            time_off=[
+                {
+                    "id": "off-1",
+                    "start_at": "2031-01-10T10:00:00+00:00",
+                    "end_at": "2031-01-10T12:00:00+00:00",
+                    "reason": "Личные дела",
+                }
+            ],
+        )
+
+        resp = _post_time_off(
+            client, synced_master, {"date": DAY, "from": "13:00", "to": "15:00", "reason": "Врач"}
+        )
+
+        assert resp.status_code == 201, resp.content
+        assert catalog.written()["reason"] == "Врач"
 
     def test_a_different_window_is_written(
         self, client: Client, owner_bot_user: BotUser, synced_master: CatalogMaster, monkeypatch
@@ -383,6 +412,81 @@ class TestADateKeepsWhatTheScreenDoesNotEdit:
             "break_start": "13:00",
             "break_end": "14:00",
         }
+        assert (catalog.writes, catalog.exchanged) == ([], 0)
+
+    def test_the_dates_own_break_wins_over_the_weekday(
+        self, client: Client, owner_bot_user: BotUser, synced_master: CatalogMaster, monkeypatch
+    ) -> None:
+        catalog = _Catalog(
+            monkeypatch,
+            exceptions=[
+                {
+                    "id": "exc-1",
+                    "date": DAY,
+                    "is_working_day": True,
+                    "start_time": "10:00:00",
+                    "end_time": "19:00:00",
+                    "break_start": "15:00:00",
+                    "break_end": "16:00:00",
+                    "note": "",
+                }
+            ],
+        )
+
+        resp = _put_date(
+            client,
+            synced_master,
+            {"date": DAY, "is_working_day": True, "start_time": "10:00", "end_time": "18:00"},
+        )
+
+        assert resp.status_code == 200, resp.content
+        written = catalog.written()
+        assert (written["break_start"], written["break_end"]) == ("15:00", "16:00")
+        assert not [r for r in catalog.reads if r.url.path.endswith("/schedule/")]
+
+    def test_a_date_set_without_a_break_does_not_get_the_weekdays_back(
+        self, client: Client, owner_bot_user: BotUser, synced_master: CatalogMaster, monkeypatch
+    ) -> None:
+        # «10–19 без обеда» из Pro App: правка часов не возвращает обед шаблона.
+        catalog = _Catalog(
+            monkeypatch,
+            exceptions=[
+                {
+                    "id": "exc-1",
+                    "date": DAY,
+                    "is_working_day": True,
+                    "start_time": "10:00:00",
+                    "end_time": "19:00:00",
+                    "break_start": None,
+                    "break_end": None,
+                    "note": "",
+                }
+            ],
+        )
+
+        resp = _put_date(
+            client,
+            synced_master,
+            {"date": DAY, "is_working_day": True, "start_time": "10:00", "end_time": "18:00"},
+        )
+
+        assert resp.status_code == 200, resp.content
+        written = catalog.written()
+        assert written["end_time"] == "18:00"
+        assert "break_start" not in written and "break_end" not in written
+
+    def test_an_unread_date_row_writes_nothing(
+        self, client: Client, owner_bot_user: BotUser, synced_master: CatalogMaster, monkeypatch
+    ) -> None:
+        catalog = _Catalog(monkeypatch, unreadable=("/schedule-exceptions/",))
+
+        resp = _put_date(
+            client,
+            synced_master,
+            {"date": DAY, "is_working_day": True, "start_time": "10:00", "end_time": "18:00"},
+        )
+
+        assert (resp.status_code, resp.json()["error"]) == (503, "schedule_unavailable")
         assert (catalog.writes, catalog.exchanged) == ([], 0)
 
     def test_an_unread_template_writes_nothing(

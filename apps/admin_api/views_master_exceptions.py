@@ -136,6 +136,12 @@ def _exception_row(item: dict[str, Any]) -> dict[str, Any] | None:
         # тем же ответом объявлено нерабочим.
         "start": _hhmm(item.get("start_time")) if working else None,
         "end": _hhmm(item.get("end_time")) if working else None,
+        # DRF-2936: перерыв и заметка даты — чем изменение отличается от
+        # шаблона кроме часов. Без них «Рабочее время» сочло бы «10–19 без
+        # обеда» повтором шаблона и сняло бы изменение вместе с заметкой.
+        "break_start": _hhmm(item.get("break_start")) if working else None,
+        "break_end": _hhmm(item.get("break_end")) if working else None,
+        "note": str(item.get("note") or ""),
     }
 
 

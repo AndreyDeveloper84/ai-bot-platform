@@ -14,11 +14,13 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const sdk = vi.hoisted(() => ({ authDate: null as number | null }));
+const clock = vi.hoisted(() => ({ startedAt: 0 }));
+
+vi.mock("../../lib/app-clock", () => ({ appStartedAtMs: () => clock.startedAt }));
 
 vi.mock("../../lib/max-sdk", async (importOriginal) => {
   const original = await importOriginal<typeof import("../../lib/max-sdk")>();
-  return { ...original, launchAuthDate: () => sdk.authDate, signalReady: () => undefined };
+  return { ...original, signalReady: () => undefined };
 });
 
 vi.mock("../../lib/admin-api", async (importOriginal) => {
@@ -41,6 +43,7 @@ vi.mock("../../lib/admin-api", async (importOriginal) => {
 import {
   createTimeOff,
   deleteDateException,
+  deleteTimeOff,
   getMasterDaySchedule,
   getMasterDetail,
   getMasterExceptions,
@@ -69,14 +72,23 @@ const mocked = {
   put: vi.mocked(putDateException),
   remove: vi.mocked(deleteDateException),
   createOff: vi.mocked(createTimeOff),
+  removeOff: vi.mocked(deleteTimeOff),
 };
+
+/** Ни одной записи на сервер — все четыре двери записи молчат. */
+function expectNoWrites() {
+  expect(mocked.put).not.toHaveBeenCalled();
+  expect(mocked.remove).not.toHaveBeenCalled();
+  expect(mocked.createOff).not.toHaveBeenCalled();
+  expect(mocked.removeOff).not.toHaveBeenCalled();
+}
 
 /** Пятница; будущая дата — правка открыта. */
 const DAY = "2031-01-10";
 const DAY_PATH = `/admin/working-time/m-1/${DAY}`;
 
-function launchedAgo(seconds = 5): number {
-  return Math.floor(Date.now() / 1000) - seconds;
+function startedAgo(seconds = 5): number {
+  return Date.now() - seconds * 1000;
 }
 
 function schedule(patch: Partial<MasterSchedule> = {}): MasterSchedule {
@@ -156,6 +168,44 @@ function dayFrame(bookings: Array<{ id: string; first: string; initial: string }
   };
 }
 
+/** Неделя часами сервера: по дню на дату, «Вс» — выходной. */
+function weekFrame(monday: string, allOff = false) {
+  const dates = Array.from({ length: 7 }, (_, i) => {
+    const d = new Date(`${monday}T12:00:00Z`);
+    d.setUTCDate(d.getUTCDate() + i);
+    return d.toISOString().slice(0, 10);
+  });
+  return {
+    tenant_tz: "Europe/Moscow",
+    from: dates[0]!,
+    to: dates[6]!,
+    days: dates.map((date, i) => ({
+      date,
+      is_off_day: allOff || i === 6,
+      working_hours: allOff || i === 6 ? null : { start: "10:00", end: "19:00" },
+      bookings: [],
+      blocks: [],
+      free_windows: [],
+      conflicts: [],
+    })),
+  };
+}
+
+function offsOn(rows: Array<{ id: string; from: string; to: string; reason: string }>): MasterExceptions {
+  return exceptions({
+    time_off: {
+      state: "parsed",
+      rows: rows.map((r) => ({
+        id: r.id,
+        start_at: `${DAY}T${r.from}:00+03:00`,
+        end_at: `${DAY}T${r.to}:00+03:00`,
+        reason: r.reason,
+      })),
+      seen_fields: [],
+    },
+  });
+}
+
 function impact(rows: Array<{ id: string; from: string; to: string }> = []): ScheduleImpact {
   return {
     start_at: "",
@@ -208,7 +258,7 @@ const where = () => screen.getByTestId("where").textContent ?? "";
 beforeEach(() => {
   vi.clearAllMocks();
   window.localStorage.clear();
-  sdk.authDate = launchedAgo();
+  clock.startedAt = startedAgo();
   mocked.detail.mockResolvedValue(DETAIL);
   mocked.schedule.mockResolvedValue(schedule());
   mocked.exceptions.mockResolvedValue(exceptions());
@@ -277,10 +327,15 @@ describe("кадр 1 — список мастеров", () => {
 });
 
 describe("кадр 2 — неделя мастера", () => {
-  it("даты недели, «Выходной», пояснение про обычную неделю, переход к дате", async () => {
+  beforeEach(() => {
+    mocked.day.mockImplementation(async (_id, params) => weekFrame(params?.from ?? "2031-01-06"));
+  });
+
+  it("даты недели часами сервера, «Выходной», пояснение про обычную неделю, переход к дате", async () => {
     renderAt("/admin/working-time/m-1?week=2031-01-06");
 
     expect(await screen.findByText("6 – 12 янв. 2031")).toBeInTheDocument();
+    expect(mocked.day).toHaveBeenCalledWith("m-1", { from: "2031-01-06", to: "2031-01-12" }, expect.anything());
     expect(screen.getByText(/Обычная неделя задаётся в каталоге салона/)).toBeInTheDocument();
     const week = screen.getByRole("list", { name: "6 – 12 янв. 2031" });
     expect(within(week).getAllByRole("button")).toHaveLength(7);
@@ -301,6 +356,7 @@ describe("кадр 2 — неделя мастера", () => {
   });
 
   it("«График не настроен»; кнопка открывает правку отдельных дат", async () => {
+    mocked.day.mockImplementation(async (_id, params) => weekFrame(params?.from ?? "2031-01-06", true));
     mocked.schedule.mockResolvedValue(
       schedule({
         has_working_day: false,
@@ -322,11 +378,18 @@ describe("кадр 2 — неделя мастера", () => {
     expect(screen.getByText(/Здесь меняются отдельные даты/)).toBeInTheDocument();
     expect(within(screen.getByRole("list", { name: "6 – 12 янв. 2031" })).getAllByText("Выходной")).toHaveLength(7);
   });
+
+  it("список не разобран — сказано, что показано не всё", async () => {
+    mocked.exceptions.mockResolvedValue(exceptions({ unreadable_lists: ["time_off"] }));
+    renderAt("/admin/working-time/m-1?week=2031-01-06");
+
+    expect(await screen.findByText(/Показано не всё/)).toBeInTheDocument();
+  });
 });
 
 describe("кадры 3–9 — одна дата", () => {
-  async function openDay() {
-    renderAt(DAY_PATH);
+  async function openDay(path = DAY_PATH) {
+    renderAt(path);
     await screen.findByRole("switch", { name: "Рабочий день" });
   }
 
@@ -363,6 +426,15 @@ describe("кадры 3–9 — одна дата", () => {
     });
   });
 
+  it("конец рабочего дня — не «24:00»: его не сохранить", async () => {
+    await openDay();
+    const end = screen.getByLabelText("Окончание");
+
+    // Присутствие впереди отсутствия: варианты на месте.
+    expect(within(end).getByRole("option", { name: "23:30" })).toBeInTheDocument();
+    expect(within(end).queryByRole("option", { name: "24:00" })).not.toBeInTheDocument();
+  });
+
   it("выходной поверх записи — кадр 7: запись видна по имени, на сервер ничего не ушло", async () => {
     mocked.impact.mockResolvedValue(impact([{ id: "a-1", from: "13:00", to: "14:00" }]));
     mocked.day.mockResolvedValue(dayFrame([{ id: "a-1", first: "Анна", initial: "К." }]));
@@ -376,7 +448,7 @@ describe("кадры 3–9 — одна дата", () => {
     expect(screen.getByText("Анна К.")).toBeInTheDocument();
     expect(mocked.impact).toHaveBeenCalledWith("m-1", { date: DAY, from: "00:00", to: "24:00" });
     await settleScenario();
-    expect(mocked.put).not.toHaveBeenCalled();
+    expectNoWrites();
 
     fireEvent.click(screen.getByRole("button", { name: "Перейти к записям" }));
     expect(where()).toBe(`/admin/bookings/a-1|${JSON.stringify({ from: DAY_PATH })}`);
@@ -400,30 +472,24 @@ describe("кадры 3–9 — одна дата", () => {
     expect(mocked.put).not.toHaveBeenCalled();
   });
 
-  it("ничего не менял — «сохранять нечего», записи нет", async () => {
+  it("ничего не менял — «сохранять нечего», ни одной записи", async () => {
+    // Изменение на дату, равное шаблону: без правки часов оно не снимается.
+    mocked.exceptions.mockResolvedValue(exceptionOn(true, "10:00", "19:00"));
     await openDay();
 
     fireEvent.click(screen.getByRole("button", { name: "Сохранить" }));
 
     expect(await screen.findByText(/сохранять нечего/)).toBeInTheDocument();
     await settleScenario();
-    expect(mocked.put).not.toHaveBeenCalled();
-    expect(mocked.createOff).not.toHaveBeenCalled();
+    expectNoWrites();
   });
 
-  it("недоступность из шторки уходит датой и часами салона, с причиной", async () => {
+  it("недоступность из шторки уходит датой и часами салона; после успеха повтор ничего не пишет", async () => {
+    const saved = offsOn([{ id: "off-1", from: "13:00", to: "15:00", reason: "Личные дела" }]);
     mocked.exceptions
       .mockResolvedValueOnce(exceptions())
       .mockResolvedValueOnce(exceptions())
-      .mockResolvedValue(
-        exceptions({
-          time_off: {
-            state: "parsed",
-            rows: [{ id: "off-1", start_at: `${DAY}T13:00:00+03:00`, end_at: `${DAY}T15:00:00+03:00`, reason: "Личные дела" }],
-            seen_fields: [],
-          },
-        }),
-      );
+      .mockResolvedValue(saved);
     mocked.createOff.mockResolvedValue({
       row: { id: "off-1", start_at: `${DAY}T13:00:00+03:00`, end_at: `${DAY}T15:00:00+03:00`, reason: "Личные дела" },
       existing: false,
@@ -448,6 +514,39 @@ describe("кадры 3–9 — одна дата", () => {
       to: "15:00",
       reason: "Личные дела",
     });
+    expect(window.localStorage.getItem(`max:wt-draft:m-1:${DAY}`)).toBeNull();
+
+    // «Рабочие часы ›» — назад к правке: черновик начат заново, повтор пуст.
+    fireEvent.click(screen.getByRole("button", { name: /Рабочие часы/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "Сохранить" }));
+    expect(await screen.findByText(/сохранять нечего/)).toBeInTheDocument();
+    await settleScenario();
+    expect(mocked.createOff).toHaveBeenCalledTimes(1);
+    expect(mocked.removeOff).not.toHaveBeenCalled();
+  });
+
+  it("правка одной причины — новая строка и снятие ровно старой", async () => {
+    mocked.exceptions
+      .mockResolvedValueOnce(offsOn([{ id: "off-1", from: "13:00", to: "15:00", reason: "Личные дела" }]))
+      .mockResolvedValueOnce(offsOn([{ id: "off-1", from: "13:00", to: "15:00", reason: "Личные дела" }]))
+      .mockResolvedValue(offsOn([{ id: "off-2", from: "13:00", to: "15:00", reason: "Врач" }]));
+    mocked.createOff.mockResolvedValue({
+      row: { id: "off-2", start_at: `${DAY}T13:00:00+03:00`, end_at: `${DAY}T15:00:00+03:00`, reason: "Врач" },
+      existing: false,
+    });
+    mocked.removeOff.mockResolvedValue(undefined);
+    await openDay();
+
+    fireEvent.click(screen.getByRole("button", { name: "Изменить: 13:00 – 15:00" }));
+    const sheet = await screen.findByRole("dialog");
+    fireEvent.change(within(sheet).getByLabelText("Причина"), { target: { value: "Врач" } });
+    fireEvent.click(within(sheet).getByRole("button", { name: "Сохранить" }));
+    fireEvent.click(screen.getByRole("button", { name: "Сохранить" }));
+
+    expect(await screen.findByRole("heading", { name: "График обновлён" })).toBeInTheDocument();
+    expect(mocked.createOff).toHaveBeenCalledWith("m-1", { date: DAY, from: "13:00", to: "15:00", reason: "Врач" });
+    expect(mocked.removeOff).toHaveBeenCalledTimes(1);
+    expect(mocked.removeOff).toHaveBeenCalledWith("m-1", "off-1");
   });
 
   it("без причины недоступность не добавляется", async () => {
@@ -479,7 +578,7 @@ describe("кадры 3–9 — одна дата", () => {
   });
 
   it("окно записи закрыто — просит открыть заново, черновик остаётся на устройстве", async () => {
-    sdk.authDate = launchedAgo(20 * 60);
+    clock.startedAt = startedAgo(20 * 60);
     await openDay();
 
     fireEvent.change(screen.getByLabelText("Окончание"), { target: { value: "18:00" } });
@@ -489,21 +588,80 @@ describe("кадры 3–9 — одна дата", () => {
     expect(window.localStorage.getItem(`max:wt-draft:m-1:${DAY}`)).toContain("18:00");
     await settleScenario();
     expect(mocked.impact).not.toHaveBeenCalled();
-    expect(mocked.put).not.toHaveBeenCalled();
+    expectNoWrites();
   });
 
-  it("дату изменили, пока правили, — «Расписание могло измениться», без записи", async () => {
-    mocked.exceptions
-      .mockResolvedValueOnce(exceptions())
-      .mockResolvedValue(exceptionOn(false, null, null));
+  it("дату изменили, пока правили, — чужая недоступность видна и не снимается", async () => {
+    const foreign = offsOn([{ id: "z", from: "16:00", to: "17:00", reason: "Больничный" }]);
+    mocked.exceptions.mockResolvedValueOnce(exceptions()).mockResolvedValue(foreign);
+    mocked.put.mockResolvedValue({} as never);
     await openDay();
 
     fireEvent.change(screen.getByLabelText("Окончание"), { target: { value: "18:00" } });
     fireEvent.click(screen.getByRole("button", { name: "Сохранить" }));
 
     expect(await screen.findByText("Расписание могло измениться")).toBeInTheDocument();
+    expect(screen.getByText("16:00 – 17:00")).toBeInTheDocument();
     await settleScenario();
-    expect(mocked.put).not.toHaveBeenCalled();
+    expectNoWrites();
+
+    // Второе нажатие — по живому снимку: пишутся только свои намерения.
+    fireEvent.click(screen.getByRole("button", { name: "Сохранить" }));
+    await waitFor(() => expect(mocked.put).toHaveBeenCalledTimes(1));
+    await settleScenario();
+    expect(mocked.removeOff).not.toHaveBeenCalled();
+  });
+
+  it("черновик с другого снимка — перенесён на живое, сказано об этом, чужое не снимается", async () => {
+    window.localStorage.setItem(
+      `max:wt-draft:m-1:${DAY}`,
+      JSON.stringify({
+        savedAt: Date.now() - 30 * 60 * 1000,
+        draft: { basis: "old", hoursTouched: true, working: true, start: "10:00", end: "18:00", added: [], removedIds: [] },
+      }),
+    );
+    mocked.exceptions.mockResolvedValue(offsOn([{ id: "z", from: "16:00", to: "17:00", reason: "Больничный" }]));
+    mocked.put.mockResolvedValue({} as never);
+    await openDay();
+
+    expect(screen.getByText(/которые вы не сохранили, восстановлены/)).toBeInTheDocument();
+    expect(screen.getByText("Расписание могло измениться")).toBeInTheDocument();
+    expect(screen.getByText("16:00 – 17:00")).toBeInTheDocument();
+    expect(screen.getByLabelText("Окончание")).toHaveValue("18:00");
+
+    fireEvent.click(screen.getByRole("button", { name: "Сохранить" }));
+    await waitFor(() => expect(mocked.put).toHaveBeenCalledTimes(1));
+    await settleScenario();
+    expect(mocked.removeOff).not.toHaveBeenCalled();
+  });
+
+  it("«Сбросить» возвращает живое и выбрасывает черновик", async () => {
+    window.localStorage.setItem(
+      `max:wt-draft:m-1:${DAY}`,
+      JSON.stringify({
+        savedAt: Date.now(),
+        draft: { basis: "old", hoursTouched: true, working: true, start: "10:00", end: "18:00", added: [], removedIds: [] },
+      }),
+    );
+    await openDay();
+    expect(screen.getByLabelText("Окончание")).toHaveValue("18:00");
+
+    fireEvent.click(screen.getByRole("button", { name: "Сбросить" }));
+
+    expect(screen.getByLabelText("Окончание")).toHaveValue("19:00");
+    expect(window.localStorage.getItem(`max:wt-draft:m-1:${DAY}`)).toBeNull();
+  });
+
+  it("«назад» посреди записи не уводит с экрана", async () => {
+    mocked.impact.mockReturnValue(new Promise(() => undefined));
+    await openDay();
+    fireEvent.change(screen.getByLabelText("Окончание"), { target: { value: "18:00" } });
+    fireEvent.click(screen.getByRole("button", { name: "Сохранить" }));
+    await waitFor(() => expect(mocked.impact).toHaveBeenCalled());
+
+    fireEvent.click(screen.getByRole("button", { name: "Назад" }));
+
+    expect(where()).toMatch(new RegExp(`^${DAY_PATH}\\|`));
   });
 
   it("предпросмотр не прочитан — отказ, записи нет", async () => {
@@ -515,7 +673,15 @@ describe("кадры 3–9 — одна дата", () => {
 
     expect(await screen.findByText(/Не удалось проверить записи на это время/)).toBeInTheDocument();
     await settleScenario();
-    expect(mocked.put).not.toHaveBeenCalled();
+    expectNoWrites();
+  });
+
+  it("список даты не разобран — изменять нельзя, и сказано почему", async () => {
+    mocked.exceptions.mockResolvedValue(exceptions({ unreadable_lists: ["time_off"] }));
+    await openDay();
+
+    expect(screen.getByText(/не удалось разобрать — изменять её пока нельзя/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Сохранить" })).not.toBeInTheDocument();
   });
 
   it("прошедшая дата — только чтение", async () => {
@@ -524,5 +690,12 @@ describe("кадры 3–9 — одна дата", () => {
     expect(await screen.findByText("Прошедшую дату изменить нельзя.")).toBeInTheDocument();
     expect(screen.getByRole("switch", { name: "Рабочий день" })).toHaveAttribute("aria-disabled", "true");
     expect(screen.queryByRole("button", { name: "Сохранить" })).not.toBeInTheDocument();
+  });
+
+  it("такой даты нет — неделя мастера, а не вечная ошибка", async () => {
+    mocked.day.mockImplementation(async (_id, params) => weekFrame(params?.from ?? "2031-01-06"));
+    renderAt("/admin/working-time/m-1/2026-13-45");
+
+    await waitFor(() => expect(where()).toMatch(/^\/admin\/working-time\/m-1(\?|\|)/));
   });
 });
