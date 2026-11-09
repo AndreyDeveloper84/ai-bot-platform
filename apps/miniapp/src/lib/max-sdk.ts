@@ -62,6 +62,20 @@ export function getInitData(): string {
 }
 
 /**
+ * Когда открыто Mini App — `auth_date` подписанного пакета запуска, секунды.
+ *
+ * Отдаётся факт, а не пакет: сырой initData читают только законные читатели
+ * (`auth-headers.guard`). Нужен тем, кому важен возраст запуска: каталог
+ * принимает запись салона по initData не старше 10 минут (DRF-2936). Нет
+ * пакета или поля — `null`.
+ */
+export function launchAuthDate(): number | null {
+  const raw = new URLSearchParams(getInitData()).get("auth_date");
+  const value = raw ? Number(raw) : NaN;
+  return Number.isFinite(value) && value > 0 ? value : null;
+}
+
+/**
  * Deeplink payload passed by MAX when the Mini App is opened via an
  * ``open_app`` inline-keyboard button. Welcome skill emits flat-slug
  * payloads (e.g. ``open_catalog``); ``parseStartRoute`` maps them to

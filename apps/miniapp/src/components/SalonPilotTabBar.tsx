@@ -131,7 +131,14 @@ export const SALON_PILOT_TAB_SPECS: readonly TabSpec[] = [
 
 const TABS = SALON_PILOT_TAB_SPECS;
 
-export function SalonPilotTabBar() {
+/**
+ * `active` — явное «это раздел вкладки X» для экрана, чей адрес не равен
+ * адресу вкладки: «Рабочее время» (DRF-2936) живёт под «Расписанием», и
+ * freeze DRF-2865 рисует панель с отмеченным «Расписанием». Явный признак, а
+ * не префиксное сравнение: префикс подсветил бы вкладку и на вложенных
+ * потоках, где панели быть не должно (см. ниже).
+ */
+export function SalonPilotTabBar({ active }: { active?: SalonPilotTabKey } = {}) {
   const navigate = useNavigate();
   const location = useLocation();
 
@@ -155,7 +162,7 @@ export function SalonPilotTabBar() {
         // DRF-1235 прямо запрещает держать под ними нижнюю панель.
         // Префиксное сравнение подсветило бы вкладку на экране, где
         // панели вообще не должно быть.
-        const isActive = location.pathname === tab.to;
+        const isActive = active ? tab.key === active : location.pathname === tab.to;
         return (
           <button
             type="button"

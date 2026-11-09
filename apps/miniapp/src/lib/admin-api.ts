@@ -1332,11 +1332,10 @@ export interface MasterExceptions {
   closures: WireList<SalonClosureRow>;
   unreadable_lists: string[];
   /**
-   * Можно ли отсюда менять график. Сегодня всегда `false`, и это говорит
-   * СЕРВЕР, а не догадывается экран: все записывающие маршруты салонной
-   * поверхности закрыты, а §117 разрешает credential path только после трёх
-   * проверок. Кнопка, которой сервер не примет, — то же пустое обещание,
-   * что «Найти время» без контракта доступности.
+   * Может ли этот человек отсюда менять время мастера — отгулы и изменения
+   * на дату (DRF-2607, запись от его имени). Говорит СЕРВЕР, а не догадывается
+   * экран: владелец или администратор И Mini App из салонного бота — тот же
+   * ответ, что даст запись (DRF-2936). Недельный шаблон не пишется нигде.
    */
   writable: boolean;
 }
@@ -1383,10 +1382,10 @@ export interface ScheduleImpact {
     unreadable_rows: number;
   };
   /**
-   * Всегда `false`, и это говорит сервер: закрытие времени и решение по
-   * каждой записи — в Pro App, где администратор вошёл под своим именем
-   * (реестр §150, срез В). Кнопки «закрыть» здесь нет не потому, что не
-   * успели, а потому, что сервер её не примет.
+   * Может ли этот человек отсюда менять время мастера (тот же ответ, что у
+   * `MasterExceptions.writable`). Закрытие времени, которое никого не
+   * вытесняет, пишется из «Рабочего времени» (DRF-2936); решение по каждой
+   * затронутой записи — по-прежнему в Pro App (`next_step`).
    */
   writable: boolean;
   next_step: "pro_app";
@@ -1410,6 +1409,73 @@ export const getScheduleImpact = (
     { method: "GET", signal: init.signal },
   );
 };
+
+// --- Запись времени мастера салона (DRF-2607, экран DRF-2936) ----------------
+//
+// Пишется от имени человека: его initData меняется в каталоге на короткий
+// токен. Отказы — машинными кодами, слова экрану даёт экран:
+//   403 salon_write_refused — «нет прав» и «токен не выдан» одним кодом;
+//   401 stale — запуск Mini App слишком старый для записи (≈10 минут);
+//   409 has_active_appointments — в периоде живые записи, ничего не записано;
+//   503 salon_write_outcome_unknown — ушло, ответ потерян: могло записаться.
+
+/** Строка изменения на дату — как её хранит каталог. */
+export interface DateExceptionRow {
+  id: string;
+  date: string;
+  is_working_day: boolean;
+  start_time: string | null;
+  end_time: string | null;
+  break_start: string | null;
+  break_end: string | null;
+  note: string;
+}
+
+/**
+ * Изменение на одну дату: другие часы или «не работает». Недельный шаблон не
+ * меняется. Строка на (мастер, дата) одна: повтор заменяет её, а не множит.
+ */
+export const putDateException = (
+  masterId: string,
+  body: { date: string; is_working_day: boolean; start_time?: string; end_time?: string },
+): Promise<DateExceptionRow> =>
+  request<{ data: DateExceptionRow }>(
+    `/api/v1/admin/masters/${encodeURIComponent(masterId)}/date-exceptions/`,
+    { method: "PUT", body: JSON.stringify(body) },
+  ).then((env) => env.data);
+
+/** Вернуть дату к недельному шаблону. Изменения на дату нет — 404. */
+export const deleteDateException = (masterId: string, date: string): Promise<void> =>
+  request<void>(
+    `/api/v1/admin/masters/${encodeURIComponent(masterId)}/date-exceptions/${encodeURIComponent(date)}/`,
+    { method: "DELETE" },
+  );
+
+export interface CreatedTimeOff {
+  /** Строка в поясе САЛОНА — как у `getMasterExceptions`. */
+  row: MasterTimeOffRow;
+  /** Такой интервал уже стоял: сервер вернул его и ничего не записал. */
+  existing: boolean;
+}
+
+/**
+ * Недоступность мастера внутри даты — датой и часами САЛОНА (`to` может быть
+ * `24:00`, конец суток). Смещение прикладывает сервер.
+ */
+export const createTimeOff = (
+  masterId: string,
+  body: { date: string; from: string; to: string; reason: string },
+): Promise<CreatedTimeOff> =>
+  request<{ data: MasterTimeOffRow; existing?: boolean }>(
+    `/api/v1/admin/masters/${encodeURIComponent(masterId)}/time-off/`,
+    { method: "POST", body: JSON.stringify(body) },
+  ).then((env) => ({ row: env.data, existing: env.existing === true }));
+
+export const deleteTimeOff = (masterId: string, timeOffId: string): Promise<void> =>
+  request<void>(
+    `/api/v1/admin/masters/${encodeURIComponent(masterId)}/time-off/${encodeURIComponent(timeOffId)}/`,
+    { method: "DELETE" },
+  );
 
 export const getSalonDayFrame = (
   date?: string,

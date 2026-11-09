@@ -100,6 +100,9 @@ import { SalonBillingRedirect } from "./components/SalonBillingRedirect";
 import { AdminTeamScreen } from "./screens/admin/AdminTeamScreen";
 import { SalonPilotAylaScreen } from "./screens/admin/SalonPilotAylaScreen";
 import { SalonPilotScheduleScreen } from "./screens/admin/SalonPilotScheduleScreen";
+import { SalonPilotWorkingTimeDayScreen } from "./screens/admin/SalonPilotWorkingTimeDayScreen";
+import { SalonPilotWorkingTimeScreen } from "./screens/admin/SalonPilotWorkingTimeScreen";
+import { SalonPilotWorkingTimeWeekScreen } from "./screens/admin/SalonPilotWorkingTimeWeekScreen";
 import { SalonPilotTodayScreen } from "./screens/admin/SalonPilotTodayScreen";
 import { BookingWhenScreen } from "./screens/BookingWhenScreen";
 import { CustomerBookingConfirmScreen } from "./screens/CustomerBookingConfirmScreen";
@@ -330,6 +333,42 @@ function adminRouteElements(me: MeResponse): React.ReactNode {
             <SalonPilotScheduleScreen me={me} />
           ) : (
             <AdminSectionDeniedScreen me={me} section="Расписание" />
+          )
+        }
+      />
+      {/*
+        DRF-2936 — «Рабочее время мастеров» (макет DRF-2865): раздел
+        «Расписания», вход — «⋯» в его шапке. Тот же страж, что у тройки:
+        правит время мастера владелец или администратор, ресепшн видит
+        график в «Расписании» (§141), сюда — отказ.
+      */}
+      <Route
+        path="/admin/working-time"
+        element={
+          canOpenSalonPilot(me) ? (
+            <SalonPilotWorkingTimeScreen />
+          ) : (
+            <AdminSectionDeniedScreen me={me} section="Рабочее время" />
+          )
+        }
+      />
+      <Route
+        path="/admin/working-time/:masterId"
+        element={
+          canOpenSalonPilot(me) ? (
+            <SalonPilotWorkingTimeWeekScreen />
+          ) : (
+            <AdminSectionDeniedScreen me={me} section="Рабочее время" />
+          )
+        }
+      />
+      <Route
+        path="/admin/working-time/:masterId/:date"
+        element={
+          canOpenSalonPilot(me) ? (
+            <SalonPilotWorkingTimeDayScreen />
+          ) : (
+            <AdminSectionDeniedScreen me={me} section="Рабочее время" />
           )
         }
       />

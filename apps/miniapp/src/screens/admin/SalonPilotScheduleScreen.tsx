@@ -100,7 +100,9 @@ import {
   confirmationState,
 } from "../../lib/schedule-confirmation-state";
 import { formatSlotTime } from "../../lib/format";
+import { WORKING_TIME_ROOT } from "../../lib/salon-working-time";
 import { SalonPilotFrame } from "./SalonPilotFrame";
+import { WorkingTimeMenu } from "./WorkingTimeParts";
 
 /** Сегодня в местном исчислении браузера — та же дата, что подставит сервер. */
 function today(): string {
@@ -416,7 +418,16 @@ export function SalonPilotScheduleScreen({ me }: { me: MeResponse }) {
   const timeline = useMemo(() => (salon ? groupByStart(salon) : []), [salon]);
 
   return (
-    <SalonPilotFrame me={me} title="Расписание">
+    <SalonPilotFrame
+      me={me}
+      title="Расписание"
+      actions={
+        <WorkingTimeMenu
+          masterId={mode === "one" && selected ? selected : null}
+          onOpen={(state) => navigate(WORKING_TIME_ROOT, { state })}
+        />
+      }
+    >
       {masters !== null && masters.length === 0 && (
         <div className="callout" role="status">
           <p style={{ margin: 0 }}>
@@ -906,19 +917,19 @@ export function SalonPilotScheduleScreen({ me }: { me: MeResponse }) {
                   </ul>
                 </>
               )}
-              {!impact.writable && (
-                // Не кнопка, а подсказка: сервер закрытие отсюда не примет,
-                // и рисовать «Закрыть» значило бы обещать то, чего нет.
-                <p
-                  style={{
-                    margin: "var(--s-2) 0 0",
-                    color: "var(--c-text-secondary)",
-                  }}
-                >
-                  Закрыть время и решить по каждой записи — перенос или отмена —
-                  можно в Pro App под своим именем. Здесь только показ.
-                </p>
-              )}
+              {/* Не кнопка, а подсказка, и не по `writable`: этот экран время
+                  не закрывает при любом ответе сервера. Закрытие — в
+                  «Рабочем времени» (DRF-2936), решения по записям — в Pro App. */}
+              <p
+                style={{
+                  margin: "var(--s-2) 0 0",
+                  color: "var(--c-text-secondary)",
+                }}
+              >
+                Закрыть время, если записей в нём нет, можно в «Рабочем времени»
+                (меню ⋮). Решить по каждой записи — перенос или отмена — можно в
+                Pro App под своим именем. Здесь только показ.
+              </p>
             </div>
           )}
         </section>

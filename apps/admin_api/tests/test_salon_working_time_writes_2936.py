@@ -304,7 +304,10 @@ class TestARepeatDoesNotCloseTheTimeTwice:
         resp = _post_time_off(client, synced_master, {"date": DAY, "from": "13:00", "to": "15:00"})
 
         assert resp.status_code == 201, resp.content
-        assert "existing" not in resp.json()
+        body = resp.json()
+        # Presence first: the answer is the written row.
+        assert body["data"]["id"] == "row-1"
+        assert "existing" not in body
         assert len(catalog.writes) == 1
 
     def test_the_read_spans_the_day_before_and_after(
