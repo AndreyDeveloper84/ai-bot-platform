@@ -199,6 +199,12 @@ export function SalonPilotWorkingTimeDayScreen() {
   const cooldownTimer = useRef<number | null>(null);
   /** Снимок даты перед записью: по нему видно, легло ли хоть что-то. */
   const beforeWrite = useRef<DaySnapshot | null>(null);
+  /**
+   * Намерение, которое писали: черновик, перенесённый на живой снимок перед
+   * записью (пара «снял и вернул ту же» сокращена). Исход судится по нему же
+   * — иначе сокращённая пара читалась бы как «сохранено не всё».
+   */
+  const writtenIntent = useRef<DayDraft | null>(null);
   const addRef = useRef<HTMLButtonElement | null>(null);
   const ready = useRef(false);
 
@@ -333,12 +339,14 @@ export function SalonPilotWorkingTimeDayScreen() {
    * «Сохранено не всё», и черновик переносится на живое.
    */
   const settle = useCallback(async () => {
-    if (!draft) return;
+    const intent = writtenIntent.current ?? draft;
+    if (!intent) return;
     setChecking(true);
     try {
       const after = await readDay(masterId, ymd);
       replaceData(after);
-      if (draftApplied(after.snap, draft)) {
+      if (draftApplied(after.snap, intent)) {
+        writtenIntent.current = null;
         clearDraft(masterId, ymd);
         setDraft(freshDraft(after.snap, fallbackInterval(after.schedule)));
         setRestored(false);
@@ -346,7 +354,7 @@ export function SalonPilotWorkingTimeDayScreen() {
         setMode({ kind: "success", snap: after.snap });
         return;
       }
-      editDraft(rebaseDraft(after.snap, draft));
+      editDraft(rebaseDraft(after.snap, intent));
       const before = beforeWrite.current;
       if (before && !snapshotsDiffer(before, after.snap)) {
         setMessage(WT_COPY.day.saveFailed);
@@ -443,14 +451,15 @@ export function SalonPilotWorkingTimeDayScreen() {
       }
       setStale(false);
 
-      const steps = stepsFor(live.snap, draft);
+      const effective = rebaseDraft(live.snap, draft);
+      const steps = stepsFor(live.snap, effective);
       if (steps.length === 0) {
         setMessage(WT_COPY.day.nothingToSave);
         setMode({ kind: "edit" });
         return;
       }
 
-      const windows = closingWindows(live.snap, draft);
+      const windows = closingWindows(live.snap, effective);
       if (windows.length > 0) {
         let rows: ConflictRow[] | null;
         try {
@@ -476,6 +485,7 @@ export function SalonPilotWorkingTimeDayScreen() {
       }
 
       beforeWrite.current = live.snap;
+      writtenIntent.current = effective;
       // Номера строк, которые сервер вернул на «добавить» (и «такая уже есть»):
       // их не снимаем в этом же прогоне.
       const created = new Set<string>();

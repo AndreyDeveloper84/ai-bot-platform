@@ -475,6 +475,75 @@ class TestADateKeepsWhatTheScreenDoesNotEdit:
         assert written["end_time"] == "18:00"
         assert "break_start" not in written and "break_end" not in written
 
+    @pytest.mark.parametrize("end_time", ["19:00", "17:00"])
+    def test_a_lunch_that_fell_out_with_narrowed_hours_comes_back_when_they_widen(
+        self,
+        client: Client,
+        owner_bot_user: BotUser,
+        synced_master: CatalogMaster,
+        monkeypatch,
+        end_time: str,
+    ) -> None:
+        # Ревью №2, блокер: дату сузили до 10–13 — обед шаблона 13–14 оказался
+        # снаружи и не записан. Расширение обратно не должно отдать 13–14 под
+        # запись: у даты обеда нет не по решению салона, а из-за часов.
+        catalog = _Catalog(
+            monkeypatch,
+            exceptions=[
+                {
+                    "id": "exc-1",
+                    "date": DAY,
+                    "is_working_day": True,
+                    "start_time": "10:00:00",
+                    "end_time": "13:00:00",
+                    "break_start": None,
+                    "break_end": None,
+                    "note": "",
+                }
+            ],
+        )
+
+        resp = _put_date(
+            client,
+            synced_master,
+            {"date": DAY, "is_working_day": True, "start_time": "10:00", "end_time": end_time},
+        )
+
+        assert resp.status_code == 200, resp.content
+        written = catalog.written()
+        assert written["end_time"] == end_time
+        assert (written["break_start"], written["break_end"]) == ("13:00", "14:00")
+
+    def test_a_date_without_a_break_and_an_unread_template_writes_nothing(
+        self, client: Client, owner_bot_user: BotUser, synced_master: CatalogMaster, monkeypatch
+    ) -> None:
+        # Намеренно ли у даты нет обеда, решает шаблон; не прочитан — не пишем.
+        catalog = _Catalog(
+            monkeypatch,
+            exceptions=[
+                {
+                    "id": "exc-1",
+                    "date": DAY,
+                    "is_working_day": True,
+                    "start_time": "10:00:00",
+                    "end_time": "13:00:00",
+                    "break_start": None,
+                    "break_end": None,
+                    "note": "",
+                }
+            ],
+            unreadable=("/schedule/",),
+        )
+
+        resp = _put_date(
+            client,
+            synced_master,
+            {"date": DAY, "is_working_day": True, "start_time": "10:00", "end_time": "19:00"},
+        )
+
+        assert (resp.status_code, resp.json()["error"]) == (503, "schedule_unavailable")
+        assert (catalog.writes, catalog.exchanged) == ([], 0)
+
     def test_an_unread_date_row_writes_nothing(
         self, client: Client, owner_bot_user: BotUser, synced_master: CatalogMaster, monkeypatch
     ) -> None:

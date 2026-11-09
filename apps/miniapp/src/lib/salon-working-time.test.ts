@@ -46,7 +46,8 @@ import {
 /** Пятница. */
 const DAY = "2031-01-10";
 
-function schedule(): MasterSchedule {
+/** Шаблон 10–19 с понедельника по субботу; `lunch` — обед рабочих дней. */
+function schedule(lunch: [string, string] | null = null): MasterSchedule {
   return {
     source: "ayla",
     has_working_day: true,
@@ -55,8 +56,8 @@ function schedule(): MasterSchedule {
       is_working_day: i < 6,
       start_time: i < 6 ? "10:00:00" : null,
       end_time: i < 6 ? "19:00:00" : null,
-      break_start: null,
-      break_end: null,
+      break_start: i < 6 && lunch ? `${lunch[0]}:00` : null,
+      break_end: i < 6 && lunch ? `${lunch[1]}:00` : null,
     })),
     confirmation: { confirmed_at: null, confirmed_by: null, is_current: false, fingerprint: "f", block: null },
   };
@@ -85,6 +86,7 @@ function withOffs(rows: MasterTimeOffRow[], patch: Partial<MasterExceptions> = {
   return exceptions({ time_off: { state: "parsed", rows, seen_fields: [] }, ...patch });
 }
 
+/** Строка изменения в форме нынешнего сервера: перерыв и заметка всегда есть. */
 function withException(
   start: string,
   end: string,
@@ -93,7 +95,19 @@ function withException(
   return exceptions({
     exceptions: {
       state: "parsed",
-      rows: [{ id: "exc-1", date: DAY, is_working_day: true, start, end, ...extra }],
+      rows: [
+        {
+          id: "exc-1",
+          date: DAY,
+          is_working_day: true,
+          start,
+          end,
+          break_start: null,
+          break_end: null,
+          note: "",
+          ...extra,
+        },
+      ],
       seen_fields: [],
     },
   });
@@ -166,6 +180,27 @@ describe("снимается только снятое человеком", () =
     expect(stepsFor(snap(now), rebased).map((s) => s.kind)).toEqual(["date_put"]);
   });
 
+  it("часы, изменённые кем-то другим после начала правки, — живые: правка не ляжет поверх чужой", () => {
+    // Ревью №2, №4: человек правил 10–19 → 10–18, а в Pro App дату сделали
+    // 12–16. Второе нажатие не должно молча записать 10–18 поверх 12–16.
+    const draft: DayDraft = { ...fresh(), hoursTouched: true, end: "18:00" };
+    const now = snap(withException("12:00", "16:00"));
+
+    const rebased = rebaseDraft(now, draft);
+    expect(rebased).toMatchObject({ hoursTouched: false, working: true, start: "12:00", end: "16:00" });
+    expect(rebased.basisLayer).toEqual({ working: true, start: "12:00", end: "16:00" });
+    expect(stepsFor(now, rebased)).toEqual([]);
+  });
+
+  it("часы не менял никто, кроме человека, — его правка переносится", () => {
+    const draft: DayDraft = { ...fresh(), hoursTouched: true, end: "18:00" };
+    const now = snap(withOffs([off("16:00", "17:00", "foreign", "Больничный")]));
+
+    const rebased = rebaseDraft(now, draft);
+    expect(rebased).toMatchObject({ hoursTouched: true, start: "10:00", end: "18:00" });
+    expect(stepsFor(now, rebased).map((s) => s.kind)).toEqual(["date_put"]);
+  });
+
   it("после записи исполненное выпадает: повторное сохранение ничего не снимает", () => {
     const before = exceptions();
     const draft: DayDraft = {
@@ -222,6 +257,75 @@ describe("изменение на дату — по намерению, с со�
         layer: { working: true, start: "10:00", end: "19:00" },
       });
     }
+  });
+
+  it("обед шаблона выпал из-за суженных часов — возврат к шаблону снимает изменение, обед вернётся", () => {
+    // Ревью №2, блокер: дату сужали до 10–13, обед 13–14 оказался снаружи и
+    // не записан. «Без обеда» здесь не решение салона, а следствие часов.
+    const s = snapshotOf(DAY, schedule(["13:00", "14:00"]), withException("10:00", "13:00"));
+    const draft: DayDraft = { ...freshDraft(s, ["", ""]), hoursTouched: true, start: "10:00", end: "19:00" };
+    expect(dateActionFor(s, draft)).toEqual({ kind: "delete" });
+  });
+
+  it("«без обеда» поставлено намеренно — обед шаблона помещался в часы даты: не снимать", () => {
+    const s = snapshotOf(DAY, schedule(["13:00", "14:00"]), withException("10:00", "18:00"));
+    const draft: DayDraft = { ...freshDraft(s, ["", ""]), hoursTouched: true, start: "10:00", end: "19:00" };
+    expect(dateActionFor(s, draft)).toEqual({
+      kind: "put",
+      layer: { working: true, start: "10:00", end: "19:00" },
+    });
+  });
+
+  it("свой перерыв, равный обеду шаблона, — ничего сверх часов, снимается", () => {
+    const ex = withException("10:00", "18:00", { break_start: "13:00", break_end: "14:00" });
+    const s = snapshotOf(DAY, schedule(["13:00", "14:00"]), ex);
+    const draft: DayDraft = { ...freshDraft(s, ["", ""]), hoursTouched: true, start: "10:00", end: "19:00" };
+    expect(dateActionFor(s, draft)).toEqual({ kind: "delete" });
+  });
+
+  it("выходной на дату → рабочий по шаблону: снять изменение — у выходного перерыва нет", () => {
+    const ex = exceptions({
+      exceptions: {
+        state: "parsed",
+        rows: [
+          {
+            id: "exc-1",
+            date: DAY,
+            is_working_day: false,
+            start: null,
+            end: null,
+            break_start: null,
+            break_end: null,
+            note: "",
+          },
+        ],
+        seen_fields: [],
+      },
+    });
+    const s = snapshotOf(DAY, schedule(["13:00", "14:00"]), ex);
+    const draft: DayDraft = {
+      ...freshDraft(s, ["10:00", "19:00"]),
+      hoursTouched: true,
+      working: true,
+      start: "10:00",
+      end: "19:00",
+    };
+    expect(dateActionFor(s, draft)).toEqual({ kind: "delete" });
+  });
+
+  it("прежний сервер без полей перерыва и заметки — изменение не снимается вслепую", () => {
+    const ex = exceptions({
+      exceptions: {
+        state: "parsed",
+        rows: [{ id: "exc-1", date: DAY, is_working_day: true, start: "12:00", end: "16:00" }],
+        seen_fields: [],
+      },
+    });
+    const draft: DayDraft = { ...fresh(ex), hoursTouched: true, start: "10:00", end: "19:00" };
+    expect(dateActionFor(snap(ex), draft)).toEqual({
+      kind: "put",
+      layer: { working: true, start: "10:00", end: "19:00" },
+    });
   });
 
   it("выходной — изменение на дату", () => {

@@ -595,6 +595,11 @@ export interface AddedTimeOff {
 export interface DayDraft {
   /** Отпечаток снимка, на котором правили (`snapshotKey`). */
   basis: string;
+  /**
+   * Часы даты на том же снимке. Разошлись с живыми — часы менял кто-то
+   * другой, и правка часов человека писалась бы поверх невидимой ему чужой.
+   */
+  basisLayer: DayLayer;
   /** Часы или «рабочий день» меняли. Нет — о дне черновик ничего не говорит. */
   hoursTouched: boolean;
   working: boolean;
@@ -610,6 +615,7 @@ export function freshDraft(snap: DaySnapshot, fallback: [string, string]): DayDr
   const layer = snapshotLayer(snap);
   return {
     basis: snapshotKey(snap),
+    basisLayer: layer,
     hoursTouched: false,
     working: layer.working,
     start: layer.start ?? fallback[0],
@@ -659,7 +665,10 @@ export function visibleTimeOff(snap: DaySnapshot, draft: DayDraft): VisibleTimeO
  * * снятие строки, которой больше нет, — уже сделано;
  * * новая строка, которая уже есть, — уже сделана;
  * * новая строка, равная снятой, — пара ничего не меняет;
- * * часы, совпавшие с живыми, — больше не изменение; не тронутые — живые.
+ * * часы, совпавшие с живыми, — больше не изменение; не тронутые — живые;
+ * * часы, которые после начала правки изменил кто-то другой, — живые: правка
+ *   человека легла бы поверх чужой, которой он не видел. Экран показывает
+ *   новые часы под «Расписание могло измениться», решает человек.
  */
 export function rebaseDraft(snap: DaySnapshot, draft: DayDraft): DayDraft {
   const live = snap.timeOff.filter((o) => o.editable);
@@ -675,9 +684,11 @@ export function rebaseDraft(snap: DaySnapshot, draft: DayDraft): DayDraft {
     added.push(item);
   }
   const layer = snapshotLayer(snap);
-  const hoursTouched = draft.hoursTouched && !sameLayer(draftLayer(draft), layer);
+  const foreignHours = !sameLayer(draft.basisLayer, layer);
+  const hoursTouched = draft.hoursTouched && !foreignHours && !sameLayer(draftLayer(draft), layer);
   return {
     basis: snapshotKey(snap),
+    basisLayer: layer,
     hoursTouched,
     working: hoursTouched ? draft.working : layer.working,
     start: hoursTouched ? draft.start : (layer.start ?? draft.start),
@@ -692,13 +703,33 @@ export type DateAction =
   | { kind: "put"; layer: DayLayer }
   | { kind: "delete" };
 
-/** Изменение на дату несёт что-то, кроме часов: свой перерыв или заметку. */
+/**
+ * Изменение на дату несёт что-то, кроме часов: свою заметку или свой
+ * перерыв. Перерыв читается как на сервере (`_prepare_date_exception`):
+ *
+ * * у выходного перерыва нет по построению, и к выходному шаблона перерыв
+ *   ничего не значит — несёт только заметка;
+ * * свой перерыв, не равный обеду шаблона, — несёт;
+ * * своего перерыва нет, а обед шаблона в часы изменения помещался — «без
+ *   обеда» поставлено намеренно, несёт; не помещался — обед выпал из-за
+ *   часов (дату сужали), и снятие изменения вернёт его;
+ * * прежний сервер этих полей не отдаёт — неизвестно, значит несёт: снять
+ *   вслепую — потерять заметку.
+ */
 function exceptionCarriesMore(snap: DaySnapshot): boolean {
   const ex = snap.exception;
   if (!ex) return false;
-  const own = ex.break_start && ex.break_end ? `${ex.break_start}-${ex.break_end}` : "";
-  const weekday = snap.templateBreak ? snap.templateBreak.join("-") : "";
-  return own !== weekday || (ex.note ?? "").trim() !== "";
+  if (ex.note === undefined || ex.note.trim() !== "") return true;
+  if (!ex.is_working_day || !snap.template.working) return false;
+  if (ex.break_start === undefined || ex.break_end === undefined) return true;
+  const weekday = snap.templateBreak;
+  const ownFrom = hm(ex.break_start);
+  const ownTo = hm(ex.break_end);
+  if (ownFrom && ownTo) return !weekday || ownFrom !== weekday[0] || ownTo !== weekday[1];
+  if (!weekday) return false;
+  const from = hm(ex.start);
+  const to = hm(ex.end);
+  return Boolean(from && to && from <= weekday[0] && weekday[1] <= to);
 }
 
 /**
@@ -943,11 +974,19 @@ function isText(v: unknown): v is string {
   return typeof v === "string";
 }
 
+function isLayer(v: unknown): v is DayLayer {
+  if (!v || typeof v !== "object") return false;
+  const l = v as Record<string, unknown>;
+  const time = (t: unknown) => t === null || isText(t);
+  return typeof l.working === "boolean" && time(l.start) && time(l.end);
+}
+
 function isDraft(v: unknown): v is DayDraft {
   if (!v || typeof v !== "object") return false;
   const d = v as Record<string, unknown>;
   return (
     isText(d.basis) &&
+    isLayer(d.basisLayer) &&
     typeof d.hoursTouched === "boolean" &&
     typeof d.working === "boolean" &&
     isText(d.start) &&

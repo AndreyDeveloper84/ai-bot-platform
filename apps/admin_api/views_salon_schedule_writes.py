@@ -534,6 +534,20 @@ def _hhmm(value: Any) -> str | None:
     return None
 
 
+def _break_of(row: dict[str, Any]) -> tuple[str, str] | None:
+    """Перерыв строки каталога (даты или дня недели); неполный — ``None``."""
+
+    start = _hhmm(row.get("break_start"))
+    end = _hhmm(row.get("break_end"))
+    return (start, end) if start is not None and end is not None else None
+
+
+def _break_inside(brk: tuple[str, str], start: str | None, end: str | None) -> bool:
+    """Перерыв целиком внутри часов ``start``–``end`` (часы неизвестны — нет)."""
+
+    return start is not None and end is not None and start <= brk[0] and brk[1] <= end
+
+
 def _prepare_date_exception(
     client: Any, master: CatalogMaster, body: dict[str, Any], kept: dict[str, Any]
 ) -> HttpResponse | None:
@@ -544,14 +558,18 @@ def _prepare_date_exception(
     то, чего экран не правит.
 
     * **Перерыв.** Рабочий день без перерыва — это обед, ставший временем для
-      записи. Источник — сама дата, если на неё уже есть изменение: её
-      перерыв — правда о ней, включая «без перерыва» (поставленное в Pro App
-      «10–19 без обеда» правкой часов не превращается обратно в обед шаблона).
-      Изменения на дату нет — перерыв дня недели из шаблона. Перерыв
-      переносится, если он целиком внутри новых часов; целиком снаружи — не
-      нужен; поперёк — отказ с названной причиной: обрезать или выбросить его
-      значило бы решить за салон. Строка даты или шаблон не прочитаны — не
-      пишем: неизвестный перерыв не то же, что «перерыва нет».
+      записи. Источник — сама дата, если у её рабочего изменения есть свой
+      перерыв: он правда о ней. Рабочее изменение БЕЗ перерыва читается по
+      его прежним часам. Обед дня недели в них помещался — «без обеда»
+      поставлено намеренно (Pro App «10–19 без обеда»), и правка часов его не
+      возвращает. Не помещался — обед выпал из-за часов (дату сужали до
+      10–13), и при расширении действует обед шаблона: иначе «сузил, потом
+      вернул» молча отдал бы обед под запись. Изменения на дату нет или оно
+      выходной — перерыв дня недели из шаблона. Перерыв переносится, если он
+      целиком внутри новых часов; целиком снаружи — не нужен; поперёк — отказ
+      с названной причиной: обрезать или выбросить его значило бы решить за
+      салон. Строка даты или шаблон не прочитаны — не пишем: неизвестный
+      перерыв не то же, что «перерыва нет».
     * **Заметка даты.** Экран её не правит; тело без ``note`` сохраняет
       прежнюю. У выходного (часов нет) строка не прочиталась — пишется пустая
       заметка: заметка не время, и запрет записи из-за неё был бы хуже её
@@ -614,9 +632,10 @@ def _prepare_date_exception(
             status=503,
         )
 
-    if current is not None and current.get("is_working_day"):
-        break_start = _hhmm(current.get("break_start"))
-        break_end = _hhmm(current.get("break_end"))
+    working_row = current if current is not None and current.get("is_working_day") else None
+    own_break = _break_of(working_row) if working_row is not None else None
+    if own_break is not None:
+        break_start, break_end = own_break
     else:
         try:
             template = client.get_master_schedule(
@@ -646,12 +665,18 @@ def _prepare_date_exception(
             )
         if not row.get("is_working_day"):
             return None
-        break_start = _hhmm(row.get("break_start"))
-        break_end = _hhmm(row.get("break_end"))
+        weekday_break = _break_of(row)
+        if weekday_break is None:
+            return None
+        break_start, break_end = weekday_break
+        if working_row is not None and _break_inside(
+            weekday_break, _hhmm(working_row.get("start_time")), _hhmm(working_row.get("end_time"))
+        ):
+            # Обед дня недели помещался в прежние часы даты, а у даты его нет:
+            # «без обеда» поставлено намеренно, правка часов его не отменяет.
+            return None
 
-    if break_start is None or break_end is None:
-        return None
-    if start <= break_start and break_end <= end:
+    if _break_inside((break_start, break_end), start, end):
         kept["break_start"], kept["break_end"] = break_start, break_end
         return None
     if break_end <= start or break_start >= end:

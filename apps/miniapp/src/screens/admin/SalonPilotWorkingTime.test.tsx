@@ -123,11 +123,23 @@ function exceptions(patch: Partial<MasterExceptions> = {}): MasterExceptions {
   };
 }
 
+/** Строка изменения в форме нынешнего сервера: перерыв и заметка всегда есть. */
 function exceptionOn(isWorking: boolean, start: string | null, end: string | null): MasterExceptions {
   return exceptions({
     exceptions: {
       state: "parsed",
-      rows: [{ id: "exc-1", date: DAY, is_working_day: isWorking, start, end }],
+      rows: [
+        {
+          id: "exc-1",
+          date: DAY,
+          is_working_day: isWorking,
+          start,
+          end,
+          break_start: null,
+          break_end: null,
+          note: "",
+        },
+      ],
       seen_fields: [],
     },
   });
@@ -617,7 +629,16 @@ describe("кадры 3–9 — одна дата", () => {
       `max:wt-draft:m-1:${DAY}`,
       JSON.stringify({
         savedAt: Date.now() - 30 * 60 * 1000,
-        draft: { basis: "old", hoursTouched: true, working: true, start: "10:00", end: "18:00", added: [], removedIds: [] },
+        draft: {
+          basis: "old",
+          basisLayer: { working: true, start: "10:00", end: "19:00" },
+          hoursTouched: true,
+          working: true,
+          start: "10:00",
+          end: "18:00",
+          added: [],
+          removedIds: [],
+        },
       }),
     );
     mocked.exceptions.mockResolvedValue(offsOn([{ id: "z", from: "16:00", to: "17:00", reason: "Больничный" }]));
@@ -635,12 +656,36 @@ describe("кадры 3–9 — одна дата", () => {
     expect(mocked.removeOff).not.toHaveBeenCalled();
   });
 
-  it("«Сбросить» возвращает живое и выбрасывает черновик", async () => {
+  it("черновик прежнего формата (без часов снимка) выбрасывается, а не применяется", async () => {
     window.localStorage.setItem(
       `max:wt-draft:m-1:${DAY}`,
       JSON.stringify({
         savedAt: Date.now(),
         draft: { basis: "old", hoursTouched: true, working: true, start: "10:00", end: "18:00", added: [], removedIds: [] },
+      }),
+    );
+    await openDay();
+
+    expect(screen.getByLabelText("Окончание")).toHaveValue("19:00");
+    expect(screen.queryByText(/которые вы не сохранили, восстановлены/)).toBeNull();
+    expect(window.localStorage.getItem(`max:wt-draft:m-1:${DAY}`)).toBeNull();
+  });
+
+  it("«Сбросить» возвращает живое и выбрасывает черновик", async () => {
+    window.localStorage.setItem(
+      `max:wt-draft:m-1:${DAY}`,
+      JSON.stringify({
+        savedAt: Date.now(),
+        draft: {
+          basis: "old",
+          basisLayer: { working: true, start: "10:00", end: "19:00" },
+          hoursTouched: true,
+          working: true,
+          start: "10:00",
+          end: "18:00",
+          added: [],
+          removedIds: [],
+        },
       }),
     );
     await openDay();
