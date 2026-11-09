@@ -93,6 +93,7 @@ from apps.orchestrator.discovery import (
     requested_services,
 )
 from apps.orchestrator import master_preference
+from apps.orchestrator.cards_prose_guard import unverified_service_words
 from apps.orchestrator.fast_path import claims_direct_show_masters
 from apps.orchestrator.handoff import handoff_to_booking
 from apps.orchestrator.knowledge_licence import KnowledgeLicence
@@ -1746,6 +1747,21 @@ def _render_zero_result(
     )
 
 
+def _shown_services(cards: list[Any] | None) -> list[str]:
+    """Названия услуг на карточках, которые уйдут человеку — для строки «по твоим словам»."""
+    names = (str(getattr(card, "service_name", "") or "") for card in (cards or []))
+    return [name for name in names if name][:_MAX_MASTER_CARDS]
+
+
+def _searched_words(args: dict[str, Any]) -> list[str]:
+    """Всё, по чему шёл поиск ``show_masters``: услуга, город, мастер, список услуг."""
+    parts = [str(args.get(key) or "") for key in ("specialization", "city", "master")]
+    services = args.get("services")
+    if isinstance(services, list):
+        parts.extend(str(item or "") for item in services)
+    return [part for part in parts if part.strip()]
+
+
 def _render_pending(
     cards: list[Any],
     args: dict[str, Any],
@@ -2226,6 +2242,7 @@ def _concierge_turn(
                         conversation,
                         city=(pending_args or {}).get("city"),
                         specialization=(pending_args or {}).get("specialization"),
+                        shown_services=_shown_services(pending_cards),
                     ),
                 )
                 return _reply(
@@ -2309,9 +2326,9 @@ def _concierge_turn(
         )
         if grounded != specialization:
             # ``grounded`` is safe to log and safe to put in ``spec`` below:
-            # the guard only returns the turn when its content words ARE some
-            # service's name, so a turn carrying anything else — a phone
-            # number, an address, a sentence — cannot reach this line.
+            # it is the service's name as the CATALOG spells it (plus a city
+            # we serve, in the catalog's spelling) — never the person's turn,
+            # so nothing they typed beside the name can reach this line.
             logger.info(
                 "orchestrator.concierge.show_masters.regrounded "
                 "model_spec=%r said=%r trace=%s pass=%d",
@@ -2321,6 +2338,15 @@ def _concierge_turn(
                 pass_index,
             )
             specialization = grounded
+            # What was SEARCHED travels on, not what the model asked for. The
+            # tool-result message of the next pass, the «Показать ещё» ref,
+            # the query ref on every card and the «по твоим словам» line all
+            # read ``args``; left as the model wrote it, the second pass was
+            # told the tool had searched for «массаж» while the cards under it
+            # were for the service the person named, and page two of the same
+            # list re-ran the model's search instead of this one.
+            if isinstance(args, dict):
+                args = {**args, "specialization": grounded}
             # The model's split came from the same stale read, so it cannot
             # be trusted to describe this turn either. Dropping it costs the
             # DRF-1312 «а маникюра ни у кого нет» line on this one turn and
@@ -2379,6 +2405,14 @@ def _concierge_turn(
                 limit=page_size + 1,
                 resolve_service=True,
                 rotation_seed=rotation_seed(conversation),
+                # A service called by its catalog name is answered with the
+                # masters who perform it, not with everyone who shares a word
+                # with it (pilot 09.11). Unconditional, because «Показать ещё»
+                # re-runs this search from ``fetch_master_page`` with the flag
+                # on and page two must be cut from the list page one was. The
+                # search cuts only when a service is called by the very words
+                # of the request, so an ordinary enumeration is left whole.
+                named_service_only=True,
             ),
             offset=0,
             limit=page_size,
@@ -2763,6 +2797,7 @@ def _concierge_turn(
                     conversation,
                     city=(pending_args or {}).get("city"),
                     specialization=(pending_args or {}).get("specialization"),
+                    shown_services=_shown_services(pending_cards),
                 ),
             )
             return _reply(
@@ -2812,6 +2847,39 @@ def _concierge_turn(
     )
     reply_text = text[:_MAX_REPLY_CHARS]
     if pending_cards:
+        # The model keeps the words — unless the words name a service the
+        # search never looked for. Pilot, 09.11: «нашёл мастеров, которые
+        # предлагают биоэнергетический массаж» over the result of a search
+        # for «массаж», three of whose five masters do not perform it. The
+        # cards were an honest answer to the search that ran; the sentence is
+        # what made them a false one. See ``cards_prose_guard`` for the rule
+        # and for the direction it errs in.
+        unverified = unverified_service_words(
+            message_text, text, searched=_searched_words(pending_args)
+        )
+        if unverified:
+            logger.info(
+                "orchestrator.concierge.prose_names_unsearched_service stems=%s trace=%s",
+                ",".join(unverified)[:_MAX_LOGGED_ARG_CHARS],
+                trace_id,
+            )
+            rendered = _render_pending(
+                pending_cards,
+                pending_args,
+                pending_more_offset,
+                recap=render_search_recap(
+                    message_text,
+                    conversation,
+                    city=pending_args.get("city"),
+                    specialization=pending_args.get("specialization"),
+                    shown_services=_shown_services(pending_cards),
+                ),
+            )
+            return _reply(
+                text=rendered.text,
+                action_data=rendered.action_data,
+                persisted=True,
+            )
         action_data = _render_master_cards(
             pending_cards[:_MAX_MASTER_CARDS],
             city=pending_args.get("city"),
@@ -2825,6 +2893,7 @@ def _concierge_turn(
             conversation,
             city=pending_args.get("city"),
             specialization=pending_args.get("specialization"),
+            shown_services=_shown_services(pending_cards),
         )
         if recap:
             reply_text = f"{text[: _MAX_REPLY_CHARS - len(recap) - 2].rstrip()}\n\n{recap}"
@@ -2970,6 +3039,10 @@ def generate_direct_show_masters_reply(
             limit=_MAX_MASTER_CARDS + 1,
             resolve_service=True,
             rotation_seed=rotation_seed(conversation),
+            # Same rule as the model's path, for the reason
+            # ``claims_direct_show_masters`` is checked on both: a chip tap
+            # must not get a different list depending on the door it took.
+            named_service_only=True,
         ),
         offset=0,
         limit=_MAX_MASTER_CARDS,
@@ -2997,7 +3070,12 @@ def generate_direct_show_masters_reply(
         cards,
         specialization=message_text,
         more_offset=more_offset,
-        recap=render_search_recap(message_text, conversation, specialization=message_text),
+        recap=render_search_recap(
+            message_text,
+            conversation,
+            specialization=message_text,
+            shown_services=_shown_services(cards),
+        ),
     )
 
 

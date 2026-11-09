@@ -45,6 +45,7 @@ from apps.marketplace.discovery import (
     discover_salons,
     discover_services,
     get_salon,
+    name_stems,
     parse_query,
     parse_stems,
     query_stems,
@@ -1107,6 +1108,9 @@ def fetch_master_page(
         offset=offset,
         resolve_service=True,
         rotation_seed=rotation_seed(conversation),
+        # A named service is answered with the masters who perform it — on
+        # every page, since «Показать ещё» re-runs this same search.
+        named_service_only=True,
     )
     return split_master_page(cards, offset=offset, limit=limit)
 
@@ -2870,8 +2874,89 @@ def _turn_is_this_service_name(name: str, turn_stems: list[str]) -> bool:
     have their request replaced by a search for house-call services. Equality
     is not: those turns carry one word of a two-word name, so they are a
     QUALIFIER on the running request, and a qualifier must not restate it.
+
+    The name side is reduced by :func:`apps.marketplace.discovery.name_stems`,
+    which is pure. It used to go through ``parse_stems``, i.e. two or three
+    vocabulary reads per NAME, for up to twenty names a turn — affordable
+    while only a rare turn reached this function, and not once the fast path
+    asks it too.
     """
-    return bool(turn_stems) and set(parse_stems(query_stems(name)).stems) == set(turn_stems)
+    return bool(turn_stems) and set(name_stems(name)) == set(turn_stems)
+
+
+def named_bookable_service(message_text: str, *, city: str | None = None) -> str | None:
+    """The catalog service this turn IS, word for word — or ``None``.
+
+    One question with two askers. :func:`reground_specialization` asks it to
+    decide whether the model's reading of the turn may stand, and
+    :mod:`apps.orchestrator.fast_path` asks it to decide whether a turn whose
+    words it does not know is nevertheless a plain «покажи мастеров по
+    услуге» — which is what a tap on a clarifying chip is, because the chip
+    IS a catalog name (:func:`clarifying_question`). Both must get the same
+    answer from the same place, or the chip the bot offered would be a
+    service on one path and an unknown word on the other. That was the pilot
+    turn of 09.11: «Биоэнергетический массаж», offered as a chip, went to the
+    model because «биоэнергетический» is in no word list, and the model
+    searched for «массаж».
+
+    Three gates, each failing to ``None``:
+
+    * the turn must name a service rather than a city or an outcome —
+      ``parse_stems`` empties ``stems`` for both;
+    * the turn must BE a service name (:func:`_turn_is_this_service_name`) —
+      equality of words, so «на дому» is not «Массаж на дому»;
+    * somebody must PERFORM it — ``ServiceCard.has_bookable_master``, the
+      sellable edge between that very service and a bookable master
+      (AYLA-DEC-0045 / OD-9: the catalog, not the model, says what exists).
+
+      Not ``service_coverage``, which this gate used until 09.11. Coverage
+      asks whether the SEARCH for the name finds anyone, and the search ORs
+      its words: «Парный массаж», listed by a salon and performed by nobody,
+      is «covered» by every massage master in the contour. A name that only
+      shares a word with what we can book is exactly the answer this function
+      exists to prevent.
+
+    Returns the name as the catalog spells it. Reads the catalog; callers
+    decide what an error means for them.
+    """
+    found = _named_service_and_cities(message_text, city=city)
+    return found[0] if found else None
+
+
+def _named_service_and_cities(
+    message_text: str, *, city: str | None = None
+) -> tuple[str, list[str]] | None:
+    """:func:`named_bookable_service`, plus the cities the turn itself named.
+
+    The cities are the catalog's own spelling of a place we serve
+    (``parse_stems``), never the person's words — which is what lets
+    :func:`reground_specialization` hand back a search string made of catalog
+    text only.
+    """
+    said = (message_text or "").strip()
+    if not said:
+        return None
+    stems = query_stems(said)
+    if not stems:
+        return None
+    parsed = parse_stems(stems[-_MAX_REGROUNDED_TOKENS:])
+    if not parsed.stems:
+        return None
+    # C-01 сознательно НЕ трогает этот вызов, и разница принципиальная:
+    # здесь выдача не показывается человеку, а служит РЕШЕНИЮ — назвал ли
+    # он существующую услугу. Ротация меняла бы, какая услуга «выиграет»
+    # регрузку, то есть переставляла бы не показы, а вывод. §9 запрещает
+    # алфавитный fallback там, где отсечение делает его смещением ПОКАЗОВ;
+    # здесь показов нет.
+    name = next(
+        (
+            card.name
+            for card in discover_services(query=said, city=city, limit=_SERVICE_NAME_SCAN_LIMIT)
+            if card.has_bookable_master and _turn_is_this_service_name(card.name, parsed.stems)
+        ),
+        None,
+    )
+    return (name, list(parsed.cities)) if name else None
 
 
 def reground_specialization(
@@ -2902,19 +2987,29 @@ def reground_specialization(
     flight — would throw that request away and search for house calls. Every
     gate below exists to keep a qualifier from being read as a new request:
 
-    * **The model's string must share nothing with the turn.** If it carries
-      a word the person just said, it is a reading of THIS turn however it was
-      normalized, and there is nothing to fix. Free — no catalog read.
+    * **The model's string must have LOST a word of the turn.** If it carries
+      every word the person just said, it is a reading of THIS turn however
+      it was normalized or narrowed, and there is nothing to fix. Free — no
+      catalog read.
+
+      Until 09.11 this gate read «shares nothing with the turn», and that let
+      the other half of the same defect through: the person tapped the chip
+      «Биоэнергетический массаж», the model searched for «массаж», and the
+      shared word was taken as proof the turn had been read. A string that
+      keeps one word of a service's name and drops the other is not a reading
+      of that name. The gates below are what stop this from firing on an
+      ordinary normalization: «хочу массаж завтра» → «массаж» loses «завтра»
+      and is still left alone, because «массаж завтра» is no service's name.
     * **The turn must name a service rather than a city or an outcome.**
       ``parse_stems`` empties ``stems`` for both, so «а в Москве?» and «хочу
       расслабиться» are left to the model.
     * **The turn must BE a service name**, word for word — see
       :func:`_turn_is_this_service_name`. This is the gate that separates
       «Кавитация» from «на дому».
-    * **The catalog decides the name is bookable.** ``service_coverage`` is
-      the same EXISTS over the same ``_bookable_qs`` predicate that produces
-      the cards (AYLA-DEC-0045 / OD-9 — neither the model nor a stem list is
-      the authority on what exists).
+    * **The catalog decides the name is bookable.** A bookable master must
+      perform that very service (AYLA-DEC-0045 / OD-9 — neither the model nor
+      a stem list is the authority on what exists). The last two gates are
+      :func:`named_bookable_service`.
 
     Every gate fails in the same direction: keep what the model asked for. The
     override is the unusual act and carries the burden of proof.
@@ -2922,6 +3017,18 @@ def reground_specialization(
     Returns the specialization to search with; ``None``/empty is passed
     through untouched, because there is nothing to override and
     ``has_discovery_criteria`` owns that turn.
+
+    When it overrides, what comes back is the service's name **as the catalog
+    spells it** — not the person's turn. Until 09.11 it was the turn, which
+    was harmless while a turn had to share nothing with the model's string to
+    get here. With the first gate reading «lost a word» it is not: a turn of
+    «<three digits> <three digits> биоэнергетический массаж» loses its digits
+    as unattested short tokens, passes the name gate, and the whole turn —
+    phone number included — would ride into the log line, the second pass and
+    every button ref. The catalog's own text cannot carry anything the person
+    typed. A city the turn named travels with it in the same spelling, and
+    only when the model supplied none: the turn used to carry it into the
+    search, and dropping it would widen the list to every city.
     """
     if not specialization:
         return specialization
@@ -2936,33 +3043,28 @@ def reground_specialization(
     if not stems:
         return specialization
     folded = specialization.casefold()
-    if any(stem in folded for stem in stems):
-        # Judged on the RAW stems, before the catalog-aware pass narrows them:
-        # a city token or an unattested short word left in the list can only
-        # make «shares something» EASIER to satisfy, i.e. can only keep the
-        # model's answer — the safe direction.
+    if all(stem in folded for stem in stems):
+        # Judged on the RAW stems, before the catalog-aware pass narrows them.
+        # A city token or an unattested short word left in the list makes
+        # «carries every word» HARDER to satisfy, so such a turn goes on to
+        # the catalog gates — two vocabulary reads and one service search —
+        # which still keep the model's answer unless the turn is a service's
+        # name.
         return specialization
-    # ── From here on the turn is about something the model did not search
-    # ── for, and only here does the catalog get asked.
-    parsed = parse_stems(stems[-_MAX_REGROUNDED_TOKENS:])
-    if not parsed.stems:
+    # ── From here on the model searched for something other than what was
+    # ── said, and only here does the catalog get asked.
+    try:
+        found = _named_service_and_cities(said, city=city)
+    except Exception:  # noqa: BLE001 — the override must never cost the search
+        # Same direction as every gate: keep what the model asked for. The
+        # search that follows reads the same catalog and will say for itself
+        # whether it is reachable.
+        logger.warning("orchestrator.discovery.reground.unavailable", exc_info=True)
         return specialization
-    # C-01 сознательно НЕ трогает этот вызов, и разница принципиальная:
-    # здесь выдача не показывается человеку, а служит РЕШЕНИЮ — назвал ли
-    # он существующую услугу. Ротация меняла бы, какая услуга «выиграет»
-    # регрузку, то есть переставляла бы не показы, а вывод. §9 запрещает
-    # алфавитный fallback там, где отсечение делает его смещением ПОКАЗОВ;
-    # здесь показов нет.
-    named = [
-        card.name
-        for card in discover_services(query=said, city=city, limit=_SERVICE_NAME_SCAN_LIMIT)
-    ]
-    if not any(_turn_is_this_service_name(name, parsed.stems) for name in named):
+    if found is None:
         return specialization
-    available, _missing = service_coverage([said], city=city)
-    if not available:
-        return specialization
-    return said
+    name, cities = found
+    return f"{name} {cities[0]}" if cities and not city else name
 
 
 def generate_discovery_reply(
