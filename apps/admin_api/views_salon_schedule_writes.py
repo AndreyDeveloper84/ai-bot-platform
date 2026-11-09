@@ -579,7 +579,6 @@ def _prepare_date_exception(
     tenant = master.tenant
     actor_user = _ayla_read_actor(tenant)
     actor = external_user_id_for(actor_user) if actor_user is not None else None
-    specialist = catalog_specialist_id(master)
     day = str(body["date"])
     start = _hhmm(body.get("start_time"))
     end = _hhmm(body.get("end_time"))
@@ -592,7 +591,7 @@ def _prepare_date_exception(
             rows = client.list_schedule_exceptions(
                 actor_external_id=actor,
                 tenant_slug=tenant.slug,
-                specialist_id=specialist,
+                specialist_id=catalog_specialist_id(master),
                 date_from=day,
                 date_to=day,
             )
@@ -639,7 +638,9 @@ def _prepare_date_exception(
     else:
         try:
             template = client.get_master_schedule(
-                actor_external_id=actor, tenant_slug=tenant.slug, specialist_id=specialist
+                actor_external_id=actor,
+                tenant_slug=tenant.slug,
+                specialist_id=catalog_specialist_id(master),
             )
         except SalonAPIError as exc:
             logger.warning(
