@@ -20,7 +20,9 @@
 * p6 — тело не по форме: 400, каталог не спрошен;
 * p7 — флаг выключен: 404;
 * p8 — причина каталога приходит экрану своим именем;
-* p9 — настоящая услуга не записывается; услуга с расспросом не выбирается;
+* p9 — настоящая услуга салона с предоплатой (или неизвестного) не выбирается
+  и не записывается; салона «без предоплаты» — записывается (DRF-2868);
+  услуга с расспросом не выбирается;
 * p10 — начатое на экране продолжается в чате;
 * p11 — повторное нажатие времени шлёт тот же ключ идемпотентности;
 * y1–y3 — выбор другого дня: его время, запись на него, день без времени;
@@ -403,20 +405,75 @@ def _one_candidate(catalog: StepCatalog, monkeypatch: pytest.MonkeyPatch, **chan
     monkeypatch.setattr(catalog, "step_candidates", lambda **kwargs: found)
 
 
-def test_p9a_a_real_service_is_not_booked_from_a_step(
-    client: Client, tenant, wire, person: str, catalog: StepCatalog, booking: Booking, monkeypatch
+def _mirror_row(tenant) -> None:
+    """Строка зеркала: услуга каталога OFFER принадлежит салону ``tenant``."""
+    from apps.catalog.models import CatalogService
+
+    CatalogService.all_tenants.create(
+        tenant=tenant,
+        external_updated_at=timezone.now(),
+        slug="plan-step-real-service",
+        name="Консультация по режиму",
+        is_active=True,
+        ayla_service_id=OFFER,
+    )
+
+
+@pytest.mark.parametrize("in_mirror", [True, False])
+def test_p9a_a_real_service_of_a_salon_with_a_prepayment_is_neither_chosen_nor_booked(
+    client: Client,
+    tenant,
+    wire,
+    person: str,
+    catalog: StepCatalog,
+    booking: Booking,
+    monkeypatch,
+    settings,
+    in_mirror: bool,
 ) -> None:
+    settings.BOOKING_NO_PREPAYMENT_TENANTS = frozenset()
+    if in_mirror:
+        _mirror_row(tenant)
     _one_candidate(catalog, monkeypatch, synthetic=False)
     _turn(client, person)
     offers = _step(client, person, "offers", PLAN8, 0)
     assert offers.json()["options"][0]["synthetic"] is False
-    _step(client, person, "choose", SEARCH8, 0)
 
-    resp = _step(client, person, "book", SEARCH8, 0)
+    chosen = _step(client, person, "choose", SEARCH8, 0)
+    booked = _step(client, person, "book", SEARCH8, 0)
 
-    assert resp.status_code == 409
-    assert resp.json()["error"] == "plan_step_booking_not_available"
+    assert chosen.status_code == 409
+    assert chosen.json()["error"] == "plan_step_booking_via_regular"
+    # Выбор не зафиксирован — нажать время нечем, записи нет.
+    assert booked.status_code == 409
+    assert catalog.resolved == []
     assert booking.created == []
+
+
+def test_p9c_a_real_service_of_a_no_prepayment_salon_is_booked_without_a_prepayment(
+    client: Client,
+    tenant,
+    wire,
+    person: str,
+    catalog: StepCatalog,
+    booking: Booking,
+    monkeypatch,
+    settings,
+) -> None:
+    settings.BOOKING_NO_PREPAYMENT_TENANTS = frozenset({str(tenant.id).lower()})
+    _mirror_row(tenant)
+    _one_candidate(catalog, monkeypatch, synthetic=False)
+    _turn(client, person)
+    _step(client, person, "offers", PLAN8, 0)
+
+    chosen = _step(client, person, "choose", SEARCH8, 0)
+    booked = _step(client, person, "book", SEARCH8, 0)
+
+    assert chosen.status_code == 200, chosen.content[:300]
+    assert booked.status_code == 200, booked.content[:300]
+    assert booked.json() == {"booked_at": SLOT}
+    assert booking.created[0]["payment_required"] is False
+    assert booking.created[0]["provenance"]["entry_point"] == "PLAN_STEP"
 
 
 def test_p9b_a_service_that_needs_a_health_check_is_not_chosen(

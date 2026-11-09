@@ -15,15 +15,22 @@
 * o8 — длительное ограничение S1 уходит каталогу как есть; сбой чтения — «стоп».
 
 Услуга → время
-* c1 — выбор фиксируется в каталоге с идентификатором подбора; затем время;
+* c1 — выбор фиксируется в каталоге с идентификатором подбора;
 * c2 — время ищется по идентификаторам из ответа каталога, не из зеркала;
 * c3 — ближайший день со свободным временем, не первый попавшийся пустой;
+  времени нет — выбор НЕ фиксируется, остальные варианты остаются кнопками
+  (DRF-2868: закреплённый за мастером без времени шаг был мёртв);
 * c4 — услуге нужен расспрос о здоровье — выбор не фиксируется, записи нет;
-* c5 — устаревшая карточка ничего не фиксирует.
+* c5 — устаревшая карточка ничего не фиксирует;
+* c6 — отказ каталога в фиксации не показывает времён;
+* c7 — время читается ДО фиксации; сбой чтения времени ничего не фиксирует.
 
 Время → запись
 * b1 — запись несёт блок шага плана, четвёрку внутри него и основание рядом;
-* b2 — синтетическая услуга — без предоплаты; b3 — настоящая — записи нет;
+* b2 — синтетическая услуга — без предоплаты;
+* b3 — настоящая услуга: салон из списка «без предоплаты» записывается без
+  предоплаты; салон вне списка или неизвестный — выбор не фиксируется, время
+  не читается, записи нет, предлагается обычная запись (DRF-2868, вариант А);
 * b4 — повторное нажатие шлёт тот же ключ идемпотентности;
 * b5 — отказ каталога показан его именем; b6 — нет связки с каталогом — записи нет.
 """
@@ -57,6 +64,14 @@ BASIS = {
     "type": "personal_data",
     "document_version": "v1",
     "granted_at": "2026-10-09T10:00:00+00:00",
+}
+OFFER_2 = "0ffe0002-1111-4222-8333-444455556666"
+MASTER_2 = "aa000002-1111-4222-8333-444455556666"
+#: Салон настоящей услуги и строка её зеркала (DRF-2868).
+SALON = "5a100000-1111-4222-8333-444455556666"
+REGULAR_BUTTON = {
+    "label": "Записаться обычным способом",
+    "callback": f"cb:discover:book:{SALON}:{MASTER}:{OFFER}",
 }
 SLOT_A = "2026-10-12T10:00:00+03:00"
 SLOT_B = "2026-10-12T11:30:00+03:00"
@@ -121,6 +136,8 @@ class FakeBooking:
     def __init__(self) -> None:
         #: день → времена; по умолчанию свободно только 12.10.
         self.days: dict[str, list[str]] = {"2026-10-12": [SLOT_A, SLOT_B]}
+        #: мастера, у которых свободного времени нет ни в один день.
+        self.no_time_for: set[str] = set()
         self.slot_calls: list[dict[str, Any]] = []
         self.created: list[dict[str, Any]] = []
         self.error: Exception | None = None
@@ -129,6 +146,8 @@ class FakeBooking:
         self.slot_calls.append(
             {"specialist_id": specialist_id, "date": date, "service_id": service_id}
         )
+        if specialist_id in self.no_time_for:
+            return []
         return [SimpleNamespace(datetime=iso) for iso in self.days.get(date, [])]
 
     def create_appointment(self, **kwargs: Any) -> Any:
@@ -212,6 +231,52 @@ SLOT_E = "2026-10-17T12:00:00+03:00"
 
 def _buttons(result: Any) -> list[dict[str, str]]:
     return result.action_data["attachments"][0]["payload"]["buttons"]
+
+
+def _second_candidate() -> dict[str, Any]:
+    """Второй вариант того же подбора: другая услуга у другого мастера."""
+    return _candidate(
+        tenant_offer_ref=OFFER_2,
+        display={
+            "service_name": "Стрижка",
+            "salon": {"name": "Медный ковш", "city": "Пенза"},
+            "masters": [
+                {
+                    "specialist_ref": MASTER_2,
+                    "name": "Вера",
+                    "price": "1500.00",
+                    "duration_minutes": 45,
+                    "place_address": None,
+                }
+            ],
+        },
+    )
+
+
+def _real_service(
+    plan: FakePlan,
+    monkeypatch: pytest.MonkeyPatch,
+    settings: Any,
+    *,
+    salon_known: bool = True,
+    no_prepayment: bool,
+    button: bool = True,
+) -> None:
+    """Настоящая услуга: её салон по зеркалу и настройка салона «без предоплаты».
+
+    Зеркало подменено (строки зеркала — в test_plan_step_prepayment_2868, там
+    база настоящая); резолвер предоплаты и настройка — настоящие.
+    """
+    plan.found["candidates"] = [_candidate(synthetic=False)]
+    row = SimpleNamespace(id=OFFER, tenant_id=SALON, tenant=SimpleNamespace(id=SALON))
+    monkeypatch.setattr(step, "_mirror_service", lambda option: row if salon_known else None)
+    # Кнопка ведёт в салон — без известного салона её не бывает.
+    monkeypatch.setattr(
+        step,
+        "_regular_booking_button",
+        lambda option: dict(REGULAR_BUTTON) if (button and salon_known) else None,
+    )
+    settings.BOOKING_NO_PREPAYMENT_TENANTS = frozenset({SALON}) if no_prepayment else frozenset()
 
 
 def _at_offers() -> SimpleNamespace:
@@ -415,14 +480,42 @@ class TestFromAServiceToATime:
             {"label": "12.10 11:30", "callback": f"cb:plan:slot:{SEARCH8}:1"},
         ]
 
-    def test_c3_no_free_time_in_the_horizon_is_said_by_name(self, booking: FakeBooking) -> None:
+    def test_c3_no_free_time_in_the_horizon_is_said_by_name_and_fixes_nothing(
+        self, plan: FakePlan, booking: FakeBooking
+    ) -> None:
         booking.days = {}
+        conversation = _at_offers()
+        shown = dict(conversation.skill_state[step.STATE_KEY])
+
+        result = _tap(OFFER0, conversation)
+
+        assert result.meta["plan_outcome"] == "PLAN_STEP_NO_SLOTS"
+        assert result.reply_text.splitlines()[0] == "Укладка — Медный ковш, Пенза"
+        assert result.reply_text.endswith("PLAN_STEP_NO_SLOTS · тест")
+        assert len(booking.slot_calls) == step.SLOT_HORIZON_DAYS
+        # DRF-2868: выбор не зафиксирован — шаг не закреплён за мастером без времени.
+        assert plan.resolved == []
+        assert conversation.skill_state[step.STATE_KEY] == shown
+
+    def test_c3_no_free_time_leaves_the_other_options_open_without_reopening_the_step(
+        self, plan: FakePlan, booking: FakeBooking
+    ) -> None:
+        plan.found["candidates"] = [_candidate(), _second_candidate()]
+        booking.no_time_for = {MASTER}
         conversation = _at_offers()
 
         result = _tap(OFFER0, conversation)
 
-        assert result.reply_text == "PLAN_STEP_NO_SLOTS · тест"
-        assert len(booking.slot_calls) == step.SLOT_HORIZON_DAYS
+        assert result.meta["plan_outcome"] == "PLAN_STEP_NO_SLOTS"
+        assert _buttons(result) == [
+            {"label": "Стрижка · Вера", "callback": f"cb:plan:offer:{SEARCH8}:1"}
+        ]
+
+        chosen = _tap(f"cb:plan:offer:{SEARCH8}:1", conversation)
+
+        assert chosen.meta["plan_outcome"] == "PLAN_STEP_SLOTS"
+        assert [sent["tenant_offer_ref"] for sent in plan.resolved] == [OFFER_2]
+        assert len(plan.asked) == 1
 
     @pytest.mark.parametrize("health", ["required", None, "что-то новое"])
     def test_c4_a_service_that_needs_a_health_check_is_neither_fixed_nor_booked(
@@ -448,12 +541,56 @@ class TestFromAServiceToATime:
 
     def test_c6_a_refused_choice_shows_no_times(self, plan: FakePlan, booking: FakeBooking) -> None:
         conversation = _at_offers()
+        shown = dict(conversation.skill_state[step.STATE_KEY])
         plan.error = client_mod.PlanStepResolutionRefusedError("offer_not_a_candidate")
 
         result = _tap(OFFER0, conversation)
 
         assert result.reply_text == "PLAN_STEP_RESOLUTION_REFUSED:offer_not_a_candidate · тест"
-        assert booking.slot_calls == []
+        # Время прочитано до фиксации, но человеку не показано и в состояние
+        # разговора не легло (в нём по-прежнему только варианты подбора):
+        # нажать время после отказа нечем.
+        assert len(booking.slot_calls) == step.SLOT_HORIZON_DAYS
+        assert conversation.skill_state[step.STATE_KEY] == shown
+
+    def test_c7_the_time_is_read_before_the_choice_is_fixed(
+        self, plan: FakePlan, booking: FakeBooking, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        conversation = _at_offers()
+        order: list[str] = []
+        read_times, fix = booking.get_available_times, plan.resolve_step
+
+        def times(**kwargs: Any) -> list[Any]:
+            order.append("time")
+            return read_times(**kwargs)
+
+        def resolve(**kwargs: Any) -> dict[str, Any]:
+            order.append("fix")
+            return fix(**kwargs)
+
+        monkeypatch.setattr(booking, "get_available_times", times)
+        monkeypatch.setattr(plan, "resolve_step", resolve)
+
+        _tap(OFFER0, conversation)
+
+        assert order == ["time"] * step.SLOT_HORIZON_DAYS + ["fix"]
+
+    def test_c7_a_failed_read_of_the_time_fixes_nothing(
+        self, plan: FakePlan, booking: FakeBooking, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        conversation = _at_offers()
+        shown = dict(conversation.skill_state[step.STATE_KEY])
+
+        def broken(**kwargs: Any) -> list[Any]:
+            raise booking_mod.BookingAPIError("down")
+
+        monkeypatch.setattr(booking, "get_available_times", broken)
+
+        result = _tap(OFFER0, conversation)
+
+        assert result.reply_text == "PLAN_ENGINE_UNAVAILABLE · тест"
+        assert plan.resolved == []
+        assert conversation.skill_state[step.STATE_KEY] == shown
 
 
 class TestAnotherDay:
@@ -650,16 +787,89 @@ class TestFromATimeToABooking:
 
         assert booking.created[0]["payment_required"] is False
 
-    def test_b3_a_real_service_is_not_booked_from_a_step(
-        self, plan: FakePlan, booking: FakeBooking
+    def test_b3_a_real_service_of_a_no_prepayment_salon_is_booked_without_a_prepayment(
+        self, plan: FakePlan, booking: FakeBooking, monkeypatch: pytest.MonkeyPatch, settings
     ) -> None:
-        plan.found["candidates"] = [_candidate(synthetic=False)]
+        _real_service(plan, monkeypatch, settings, no_prepayment=True)
         conversation = _at_slots()
 
         result = _tap(SLOT0, conversation)
 
-        assert result.reply_text == "PLAN_STEP_BOOKING_NOT_AVAILABLE · тест"
+        assert result.meta["plan_outcome"] == "PLAN_STEP_BOOKED"
+        assert "синтетические" not in result.reply_text
+        sent = booking.created[0]
+        assert sent["payment_required"] is False
+        assert (sent["service_id"], sent["specialist_id"]) == (OFFER, MASTER)
+        assert sent["provenance"]["entry_point"] == "PLAN_STEP"
+
+    @pytest.mark.parametrize("salon_known", [True, False])
+    def test_b3_a_salon_with_a_prepayment_or_unknown_is_sent_to_the_regular_booking(
+        self,
+        plan: FakePlan,
+        booking: FakeBooking,
+        monkeypatch: pytest.MonkeyPatch,
+        settings,
+        salon_known: bool,
+    ) -> None:
+        # Неизвестный салон стоит в списке «без предоплаты» наравне с известным:
+        # отказ ему даёт не настройка, а то, что салон услуги не назван.
+        _real_service(plan, monkeypatch, settings, salon_known=salon_known, no_prepayment=False)
+        if not salon_known:
+            settings.BOOKING_NO_PREPAYMENT_TENANTS = frozenset({SALON})
+        conversation = _at_offers()
+        shown = dict(conversation.skill_state[step.STATE_KEY])
+
+        result = _tap(OFFER0, conversation)
+
+        assert result.meta["plan_outcome"] == "PLAN_STEP_BOOKING_VIA_REGULAR"
+        assert step.REGULAR_BOOKING_TEXT in result.reply_text
+        assert "Укладка — Медный ковш, Пенза" in result.reply_text
+        assert "BOOKING_NOT_AVAILABLE" not in result.reply_text
+        if salon_known:
+            assert _buttons(result) == [REGULAR_BUTTON]
+        else:
+            assert "cb:discover:book" not in str(result.action_data)
+        # Выбор не зафиксирован, время не читалось, записи нет.
+        assert plan.resolved == []
+        assert booking.slot_calls == []
         assert booking.created == []
+        assert conversation.skill_state[step.STATE_KEY] == shown
+
+    def test_b3_without_a_mirror_row_for_the_regular_booking_there_is_no_such_button(
+        self, plan: FakePlan, monkeypatch: pytest.MonkeyPatch, settings
+    ) -> None:
+        _real_service(plan, monkeypatch, settings, no_prepayment=False, button=False)
+
+        result = _tap(OFFER0, _at_offers())
+
+        assert result.meta["plan_outcome"] == "PLAN_STEP_BOOKING_VIA_REGULAR"
+        assert "cb:discover:book" not in str(result.action_data)
+
+    def test_b3_a_setting_changed_after_the_choice_stops_the_booking_at_the_time(
+        self, plan: FakePlan, booking: FakeBooking, monkeypatch: pytest.MonkeyPatch, settings
+    ) -> None:
+        _real_service(plan, monkeypatch, settings, no_prepayment=True)
+        conversation = _at_slots()
+        settings.BOOKING_NO_PREPAYMENT_TENANTS = frozenset()
+
+        result = _tap(SLOT0, conversation)
+
+        assert result.meta["plan_outcome"] == "PLAN_STEP_BOOKING_VIA_REGULAR"
+        assert _buttons(result) == [REGULAR_BUTTON]
+        assert booking.created == []
+
+    def test_b3_a_synthetic_service_asks_no_mirror(
+        self, booking: FakeBooking, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def forbidden(option: dict[str, Any]) -> Any:
+            raise AssertionError("синтетической услуги в зеркале нет по построению")
+
+        monkeypatch.setattr(step, "_mirror_service", forbidden)
+
+        result = _tap(SLOT0, _at_slots())
+
+        assert result.meta["plan_outcome"] == "PLAN_STEP_BOOKED"
+        assert booking.created[0]["payment_required"] is False
 
     def test_b4_a_second_tap_sends_the_same_idempotency_key(self, booking: FakeBooking) -> None:
         conversation = _at_slots()

@@ -535,7 +535,7 @@ _STEP_REFUSALS: dict[str, tuple[str, int]] = {
     "SAFETY_INPUT_UNAVAILABLE": ("plan_safety_unavailable", 409),
     "PLAN_STEP_EXPIRED": ("plan_step_expired", 409),
     "PLAN_STEP_NO_SLOTS": ("plan_step_no_slots", 409),
-    "PLAN_STEP_BOOKING_NOT_AVAILABLE": ("plan_step_booking_not_available", 409),
+    "PLAN_STEP_BOOKING_VIA_REGULAR": ("plan_step_booking_via_regular", 409),
     "HEALTH_CHECK_REQUIRED": ("health_check_required", 409),
     "AYLA_LINK_UNAVAILABLE": ("ayla_unavailable", 502),
     "PLAN_ENGINE_UNAVAILABLE": ("ayla_unavailable", 502),

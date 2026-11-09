@@ -15,6 +15,7 @@ swappable to the Ayla provider-directory API (#249-#251) later.
 from __future__ import annotations
 
 import hashlib
+import logging
 import re
 from collections.abc import Sequence
 from dataclasses import replace
@@ -44,6 +45,8 @@ from apps.catalog.models import CatalogMaster, CatalogService, sellable_edge_q
 from apps.catalog.rating import public_rating
 from apps.marketplace.dto import MasterCard, SalonCard, ServiceCard
 from apps.tenancy.models import Tenant
+
+logger = logging.getLogger(__name__)
 
 # Cap to keep a discovery call bounded; callers paginate by re-querying with
 # a tighter filter for now (cursor pagination lands with the HTTP surface).
@@ -1904,6 +1907,55 @@ def master_for_media(master_id: UUID | str) -> CatalogMaster | None:
     вызывающий на провод не отдаёт.
     """
     return CatalogMaster.all_tenants.filter(id=master_id).first()
+
+
+def service_by_catalog_id(ayla_service_id: UUID) -> CatalogService | None:
+    """Строка зеркала услуги по её идентификатору в каталоге — вместе с салоном (DRF-2868).
+
+    Каталог называет услугу своим идентификатором (``tenant_offer_ref`` в
+    ответе о кандидатах шага плана), а настройка салона — «записывать без
+    предоплаты» — живёт у салона бота. Вызывающий салона ещё не знает, поэтому
+    поиск межтенантный и стоит здесь, в единственном разрешённом месте
+    ``all_tenants`` (MKT1).
+
+    ``None`` — услуги в зеркале нет ЛИБО строк с этим идентификатором больше
+    одной (ограничение уникальности — на пару «салон, идентификатор», а не на
+    идентификатор): салон по такому ответу не называется, угадывать нельзя.
+    Признак «продаётся» не проверяется — его читает вызывающий.
+    """
+    rows = list(
+        CatalogService.all_tenants.filter(ayla_service_id=ayla_service_id).select_related("tenant")[
+            :2
+        ]
+    )
+    if len(rows) != 1:
+        # Молчаливый отказ здесь стоил бы часа поисков «почему салон из списка
+        # не записывается»: в журнале — только идентификатор услуги и число строк.
+        logger.warning(
+            "marketplace.service_by_catalog_id.unresolved ayla_service_id=%s rows=%s",
+            ayla_service_id,
+            "0" if not rows else "2+",
+        )
+        return None
+    return rows[0]
+
+
+def master_by_specialist_id(tenant_id: UUID, catalog_specialist_id: UUID) -> CatalogMaster | None:
+    """Строка зеркала мастера ЭТОГО салона по id его профиля в каталоге (DRF-2868).
+
+    Ключ — ``catalog_specialist_id`` (``SpecialistProfile.id``): именно его
+    каталог называет ``specialist_ref`` в кандидатах шага и принимает как
+    ``specialist_id`` у расписания и записи. ``ayla_user_id`` — другой
+    идентификатор (человек, а не профиль), и на стенде они не совпадают ни в
+    одной строке (DRF-1933).
+
+    Салон задан явно — чужая строка того же человека (мастер работает в двух
+    салонах) не подменяет нужную. Здесь, а не у вызывающего, по той же
+    причине, что :func:`service_by_catalog_id`: вызов идёт вне области салона.
+    """
+    return CatalogMaster.all_tenants.filter(
+        tenant_id=tenant_id, catalog_specialist_id=catalog_specialist_id
+    ).first()
 
 
 # ─── DRF-1354: finding a master the client named BY NAME ────────────────
