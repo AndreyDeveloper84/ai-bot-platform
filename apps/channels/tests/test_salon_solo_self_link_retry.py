@@ -348,6 +348,65 @@ class TestWhileTheCatalogStillRefuses:
 
         assert catalog.doors() == doors_before + 2
 
+    def test_the_intervals_are_sixty_seconds_plain_and_ten_explicit(
+        self, catalog, sent, emitted, monkeypatch
+    ) -> None:
+        """Числа интервалов закреплены: перепутанные или «навсегда» прошли бы узлы выше."""
+        _registered_with_a_failed_link(catalog, sent)
+        timeouts: dict[str, Any] = {}
+        real_add = cache.add
+
+        def _spy(key: str, value: Any, timeout: Any = None, **kwargs: Any) -> bool:
+            if key.startswith("salon_solo_link_retry:"):
+                timeouts[key.split(":")[1]] = timeout
+            return real_add(key, value, timeout=timeout, **kwargs)
+
+        monkeypatch.setattr(cache, "add", _spy)
+
+        _handle("привет")
+        _handle(salon_handler.CB_SALON_RECHECK)
+
+        assert timeouts == {"plain": 60, "explicit": 10}
+
+    def test_a_cache_outage_does_not_stop_the_retry_or_the_answer(
+        self, catalog, sent, emitted, monkeypatch
+    ) -> None:
+        """Тормоз недоступен → дозвон идёт как без тормоза, человек получает ответ."""
+        _registered_with_a_failed_link(catalog, sent)
+        doors_before = catalog.doors()
+        real_add = cache.add
+
+        def _down(key: str, *args: Any, **kwargs: Any) -> bool:
+            if key.startswith("salon_solo_link_retry:"):
+                raise ConnectionError("cache is down")
+            return real_add(key, *args, **kwargs)
+
+        monkeypatch.setattr(cache, "add", _down)
+
+        _handle("привет")
+        _handle("алло")
+
+        assert catalog.doors() == doors_before + 2
+        assert _text(sent) == salon_handler.SOLO_NOT_LINKED_TEXT
+
+    def test_a_switched_off_cabinet_is_not_retried(self, catalog, sent, emitted) -> None:
+        """Ревью P1: пре-чек смотрит связь раньше активности — выключенный приходил с NOT_LINKED.
+
+        Выключение — решение человека. Красный до правки: кабинет провижинился
+        и связывался за его спиной.
+        """
+        _registered_with_a_failed_link(catalog, sent)
+        Tenant.all_objects.filter(pk=_row().tenant_id).update(is_active=False)
+        catalog.door_refusal = None
+        calls_before = list(catalog.calls)
+
+        _handle(salon_handler.CB_SALON_RECHECK)
+
+        assert sent.call_count == 1, "человеку ответили"
+        assert [c for c in catalog.calls[len(calls_before) :] if c != "resolve"] == []
+        assert _link().status == SoloIdentityLink.Status.PENDING
+        assert not [n for n, _ in emitted if n == "channels.max.salon.solo_link_retried"]
+
     def test_a_support_tap_gets_the_support_answer_not_a_retry(
         self, catalog, sent, emitted, settings
     ) -> None:
@@ -427,6 +486,42 @@ class TestAnOperatorsRejectionStands:
         assert link.provenance != SoloIdentityLink.Provenance.CATALOG_RESOLVED
         assert _text(sent) == REJECTED_RECOVERY_TEXT
 
+    def test_a_rejection_landing_during_provisioning_stops_the_side_effects_too(
+        self, catalog, sent, emitted, monkeypatch
+    ) -> None:
+        """Ревью P1: статус проверялся по экземпляру, прочитанному до провижининга.
+
+        Провижининг — самый длинный вызов (до 30 с). Отказ, пришедший за это
+        время, держал статус, но дверь всё равно привязывала личность, а
+        карточка и строка получали настоящий ключ. Красный до правки: дверь
+        звалась.
+        """
+        from django.contrib.auth import get_user_model
+
+        _registered_with_a_failed_link(catalog, sent)
+        operator = get_user_model().objects.create_user(username="op-903", password="x")  # noqa: S106
+        catalog.door_refusal = None
+        doors_before = catalog.doors()
+
+        def _provision_while_the_operator_rejects(link, **kwargs: Any):
+            reject_by_operator(_link(), operator=operator, reason="fraud_suspected")
+            return catalog.provision(link, **kwargs)
+
+        monkeypatch.setattr(
+            "apps.identity.services.solo_catalog_provisioning.provision_catalog_workspace",
+            _provision_while_the_operator_rejects,
+        )
+
+        _handle(salon_handler.CB_SALON_RECHECK)
+
+        assert catalog.doors() == doors_before, "после отказа дверь каталога не зовётся"
+        link = _link()
+        assert link.status == SoloIdentityLink.Status.REJECTED
+        link.master.refresh_from_db()
+        assert link.master.ayla_user_id is None
+        assert _row().ayla_user_id_is_proxy is not False, "ключ строки настоящим не стал"
+        assert _text(sent) == REJECTED_RECOVERY_TEXT
+
 
 # ─── ключ строки уже настоящий, а связь всё ещё ждёт ────────────────────────
 
@@ -458,6 +553,27 @@ class TestALinkPendingBehindAStaffVerdict:
         link.master.refresh_from_db()
         assert link.master.ayla_user_id == REAL_ID
         assert _row().tenant.name in _text(sent), "человек при этом в меню персонала"
+
+    @pytest.mark.parametrize("door_refusal", ["identity_not_proxy", "identity_already_bound"])
+    def test_a_door_that_refuses_an_already_bound_identity_does_not_stop_the_link(
+        self, catalog, sent, emitted, door_refusal
+    ) -> None:
+        """Ревью P1: подставная дверь не умела отказать уже привязанной личности.
+
+        Настоящая — отказывает (``specialist_identity_link.HINTS``). Связь при
+        этом всё равно завершается: её решает ответ каталога о ключе, а отказ
+        двери уходит в событие именем. Узел держит это поведение — правка
+        «остановиться на отказе двери» вернула бы зависание из докстринга класса.
+        """
+        self._bound_in_the_catalog_but_not_recorded(catalog, sent)
+        catalog.door_refusal = door_refusal
+
+        _handle("привет")
+
+        assert _link().status == SoloIdentityLink.Status.LINKED
+        retried = [p for name, p in emitted if name == "channels.max.salon.solo_link_retried"]
+        assert retried[-1]["identity_link_refusal"] == door_refusal
+        assert retried[-1]["linked"] is True
 
     def test_without_the_heal_the_menu_hides_a_pending_link(
         self, catalog, sent, emitted, monkeypatch

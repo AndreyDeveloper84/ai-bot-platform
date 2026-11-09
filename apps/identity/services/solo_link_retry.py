@@ -141,7 +141,13 @@ def retry_solo_link(link: Any, *, master: Any, tenant: Any, bot_user: Any) -> So
         bind_solo_identity_after_provisioning,
     )
 
-    link.refresh_from_db(fields=["catalog_specialist_id"])
+    # Статус перечитывается ПОСЛЕ провижининга (до 30 с сети) и до двери: отказ
+    # оператора, пришедший в это окно, должен остановить не только запись
+    # статуса (её держит ``record_attempt``), но и побочные действия — привязку
+    # личности в каталоге и запись настоящего ключа карточке и строке.
+    link.refresh_from_db(fields=["catalog_specialist_id", "status"])
+    if link.status != SoloIdentityLink.Status.PENDING:
+        return SoloLinkRetry(attempted=False, status=link.status, catalog_refusal=catalog_refusal)
     identity_link_refusal = bind_solo_identity_after_provisioning(link, bot_user=bot_user)
     link_refusal = attempt_solo_link(master, bot_user)
     master.refresh_from_db(fields=["ayla_user_id"])

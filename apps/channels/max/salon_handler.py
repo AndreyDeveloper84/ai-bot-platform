@@ -752,8 +752,13 @@ def _solo_link_retry_due(event: CanonicalEvent, *, explicit: bool) -> bool:
     Обычная реплика — раз в ``SOLO_LINK_RETRY_COOLDOWN_SECONDS``. Явная просьба
     («Повторить проверку», ``/start``) длинного интервала не ждёт, но и у неё
     есть короткий: дозвон — это несколько синхронных походов в каталог на
-    потоке входящих, и двойной тап не должен ни запускать их дважды подряд, ни
-    сталкивать два провижининга одного кабинета.
+    потоке входящих, и двойной тап не должен запускать их дважды подряд.
+
+    Это тормоз, а не блокировка: ключи двух видов независимы (реплика и сразу
+    за ней тап дадут два дозвона), а ключ ставится в начале и может истечь
+    раньше, чем вернётся медленный каталог. Одновременные дозвоны одного
+    кабинета безопасны по данным — исход пишется условно
+    (``solo_identity_link.record_attempt``), — но не исключены.
     """
 
     from django.core.cache import cache
@@ -778,21 +783,33 @@ def _solo_link_may_need_healing(event: CanonicalEvent, verdict) -> bool:
     настоящий сам ``ensure_ayla_link``, как только каталог ответил настоящим.
     Карточку мастера и ``SoloIdentityLink`` он не трогает — и связь остаётся
     ``PENDING`` под вердиктом ``STAFF``: меню есть, продажи нет, и без этого
-    захода дозвон её бы уже никогда не взял. Соло-мастер — владелец своего
-    кабинета по построению, поэтому у ``STAFF`` без роли владельца читать
+    захода дозвон её бы уже никогда не взял. Соло-мастер — владелец и мастер
+    своего кабинета по построению, поэтому у ``STAFF`` без обеих ролей читать
     нечего, и салонный персонал за этот заход не платит запросами.
 
     Тап «Обратиться в поддержку» — просьба о контакте, а не о проверке:
     удачный дозвон увёл бы его в меню, где у этого тапа нет строки.
+
+    Выключенный кабинет не дозванивается: пре-чек проверяет связь раньше
+    активности, и владелец выключенного кабинета приходит сюда с
+    ``NOT_LINKED``. Выключение — решение человека (как и ``REJECTED``), и
+    автоматика не должна за его спиной провижинить и связывать такой кабинет.
     """
 
     from apps.channels.max import salon_entry
 
     if event.text.strip() == CB_SALON_SUPPORT:
         return False
+    if not getattr(verdict.tenant, "is_active", True):
+        return False
     if verdict.code == salon_entry.NOT_LINKED:
         return True
-    return bool(verdict.is_staff and getattr(verdict.role_ctx, "is_owner", False))
+    role_ctx = verdict.role_ctx
+    return bool(
+        verdict.is_staff
+        and getattr(role_ctx, "is_owner", False)
+        and getattr(role_ctx, "is_master", False)
+    )
 
 
 def _heal_solo_link(event: CanonicalEvent, verdict) -> bool:
@@ -822,15 +839,18 @@ def _heal_solo_link(event: CanonicalEvent, verdict) -> bool:
     explicit = event.text.strip() == CB_SALON_RECHECK or _is_entry_start(event.text)
     if not _solo_link_retry_due(event, explicit=explicit):
         return False
+    # Дозвон и событие — в тенанте кабинета: аудит-строка о связи
+    # (``record_attempt``) и событие иначе легли бы «ничьими».
     try:
-        retry = retry_solo_link(
-            found.link, master=found.master, tenant=verdict.tenant, bot_user=verdict.bot_user
-        )
+        with tenant_scope(verdict.tenant):
+            retry = retry_solo_link(
+                found.link, master=found.master, tenant=verdict.tenant, bot_user=verdict.bot_user
+            )
     except Exception:  # noqa: BLE001 — ошибка настройки или базы: не молчим человеку
         logger.exception("channels.max.salon.solo_link_retry_failed")
         return False
 
-    with tenant_scope(verdict.tenant):  # событие — в тенанте кабинета, а не «ничьё»
+    with tenant_scope(verdict.tenant):
         emit(
             "channels.max.salon.solo_link_retried",
             payload={
