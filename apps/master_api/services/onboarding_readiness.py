@@ -10,7 +10,8 @@
 ===============  ==========================================================  ==========================
 пункт            факт                                                        когда ``unknown``
 ===============  ==========================================================  ==========================
-``services``     активные строки ``MasterService`` с ценой и длительностью   —
+``services``     выбор услуг мастера в каталоге (``services/selection``);    каталог молчит, а зеркало
+                 без субъекта — строки ``MasterService`` зеркала             «настроено» не говорит
 ``hours``        недельный шаблон из ``load_day_frame`` (Ayla при флаге)     канон не читается (DRF-1111)
 ``profile``      ``name`` и ``photo_url`` у ``CatalogMaster``                —
 ``location``     своё место мастера в каталоге (``service-locations``)       нет субъекта / каталог молчит
@@ -38,8 +39,9 @@
   :func:`apps.catalog.master_state.sale_block` — того же, что читают
   витрина, ростер и бронь; второго определения «опубликован» здесь нет.
 
-Числа в ответе — только те, что посчитаны здесь из строк (§3 карты:
-«счётчики — только от сервера»); процентов и «шаг N из M» нет намеренно.
+Числа в ответе — только серверные (§3 карты: «счётчики — только от
+сервера»): счётчики каталога либо посчитанные здесь из строк зеркала;
+процентов и «шаг N из M» нет намеренно.
 """
 
 from __future__ import annotations
@@ -48,6 +50,7 @@ import logging
 from dataclasses import dataclass, field
 from datetime import date as date_cls
 from datetime import timedelta
+from decimal import Decimal
 from typing import Any, Literal
 
 from django.utils import timezone
@@ -85,6 +88,10 @@ PLACE_INACTIVE = "inactive"
 NO_SUBJECT = "no_subject"
 #: Клиент каталога не настроен (нет ``AYLA_BASE_URL``) — спросить нельзя.
 CLIENT_NOT_CONFIGURED = "booking_client_not_configured"
+#: Услуги есть, но ни одна не продаётся (DRF-1989) — тот же слаг, что у отказа записи.
+OFFER_NOT_SELLABLE = "offer_not_sellable"
+#: Код отказа каталога на ``services/selection``: у этого кабинета выбора услуг нет.
+SERVICE_SELECTION_REFUSED = "SERVICE_SELECTION_REFUSED"
 
 #: Куда ведёт каждый пункт — маршруты соло-поверхности (``App.tsx`` /solo/*).
 DEEP_LINKS: dict[str, str] = {
@@ -176,9 +183,9 @@ def build_readiness(master: CatalogMaster, *, actor: str | None = None) -> Readi
     """Собрать проекцию по живым фактам. Ничего не пишет.
 
     ``actor`` — внешний идентификатор мастера (``external_user_id_for``): место
-    работы каталог отдаёт только под субъектом. Без него пункт ``location`` —
-    ``unknown`` с причиной ``no_subject`` (карточка в админке оператора), а не
-    догадка.
+    работы и выбор услуг каталог отдаёт только под субъектом. Без него пункт
+    ``location`` — ``unknown`` с причиной ``no_subject`` (карточка в админке
+    оператора), а не догадка; пункт ``services`` отвечает по зеркалу.
 
     DRF-2254: вид рабочего пространства — из каталога (``workspace_kind``).
     ``salon`` — место и услуги ведутся вне приложения; ``solo`` и «не знаю» —
@@ -188,7 +195,7 @@ def build_readiness(master: CatalogMaster, *, actor: str | None = None) -> Readi
     salon_managed = workspace_kind(master.tenant_id) == "salon"
     return Readiness(
         items=(
-            _managed_outside("services") if salon_managed else _services_item(master),
+            _managed_outside("services") if salon_managed else _services_item(master, actor),
             _managed_outside("location") if salon_managed else _location_item(master, actor),
             _hours_item(master),
             _profile_item(master),
@@ -201,7 +208,118 @@ def build_readiness(master: CatalogMaster, *, actor: str | None = None) -> Readi
 # ─── пункты ──────────────────────────────────────────────────────────────────
 
 
-def _services_item(master: CatalogMaster) -> ReadinessItem:
+def _services_item(master: CatalogMaster, actor: str | None) -> ReadinessItem:
+    """Услуги — по правилу каталога для отправки профиля, как и место.
+
+    Живой прогон регистрации соло-мастера (09.11.2026) нашёл разрыв: каталог
+    отвечал «готов к отправке», а этот пункт — ``missing`` навсегда, и кнопка
+    «Отправить профиль на проверку» (её включает ``ready``) мастеру не
+    показывалась вовсе. Причина — два разных определения «настроено»:
+
+    * каталог (``users/publication.py`` → ``selected_services``): активная
+      услуга + активное предложение мастера с длительностью;
+    * зеркало (:func:`_services_from_mirror`): цена и длительность на строке
+      ``CatalogService``. У соло-мастера цена живёт на ПРЕДЛОЖЕНИИ, а эти поля
+      услуги каталог оставляет пустыми — зеркало не скажет «настроено» никогда.
+      К тому же зеркало отстаёт на период синхронизации (15 минут).
+
+    Поэтому, когда каталог можно спросить под субъектом, отвечает он — той же
+    ручкой, что экран выбора услуг (``/services/selection``). Правило
+    DRF-1989 остаётся: предложение дешевле 1 ₽ настроенным не считается.
+
+    Правило зеркала остаётся там, где каталог на этот вопрос не отвечает:
+    без субъекта (карточка в админке), без настроенного клиента, при отказе
+    «выбор услуг не для этого кабинета» (``SERVICE_SELECTION_REFUSED`` — он
+    есть только у соло) и при ответе не той формы. Каталог молчит или
+    отказывает по другой причине — ``unknown``, а не ``missing`` («незнание —
+    не „нет“»); но положительный факт зеркала это не отменяет.
+    """
+    if actor is None:
+        return _services_from_mirror(master)
+    try:
+        client = get_ayla_booking_client()
+    except ValueError:
+        return _services_from_mirror(master)
+    try:
+        data = client.get_service_selection(
+            specialist_id=catalog_specialist_id(master), external_user_id=actor
+        )
+    except (BookingBadRequestError, BookingUnavailableError, CatalogSpecialistUnresolved) as exc:
+        mirror = _services_from_mirror(master)
+        if _selection_refused(exc) or mirror.state == "done":
+            return mirror
+        # Любой другой отказ (не тот токен, субъект не разрешён, id устарел)
+        # — «не спросить», как у места работы: у соло зеркало здесь сказало
+        # бы ``missing``, которого на деле нет.
+        reason = type(exc).__name__
+        logger.info("master.readiness.services_unknown master=%s reason=%s", master.id, reason)
+        return ReadinessItem("services", "unknown", dict(mirror.detail), reason=reason)
+
+    counted = _count_selection(data)
+    if counted is None:
+        logger.warning("master.readiness.services_selection_malformed master=%s", master.id)
+        return _services_from_mirror(master)
+    selected, configured, unsellable = counted
+    detail = {"selected": selected, "configured": configured}
+    if configured:
+        return ReadinessItem("services", "done", detail)
+    return ReadinessItem(
+        "services", "missing", detail, reason=OFFER_NOT_SELLABLE if unsellable else None
+    )
+
+
+def _selection_refused(exc: Exception) -> bool:
+    """Каталог сказал «выбор услуг — не для этого кабинета» (409, только у соло он есть)."""
+
+    return isinstance(exc, BookingBadRequestError) and exc.code == SERVICE_SELECTION_REFUSED
+
+
+def _count_selection(data: Any) -> tuple[int, int, int] | None:
+    """``(выбрано, настроено и продаётся, настроено дешевле 1 ₽)`` либо ``None``.
+
+    Счётчики — каталожные (``selected`` / ``configured``), бот их не
+    пересчитывает; из «настроено» вычитается только то, что правило DRF-1989
+    продажей не считает. ``None`` — ответ не той формы.
+    """
+
+    if not isinstance(data, dict):
+        return None
+    selected, configured = _as_count(data.get("selected")), _as_count(data.get("configured"))
+    if selected is None or configured is None:
+        return None
+    rows = data.get("services")
+    unsellable = 0
+    if isinstance(rows, list):
+        unsellable = sum(
+            1
+            for row in rows
+            if isinstance(row, dict) and row.get("configured") is True and _below_one_rouble(row)
+        )
+    return selected, max(configured - unsellable, 0), unsellable
+
+
+def _as_count(value: Any) -> int | None:
+    """Целое неотрицательное число — оно само; что угодно другое — ``None``."""
+
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        return value
+    return None
+
+
+def _below_one_rouble(row: dict[str, Any]) -> bool:
+    """Цена предложения читается и она меньше 1 ₽. Не читается — не вычитаем."""
+
+    offer = row.get("offer")
+    if not isinstance(offer, dict):
+        return False
+    try:
+        return Decimal(str(offer.get("price"))) < 1
+    except ArithmeticError:  # ``InvalidOperation`` — цена не число
+        return False
+
+
+def _services_from_mirror(master: CatalogMaster) -> ReadinessItem:
+    """Тот же пункт по зеркалу — когда каталог на этот вопрос не отвечает."""
     rows = list_master_services(master=master)
     # DRF-1989: «настроено» — только продаваемое: непродаваемое ребро и цена
     # ниже 1 ₽ (``price_rub is None``) не настроены. Форма ``detail`` прежняя;
@@ -215,7 +333,7 @@ def _services_item(master: CatalogMaster) -> ReadinessItem:
     detail = {"selected": len(rows), "configured": len(configured)}
     if configured:
         return ReadinessItem("services", "done", detail)
-    reason = "offer_not_sellable" if any(not r["sellable"] for r in rows) else None
+    reason = OFFER_NOT_SELLABLE if any(not r["sellable"] for r in rows) else None
     return ReadinessItem("services", "missing", detail, reason=reason)
 
 
