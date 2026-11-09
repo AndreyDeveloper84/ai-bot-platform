@@ -52,6 +52,12 @@ account for goes to the concierge, which has all the tools::
    qualifier of the service itself (:data:`_SERVICE_QUALIFIER_STEMS` — the
    body part, the style), or the name of a city we actually serve.
 
+One more reader may account for a word, and it is not a word list: the
+catalog, when the turn as a whole is one of its bookable service names
+(:func:`_explained_by_service_name`). That is how a tap on a clarifying chip
+comes back — the chip is a catalog name — and it is the only case in which a
+word this file has never heard of does not hand the turn over.
+
 Rule 2 is the inversion. An unknown word is not ignored, it is a REFUSAL:
 «салоны», «стоит», «болит», «калорий» are all unknown here, so each of them
 hands the turn over without this module having ever heard of the tool that
@@ -350,8 +356,7 @@ def decide(text: str, *, extra_stems: ExtraStems = ()) -> ClaimDecision:
     # Costs nothing on the busiest turn: ``split_requested_services`` returns
     # early, before its one query, for any text without an enumeration
     # separator in it.
-    if len(_split_requested_services(text)) >= 2:
-        return ClaimDecision(False, "composite_request")
+    composite = len(_split_requested_services(text)) >= 2
 
     # Rule 2 — and NOTHING ELSE. Every word must be the service itself, glue
     # around a master request, or a city we serve.
@@ -363,6 +368,16 @@ def decide(text: str, *, extra_stems: ExtraStems = ()) -> ClaimDecision:
         and not _is_request_word(token)
         and not _names_service_token(token, extra_stems=extra_stems)
     )
+    if composite:
+        # The separators of an enumeration are also ordinary parts of a
+        # service's NAME: «Массаж лица и шеи» splits into «массаж лица» and
+        # «шеи». One service is not a composite request, and only the catalog
+        # can tell the two apart — the same reader, under the same condition,
+        # as for an unknown word below. Everything else that enumerates still
+        # goes to the model.
+        if _explained_by_service_name(text, _drop_known_cities(residue)):
+            return ClaimDecision(True, "catalog_service_name")
+        return ClaimDecision(False, "composite_request")
     if not residue:
         return ClaimDecision(True, "show_masters")
 
@@ -372,6 +387,15 @@ def decide(text: str, *, extra_stems: ExtraStems = ()) -> ClaimDecision:
     unexplained = _drop_known_cities(residue)
     if not unexplained:
         return ClaimDecision(True, "show_masters")
+
+    # The one authority allowed to explain a word this file has never heard
+    # of: the catalog, when the turn as a whole is one of its service names.
+    # See :func:`_explained_by_service_name` for why this is not a widening of
+    # the vocabulary. Last, for the reason the city read is late: it reads the
+    # catalog, and only a turn that already names a service and is otherwise
+    # on its way to the model gets here.
+    if _explained_by_service_name(text, unexplained):
+        return ClaimDecision(True, "catalog_service_name")
     return ClaimDecision(False, "unaccounted_words", residue=unexplained)
 
 
@@ -401,6 +425,57 @@ def _names_service_token(token: str, *, extra_stems: ExtraStems = ()) -> bool:
     survives as residue.
     """
     return mentions_service(token, extra_stems=extra_stems)
+
+
+# How much of a word has to agree with a word of the service name. The same
+# cut ``apps.marketplace.discovery`` stems a query with, so «биоэнергетического»
+# is explained by «Биоэнергетический» exactly as the search would match it.
+_NAME_STEM_LEN = 6
+
+
+def _explained_by_service_name(text: str, unexplained: tuple[str, ...]) -> bool:
+    """True when the catalog accounts for every word this file could not.
+
+    Pilot, 09.11. The bot asked «Что именно хочешь выбрать?» and offered
+    chips; the person tapped «Биоэнергетический массаж». A chip is a catalog
+    service name and its tap arrives as that name typed
+    (:func:`apps.orchestrator.discovery.clarifying_question`), so the turn
+    was the plainest «покажи мастеров по услуге» there is — and it was handed
+    to the model, because «биоэнергетический» is not in
+    :data:`_SERVICE_QUALIFIER_STEMS`. The model then searched for «массаж»
+    and described the result as bioenergetic massage masters.
+
+    The qualifier list cannot be the fix: it would have to be kept equal to
+    whatever the salons name their services, by hand. The catalog already
+    knows, so it is asked — narrowly:
+
+    1. the turn must BE a bookable service name, word for word
+       (:func:`apps.orchestrator.discovery.named_bookable_service` — the same
+       gate DRF-968 uses, so both paths agree about what a name is);
+    2. **every** unexplained word must be a word of that name.
+
+    The second condition keeps rule 2 of this module intact. The name gate
+    compares through the search's own parse, which drops filler — and its
+    filler list contains «салон», «услуга» and «мастер», precisely the words
+    that must stop this branch. «Салон биоэнергетический массаж» passes the
+    name gate and fails here, because «салон» is no word of that name.
+
+    Any error degrades to «not explained», i.e. the concierge answers — this
+    module's safe direction.
+    """
+    try:
+        from apps.orchestrator.discovery import named_bookable_service
+
+        name = named_bookable_service(text)
+    except Exception:  # noqa: BLE001 — routing must never break on a catalog read
+        logger.warning("orchestrator.fast_path.service_name_lookup_failed", exc_info=True)
+        return False
+    if not name:
+        return False
+    name_words = _WORD_RE.findall(normalize(name))
+    return all(
+        any(word.startswith(token[:_NAME_STEM_LEN]) for word in name_words) for token in unexplained
+    )
 
 
 def _split_requested_services(text: str) -> list[str]:

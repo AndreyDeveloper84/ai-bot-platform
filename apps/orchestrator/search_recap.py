@@ -28,7 +28,11 @@
   **Название специалиста — не услуга** (ayla-4c, 15.09): «массажистов»,
   «косметолога», «маникюрщицу» ловятся стемом услуги, но называют человека, и
   фрагмента не дают; перефразировать в «массаж» нельзя — строка обещает «по
-  твоим словам»;
+  твоим словам». Слово вне словаря попадает в строку в одном случае: человек
+  назвал услугу, которая стоит на показанных карточках, целиком
+  (``shown_services``). Нажал чип «Биоэнергетический массаж», получил
+  мастеров этой услуги — строка говорит «Биоэнергетический массаж», а не
+  «массаж» (пилот, 09.11: обрезанная строка читалась как обрезанный поиск);
 * **город** — только названный человеком словами в этом пути: на быстром пути —
   в самой реплике (по ней и искали), на пути модели — в репликах человека за
   два часа (срок контекста разговора, B13). Город из сохранённой памяти или
@@ -44,6 +48,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Sequence
 from datetime import timedelta
 from typing import Any
 
@@ -95,11 +100,65 @@ def _names_a_service(word: str) -> bool:
     return not tails or any(not _SPECIALIST_TAIL_RE.match(tail) for tail in tails)
 
 
-def service_fragment(message_text: str) -> str | None:
-    """Дословные слова услуги из реплики — или None. Без смысла здоровья, без цифр."""
+def _card_confirmed_stems(
+    message_text: str, shown_services: Sequence[str], searched: str | None = None
+) -> set[str]:
+    """Основы слов услуг с карточек, которые человек назвал ЦЕЛИКОМ.
 
+    Название считается, только если каждое его слово есть в реплике: тогда
+    слова реплики — это название услуги, которую человеку и показали. Карточка
+    с «Массаж лица и шеи» под репликой «массаж» ничего не добавляет: «лица» и
+    «шеи» человек не говорил, и строка «по твоим словам» их не получит.
+
+    ``searched`` — услуга, по которой шёл поиск (``None`` — её не передали).
+    Название считается, только если поиск шёл по всем его словам. Строка
+    пересказывает ПОИСК: если модель искала «массаж», а одна из пяти карточек
+    несёт «Биоэнергетический массаж», писать над списком «биоэнергетический
+    массаж» значит обещать услугу четверым мастерам, которые её не оказывают
+    (ревью этой правки, 09.11).
+    """
+    said = _stems(message_text)
+    searched_stems = None if searched is None else _stems(searched)
+    confirmed: set[str] = set()
+    for name in shown_services:
+        name_stems = _stems(name)
+        if not name_stems or not name_stems <= said:
+            continue
+        if searched_stems is not None and not name_stems <= searched_stems:
+            continue
+        confirmed |= name_stems
+    return confirmed
+
+
+def _named_on_a_card(word: str, confirmed: set[str]) -> bool:
+    """Слово вне словаря услуг, которым названа услуга на показанной карточке.
+
+    Слова, которые словарь знает сам, сюда не попадают — у них свой суд
+    (:func:`_names_a_service`), и «массажистов» остаётся названием человека,
+    что бы ни стояло на карточках.
+    """
+    if not confirmed:
+        return False
+    from apps.skills.menu.matching import mentions_service
+
+    return word.casefold()[:_STEM_CHARS] in confirmed and not mentions_service(word)
+
+
+def service_fragment(
+    message_text: str,
+    *,
+    shown_services: Sequence[str] = (),
+    searched: str | None = None,
+) -> str | None:
+    """Дословные слова услуги из реплики — или None. Без смысла здоровья, без цифр.
+
+    ``shown_services`` — названия услуг на карточках, которые уходят под этой
+    строкой, ``searched`` — услуга, по которой шёл поиск; см.
+    :func:`_card_confirmed_stems`.
+    """
     from apps.orchestrator.said_memory import _CLAUSE_SPLIT_RE, _has_health_meaning
 
+    confirmed = _card_confirmed_stems(message_text or "", shown_services, searched)
     runs: list[str] = []
     for raw_clause in _CLAUSE_SPLIT_RE.split(message_text or ""):
         clause = raw_clause.strip()
@@ -108,7 +167,7 @@ def service_fragment(message_text: str) -> str | None:
         start: int | None = None
         end = 0
         for match in _WORD_SPAN_RE.finditer(clause):
-            if _names_a_service(match.group(0)):
+            if _names_a_service(match.group(0)) or _named_on_a_card(match.group(0), confirmed):
                 if start is None:
                     start = match.start()
                 end = match.end()
@@ -166,19 +225,20 @@ def render_search_recap(
     *,
     city: str | None = None,
     specialization: str | None = None,
+    shown_services: Sequence[str] = (),
 ) -> str | None:
     """Строка «Искала по твоим словам: …» — или None, если объяснять нечем. Не бросает.
 
     ``city`` / ``specialization`` — то, что искали (аргументы ``show_masters``).
     ``city=None`` — быстрый путь: город искали по самой реплике.
+    ``shown_services`` — названия услуг на карточках под строкой.
     """
-
     try:
         text = message_text or ""
         path_texts = [text, *_path_user_turns(conversation)]
         parts: list[str] = []
 
-        service = service_fragment(text)
+        service = service_fragment(text, shown_services=shown_services, searched=specialization)
         if service and (specialization is None or _stems(service) & _stems(specialization)):
             parts.append(service)
 

@@ -469,6 +469,48 @@ def _catalog_words() -> frozenset[str]:
     return frozenset(words)
 
 
+def name_stems(name: str) -> list[str]:
+    """The stems a catalog service NAME reduces to. PURE.
+
+    What :func:`_parse_query` would make of the name if a person typed it,
+    minus the two steps that need the catalog — and a NAME does not need
+    them: every word of a live name is attested by definition
+    (:func:`_catalog_words` is built from those very names), so the
+    short-word judgement would keep all of them anyway.
+
+    This is the name side of «did the person say this service's name». The
+    question is asked of up to twenty names per turn on the routing path, and
+    answering it through :func:`parse_stems` cost two or three vocabulary
+    reads per NAME.
+
+    «Массаж лица и шеи» → ``массаж, лица, шеи``; «Массаж на дому» →
+    ``массаж, дому``; «Лицо/шея/декольте» → ``лицо, шея, деколь``. The same
+    filler and the same cut a query gets, so the two sides compare as sets.
+    """
+    return [token[:_STEM_LEN] for token in _content_tokens(name or "")[-_MAX_TOKENS:]]
+
+
+def stems_used_in_service_names(stems: Sequence[str]) -> list[str]:
+    """Of ``stems``, the ones some live service NAME is written with.
+
+    «Could this word be naming a service» — asked of the catalog, the same
+    vocabulary :func:`_attested_tokens` judges short tokens by, and for the
+    same reason: neither a stem list in code nor the model is the authority on
+    what a service is called here (AYLA-DEC-0045 / OD-9).
+
+    A stem counts when a name's word STARTS with it, which is what a stem is:
+    «биоэне» is carried by «Биоэнергетический», «пенза» by nothing.
+
+    One small DISTINCT over the service names, and none at all for an empty
+    input — the caller is expected to have run its free checks first.
+    """
+    wanted = [stem for stem in dict.fromkeys(stems) if stem]
+    if not wanted:
+        return []
+    words = _catalog_words()
+    return [stem for stem in wanted if any(word.startswith(stem) for word in words)]
+
+
 def _attested_tokens(tokens: list[str], words: frozenset[str] | None = None) -> list[str]:
     """``tokens`` minus the short ones the catalog does not use as words.
 
@@ -1253,6 +1295,53 @@ def _match_precision(stems: list[str]) -> Coalesce:
     )
 
 
+def _whole_request_row_q(stems: list[str]) -> Q:
+    """ONE service row of the master that carries EVERY stem.
+
+    The row conditions are :func:`_service_row_q` — active, same tenant and
+    SELLABLE (DRF-1964a) — so a service the master may not be sold for never
+    counts as «the service that was named». Written once: the annotation and
+    the name read in :func:`_only_the_named_service` must mean the same row.
+    """
+    every_stem = _service_row_q()
+    for stem in stems:
+        every_stem &= _stem_match_q("services_offered__service__name", stem)
+    return every_stem
+
+
+def _whole_request_match(stems: list[str]) -> Coalesce:
+    """1 when ONE service row of the master carries EVERY stem, else 0.
+
+    The yes/no twin of :func:`_match_precision`, for the one reader that has
+    to tell «performs the service that was named» from «performs something
+    that shares a word with it» — :func:`_only_the_named_service`.
+
+    Precision cannot answer that on its own. It is a product of two shares, so
+    a partial match on a short name can outscore a full match on a long one:
+    for «биоэнергетический массаж» a service called «Массаж» scores 0.5 on ONE
+    stem, and «Биоэнергетический массаж лица и шеи» scores 0.4 on BOTH.
+
+    Bound to one joined row and to :func:`_service_row_q` for the reasons
+    :func:`_service_match_q` gives: «Спортивный маникюр» plus «Тайский
+    массаж» is not «спортивный массаж», and an inactive or foreign-tenant row
+    is not a service the master offers. ``MAX`` for the reason
+    :func:`_match_precision` gives — a duplicated join cannot change it — and
+    ``COALESCE`` so a master matched only through the free-text
+    ``specialization`` reads as 0 rather than NULL.
+    """
+    return Coalesce(
+        Max(
+            Case(
+                When(_whole_request_row_q(stems), then=Value(1)),
+                default=Value(0),
+                output_field=IntegerField(),
+            )
+        ),
+        Value(0),
+        output_field=IntegerField(),
+    )
+
+
 def _matched_services(
     master_ids: list[UUID], parsed: "ParsedQuery"
 ) -> dict[UUID, tuple[UUID, str]]:
@@ -1357,6 +1446,7 @@ def _bookable_qs(
     city: str | None = None,
     specialization: str | None = None,
     tenant_id: UUID | None = None,
+    with_whole_match: bool = False,
 ) -> QuerySet[CatalogMaster]:
     """Cross-tenant queryset of bookable masters, optionally filtered.
 
@@ -1491,6 +1581,11 @@ def _bookable_qs(
             .annotate(match_score=_match_precision(stems))
             .order_by("-match_score", "name", "id")
         )
+        if with_whole_match and len(stems) >= 2:
+            # Only for the reader that asked, and only where the answer can
+            # differ from «matched at all»: on ONE stem every service match is
+            # a whole match already. See :func:`_only_the_named_service`.
+            qs = qs.annotate(match_whole=_whole_request_match(stems))
 
     return qs
 
@@ -1503,6 +1598,7 @@ def discover_masters(
     resolve_service: bool = False,
     rotation_seed: str | None = None,
     offset: int = 0,
+    named_service_only: bool = False,
 ) -> list[MasterCard]:
     """Return bookable masters across ALL tenants as public DTOs.
 
@@ -1525,6 +1621,8 @@ def discover_masters(
     card tap lands in booking WITH the service context instead of the
     stale-context dead-end. Off by default: the HTTP directory (#249) and
     other list readers don't pay the extra query.
+
+    ``named_service_only`` — :func:`discover_masters_window`'s, forwarded.
     """
     cards, _total = discover_masters_window(
         city=city,
@@ -1533,6 +1631,7 @@ def discover_masters(
         resolve_service=resolve_service,
         rotation_seed=rotation_seed,
         offset=offset,
+        named_service_only=named_service_only,
     )
     return cards
 
@@ -1607,6 +1706,67 @@ def rotate_ties(rows: list[_R], seed: str) -> list[_R]:
     )
 
 
+def _only_the_named_service(
+    candidates: list[CatalogMaster], stems: list[str]
+) -> list[CatalogMaster]:
+    """Drop the partial matches when the request NAMED a service.
+
+    Pilot, 09.11: the person tapped the chip «Биоэнергетический массаж» —
+    a name the bot itself had offered — and the list under it was three
+    masters who perform it followed by masters of other massages. The tail is
+    how this search is built (stems are OR-ed and ranked, DRF-1283), and for a
+    DESCRIPTION of a need it is the right answer: «массаж пенза» must not
+    find nobody. For a NAME it is a wrong one, shown with the same confidence
+    as the right ones: nobody who asks for one service by name means «or any
+    other service that shares a word with it».
+
+    Two conditions:
+
+    * **the master performs it** — ONE of their service rows carries every
+      word of the request (:func:`_whole_request_match`). «Спортивный массаж
+      глубоких тканей» stays for «спортивный массаж»; «Классический массаж»
+      does not;
+    * **the request is a service's name** — among those rows there is a
+      service whose name, reduced the way a query is (:func:`name_stems`), is
+      exactly the words of the request. A request that only describes
+      («массаж спины» against «Массаж спины и шеи») names nothing and keeps
+      its whole ranked list.
+
+    The second condition is NOT «the best candidate scores a precision of 1»,
+    which is what the first draft of this function asked. Precision divides
+    by the words of the name counted by spaces, and a query drops «и», «на»
+    and the dash: «Массаж лица и шеи» typed in full scores 0.75, «Массаж на
+    дому» 0.67 — so the cut never fired for exactly the names a chip is most
+    likely to carry (review of this change, 09.11).
+
+    A one-word request is never cut: ``match_whole`` is not annotated for it
+    (see :func:`_bookable_qs`), because there every match is whole already and
+    «массаж» must not collapse onto the one salon that named its service
+    «Массаж».
+
+    Fails towards the full list: no annotation, nobody who performs it, or no
+    service by that name all return ``candidates`` untouched. One extra query,
+    and only when somebody carries every word.
+    """
+    named = [master for master in candidates if getattr(master, "match_whole", 0)]
+    if not named or len(stems) < 2:
+        return candidates
+    # ONE .filter() for the whole condition set, for the reason
+    # ``_matched_services`` gives: the names must be read from the same joined
+    # row the conditions bound to.
+    names = (
+        CatalogMaster.all_tenants.filter(id__in=[master.id for master in named])
+        .filter(_whole_request_row_q(stems))
+        .order_by()
+        .values_list("services_offered__service__name", flat=True)
+        .distinct()
+    )
+    wanted = set(stems)
+    if not any(set(name_stems(name or "")) == wanted for name in names):
+        return candidates
+    return named
+
+
 def discover_masters_window(
     *,
     city: str | None = None,
@@ -1615,6 +1775,7 @@ def discover_masters_window(
     offset: int = 0,
     resolve_service: bool = False,
     rotation_seed: str | None = None,
+    named_service_only: bool = False,
 ) -> tuple[list[MasterCard], int]:
     """One window of discovered masters plus how many were FOUND — DRF-1532.
 
@@ -1637,18 +1798,36 @@ def discover_masters_window(
     Paging is stable BY CONSTRUCTION: the order is a pure function of (score,
     seed, id), so page 2 is the tail of the same list page 1 was the head of —
     nobody is shown twice and nobody falls between the pages.
+
+    ``named_service_only`` — when the request names a catalog service in
+    full, only the masters who perform it are returned
+    (:func:`_only_the_named_service`). Off by default: the ranked tail is the
+    documented behaviour of this search (DRF-1283) and every reader that did
+    not ask keeps it. Decided from the query alone, so every page of one
+    search is cut from the same list.
     """
     limit = max(1, min(limit, _MAX_LIMIT))
     offset = max(0, int(offset))
-    qs = _bookable_qs(city=city, specialization=specialization)
+    qs = _bookable_qs(city=city, specialization=specialization, with_whole_match=named_service_only)
     candidates = list(qs[:_CANDIDATE_SCAN_CAP])
+    asked = bool(specialization and specialization.strip())
+    parsed = _parse_query(specialization or "") if asked else None
+    # No separate guard for an ENUMERATION, though the first draft had one.
+    # «и», «/» and «+» are enumeration separators AND ordinary parts of a
+    # service's name — «Массаж лица и шеи» splits into two «services» — so a
+    # guard keyed on the separator switched the cut off for exactly such
+    # names. The name test inside is the guard: «маникюр, педикюр» is cut only
+    # when a service is called by those very words, and then its masters are
+    # the ones who do both.
+    if named_service_only and parsed is not None:
+        candidates = _only_the_named_service(candidates, parsed.stems)
     if rotation_seed:
         candidates = rotate_ties(candidates, rotation_seed)
     total = len(candidates)
     masters = candidates[offset : offset + limit]
     cards = [_to_card(master) for master in masters]
-    if resolve_service and specialization and specialization.strip():
-        matched = _matched_services([master.id for master in masters], _parse_query(specialization))
+    if resolve_service and parsed is not None:
+        matched = _matched_services([master.id for master in masters], parsed)
         cards = [
             (
                 replace(card, service_id=pair[0], service_name=pair[1])
