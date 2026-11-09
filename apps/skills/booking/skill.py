@@ -109,7 +109,7 @@ import logging
 import uuid
 from collections.abc import Set as AbstractSet
 from datetime import datetime, timedelta
-from typing import Any, ClassVar
+from typing import Any, ClassVar, NamedTuple
 
 from django.utils import timezone
 
@@ -249,6 +249,25 @@ _DATE_PICK_PROMPT = "Выбери дату:"
 # wearing the first one's words; the header now says which of the two it is.
 _DATE_PICK_ALL_PROMPT = "Все свободные даты:"
 _DATE_PICKER_FALLBACK_NO_DATES = "У выбранного мастера нет свободных дат в ближайшее время."
+
+# Приёмка пилота 09.11.2026: бот нашёл трёх мастеров, первый же тап дал
+# «нет свободных дат» — и ни одной кнопки. Замер на стенде в тот же день:
+# из 33 продаваемых мастеров у 24 нет ни одного рабочего часа в Ayla, так
+# что этот тупик — типичный исход, а не редкость. Вместо тупика бот
+# предлагает других мастеров той же услуги. Кого уже проверили и у кого
+# дат не нашлось, он помнит в ``skill_state[_NO_DATES_STATE_KEY]`` и по
+# кругу не водит; когда проверены все — говорит об этом прямо.
+_NO_DATES_OTHER_MASTERS_PROMPT = (
+    "У выбранного мастера нет свободных дат в ближайшее время. "
+    "Эту услугу оказывают и другие мастера — выбери, к кому записаться:"
+)
+_NO_DATES_NOBODY_LEFT = (
+    "У выбранного мастера нет свободных дат в ближайшее время. "
+    "У других мастеров этой услуги свободных дат тоже нет."
+)
+_NO_DATES_STATE_KEY = "booking_no_dates"
+_NO_DATES_STATE_TTL = timedelta(minutes=30)
+_NO_DATES_MAX_OTHER_MASTERS = 5
 
 # ── DRF-1325: the human-time half of the flow ─────────────────────────────
 #
@@ -663,6 +682,7 @@ class BookingSkill:
                 tenant_id=tenant_id,
                 tenant=tenant,
                 pref=load_time_preference(context.conversation),
+                conversation=context.conversation,
             )
 
         # ── «Выбрать дату» — expand the day chips (DRF-1325) ────────
@@ -689,6 +709,7 @@ class BookingSkill:
                 tenant=tenant,
                 pref=None,
                 expand_all=True,
+                conversation=context.conversation,
             )
 
         # ── Slot-pick callback short-circuit (RB1.1-D05) ───────────
@@ -2308,6 +2329,7 @@ def _render_date_picker(
     tenant: Any = None,
     pref: TimePreference | None = None,
     expand_all: bool = False,
+    conversation: Any = None,
 ) -> SkillResult:
     """Build the "when?" reply after a master pick.
 
@@ -2361,13 +2383,14 @@ def _render_date_picker(
         )
 
     if not dates:
-        # Valid empty result — render a friendly "no dates" reply so the
-        # user knows to pick a different master. Not a handoff — the
-        # bot still owns the conversation, just routes back to master list.
-        return _build_skill_result(
-            text=_DATE_PICKER_FALLBACK_NO_DATES,
-            tool_calls_made=[],
-            confidence=_CONFIDENCE_OK,
+        # Valid empty result. Not a handoff — the bot still owns the
+        # conversation and offers the other masters of the service
+        # (09.11.2026; see _NO_DATES_OTHER_MASTERS_PROMPT).
+        return _no_dates_reply(
+            master_id=master_id,
+            service_id=service_id,
+            tenant=tenant,
+            conversation=conversation,
         )
 
     # «Сегодня» is computed in the SALON's zone, never the server's: the
@@ -3037,6 +3060,200 @@ def _legacy_keyword_match(text: str) -> bool:
 # ---------------------------------------------------------------------------
 # D-10 — booking-flow continuation state (skill_state["booking_flow"])
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# «Нет свободных дат» → другие мастера услуги (09.11.2026)
+# ---------------------------------------------------------------------------
+
+
+class _OtherMaster(NamedTuple):
+    """Мастер услуги под кнопку: то, что читает ``_master_button_label``,
+    плюс оба его ключа — pk зеркала и id каталога."""
+
+    id: uuid.UUID
+    name: str
+    specialization: str
+    catalog_id: uuid.UUID | None
+
+    def ids(self) -> set[str]:
+        return {_id_text(self.id), _id_text(self.catalog_id)} - {""}
+
+
+def _id_text(value: Any) -> str:
+    """Ключ мастера как текст в одном написании: UUID — каноническом."""
+    if value is None:
+        return ""
+    text = str(value).strip()
+    try:
+        return str(uuid.UUID(text))
+    except ValueError:
+        return text
+
+
+def _no_dates_reply(
+    *,
+    master_id: int | str,
+    service_id: int | str,
+    tenant: Any,
+    conversation: Any,
+) -> SkillResult:
+    """Ответ на пустой список дат: другие мастера услуги вместо тупика.
+
+    Три исхода. Есть кого предложить — прежняя фраза с приглашением выбрать
+    другого мастера плюс клавиатура выбора мастера с теми же колбэками
+    ``cb:book:pick_master:<pk>:<service>``, что и у карточек после поиска:
+    тап ведёт сюда же, и мастер без дат пополняет список проверенных.
+    Другие мастера есть, но проверены все — об этом сказано прямо. Во всех
+    остальных случаях (единственный мастер услуги, каталог не ответил, флаг
+    REST выключен) — прежняя строка без кнопок, как и было.
+
+    Колбэк может нести мастера любым из двух ключей — pk зеркала или id
+    каталога (DRF-2695), поэтому и память, и исключение сравнивают по обоим.
+    """
+    known_empty = _remember_no_dates(conversation, master_id=master_id, service_id=service_id)
+    candidates = _masters_of_service(tenant=tenant, service_id=service_id)
+    tapped = {_id_text(master_id)}
+    others = [m for m in (candidates or []) if not (m.ids() & tapped)]
+    fresh = [m for m in others if not (m.ids() & known_empty)]
+    logger.info(
+        "booking.pick_master.no_dates master=%s service=%s others=%s offered=%s known_empty=%s",
+        master_id,
+        service_id,
+        "?" if candidates is None else len(others),
+        len(fresh),
+        len(known_empty),
+    )
+    if fresh:
+        return _build_skill_result(
+            text=_NO_DATES_OTHER_MASTERS_PROMPT,
+            tool_calls_made=[],
+            confidence=_CONFIDENCE_OK,
+            action_data=_action_data_for_master_pick(
+                fresh[:_NO_DATES_MAX_OTHER_MASTERS], service_id=service_id
+            ),
+        )
+    return _build_skill_result(
+        text=_NO_DATES_NOBODY_LEFT if others else _DATE_PICKER_FALLBACK_NO_DATES,
+        tool_calls_made=[],
+        confidence=_CONFIDENCE_OK,
+    )
+
+
+def _remember_no_dates(
+    conversation: Any, *, master_id: int | str, service_id: int | str
+) -> set[str]:
+    """Запомнить мастера без дат; вернуть всех таких по этой услуге.
+
+    Состояние ``skill_state[_NO_DATES_STATE_KEY]`` относится к одной услуге:
+    другая услуга или истёкший срок начинают список заново. Запись
+    fail-soft, как у :func:`_write_flow_state`, с тем же событием в
+    телеметрии: без памяти бот всего лишь предложит уже проверенного
+    мастера ещё раз.
+    """
+    now = timezone.now()
+    raw = (getattr(conversation, "skill_state", None) or {}).get(_NO_DATES_STATE_KEY)
+    masters: list[str] = []
+    if isinstance(raw, dict) and str(raw.get("service_id")) == str(service_id):
+        try:
+            expires_at = datetime.fromisoformat(str(raw.get("expires_at") or ""))
+        except ValueError:
+            expires_at = None
+        if expires_at is not None and expires_at.tzinfo is None:
+            expires_at = timezone.make_aware(expires_at)
+        if expires_at is not None and expires_at > now:
+            masters = [_id_text(m) for m in raw.get("masters") or []]
+    if _id_text(master_id) not in masters:
+        masters.append(_id_text(master_id))
+    if conversation is not None:
+        from apps.conversations.services import write_skill_state
+
+        state = {
+            "service_id": str(service_id),
+            "masters": masters,
+            "expires_at": (now + _NO_DATES_STATE_TTL).isoformat(),
+        }
+        try:
+            write_skill_state(conversation, _NO_DATES_STATE_KEY, state)
+        except Exception:  # noqa: BLE001 — память, а не истина; ход не ронять
+            logger.warning(
+                "booking.no_dates.state_write_failed conversation=%s",
+                getattr(conversation, "id", "?"),
+                exc_info=True,
+            )
+            emit(
+                BOOKING_FLOW_STATE_WRITE_FAILED,
+                distinct_id="",
+                dialog_id=getattr(conversation, "id", None),
+                properties={
+                    "conversation_id": str(getattr(conversation, "id", "")),
+                    "subkey": _NO_DATES_STATE_KEY,
+                },
+            )
+    return set(masters)
+
+
+def _masters_of_service(*, tenant: Any, service_id: int | str) -> list[_OtherMaster] | None:
+    """Продаваемые мастера салона с этой услугой, по имени.
+
+    ``None`` — «не знаем»: нет арендатора, флаг REST выключен, услуга названа
+    не ключом каталога Ayla или база не ответила; тогда ответ остаётся
+    прежним. Пустой список — знаем, что мастеров нет.
+
+    Условия те же, что у поиска и карточек: ребро продаётся (``sellable``),
+    услуга включена, мастер проходит :func:`available_q`. Сверх того нужен
+    ``catalog_specialist_id``: кнопка ведёт за датами в каталог Ayla, и
+    мастер без этого ключа там не находится — тап по нему кончился бы
+    передачей менеджеру. Это условие на кнопку, не на витрину: ворота
+    ``MASTER_CATALOG_IDENTITY_REQUIRED`` остаются как есть.
+    """
+    if tenant is None or service_id is None or not _booking_via_ayla():
+        return None
+    try:
+        service_key = uuid.UUID(str(service_id))
+    except ValueError:
+        return None
+    try:
+        from apps.catalog.master_state import available_q
+        from apps.catalog.models import CatalogMaster, MasterService
+
+        master_ids = (
+            MasterService.objects.filter(
+                tenant=tenant,
+                service__tenant=tenant,
+                service__is_active=True,
+                service__ayla_service_id=service_key,
+            )
+            .sellable()
+            .values_list("master_id", flat=True)
+        )
+        rows = list(
+            CatalogMaster.objects.filter(
+                available_q(),
+                tenant=tenant,
+                id__in=master_ids,
+                catalog_specialist_id__isnull=False,
+            )
+            .order_by("name", "id")
+            .values("id", "name", "specialization", "catalog_specialist_id")
+        )
+    except Exception as exc:  # noqa: BLE001 — подсказка, а не истина; ход не ронять
+        logger.warning(
+            "booking.no_dates.masters_of_service_failed tenant=%s service=%s err=%s",
+            getattr(tenant, "id", "?"),
+            service_id,
+            exc,
+        )
+        return None
+    return [
+        _OtherMaster(
+            id=row["id"],
+            name=row["name"] or "",
+            specialization=row["specialization"] or "",
+            catalog_id=row["catalog_specialist_id"],
+        )
+        for row in rows
+    ]
 
 
 def _read_flow_state(conversation: Any) -> dict[str, Any] | None:
