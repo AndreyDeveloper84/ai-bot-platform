@@ -43,7 +43,7 @@
 * **имя на карточке и сама карточка** остаются: это запись салона о
   сотруднике, и что с ней делать после удаления аккаунта — решение
   владельца (вопрос в листе). Мастер остаётся в расписании салона — как и
-  при обычном отзыве доступа;
+  при обычном отзыве доступа. Исключение — свой соло-кабинет, см. ниже;
 * **роль владельца салона** не снимается: у салона один владелец, и только
   он выдаёт код владельца; снять её — оставить салон, в который никто не
   войдёт. Шаг называет это в ``detail`` (``owner_role_kept``) и пишет в лог;
@@ -51,6 +51,39 @@
 
 «Удалить мои данные» (отзыв хранения) этот шаг не зовёт: там человек остаётся
 сотрудником, и роль — доступ, а не память (решение владельца 20.09, §58).
+
+# Свой соло-кабинет: карточка — не запись салона (решение владельца 09.11.2026)
+
+У соло-мастера «салон» — он сам: карточка мастера и название кабинета
+«Студия {имя}» говорят о нём, а не о чьём-то сотруднике. Роль владельца
+каскад не снимает, связь с карточкой остаётся — и до правки карточка
+пропускалась целиком: аккаунт удалён, а имя, фото и описание лежат дальше.
+
+Каталог свою половину уже стёр (``users/deletion_executor.py``): профиль —
+``display_name`` «Удалён», аватар и описание убраны, приём записей выключен;
+соло-workspace — имя «Студия», адрес и город пусты. Здесь зеркало повторяет
+те же значения (:data:`ERASED_CARD_NAME`, :data:`ERASED_SOLO_TENANT_NAME`) и
+уводит карточку в архив. Каталог при этом не зовётся: архив — его
+собственный факт, а не новость от бота.
+
+«Свой соло-кабинет» — два локальных факта, без похода в сеть (шаг идёт
+внутри запроса каталога): слаг кабинета выведен из личности этой оболочки
+(``_solo_tenant_slug`` — так кабинет заводит саморегистрация) и в кабинете
+больше никого нет. «Никого» — то же правило состава, что у проверки
+допустимости (``deletion_eligibility._scan_cabinet``): нет чужой действующей
+роли и нет живой карточки, привязанной к другому человеку. Неотвеченное
+приглашение — не человек, а вторая оболочка того же человека — не «другой».
+Появился второй человек — кабинет уже не только его, и остаётся прежнее
+правило (в ``detail`` — ``solo_shared``), как ``solo_shared`` у каталога.
+
+Свой ли кабинет — решается по личностям оболочек человека, а не по связи
+с карточкой: отзыв ролей может эту связь снять (у владельца, чья строка
+владельца уже неактивна), и повтор шага после сбоя застал бы карточку уже
+отвязанной. Личность оболочки каскад не трогает — по ней слаг выводится
+и в первый раз, и при повторе.
+
+Чего здесь НЕТ, и это названо: роль владельца у соло остаётся, кабинет не
+закрывается (``CLOSE_EMPTY_CABINET`` — отдельная задача).
 """
 
 from __future__ import annotations
@@ -62,6 +95,7 @@ from typing import Any
 
 from django.db import transaction
 from django.db.models import Q
+from django.utils import timezone
 
 from apps.identity.models import BotUser
 from apps.identity.services.deletion_gate import clear_deletion_flag
@@ -115,6 +149,15 @@ REVOKE_SURFACE = "account_deletion"
 #: снимается вместе с аккаунтом. Имени здесь нет намеренно — см. докстринг.
 CARD_INVITE_PHONE_KEY = "invite_phone"
 
+#: Чем каталог обезличивает профиль мастера и соло-workspace при удалении
+#: аккаунта (``users/deletion_executor.py``: ``ERASED_NAME``,
+#: ``SOLO_TENANT_ERASED_NAME``). Зеркало повторяет значения каталога, а не
+#: придумывает свои: иначе один и тот же человек назывался бы по-разному.
+ERASED_CARD_NAME = "Удалён"
+ERASED_SOLO_TENANT_NAME = "Студия"
+#: Причина архива на карточке соло — машинное слово, не текст человека.
+SOLO_CARD_ARCHIVE_REASON = "account_deleted"
+
 
 def remove_staff_access(shells: list[BotUser], ayla_user_id: uuid.UUID, *, request_id: str) -> dict:
     """Снять роли и связь с карточкой мастера у удаляемого человека. Шаг каскада.
@@ -126,7 +169,7 @@ def remove_staff_access(shells: list[BotUser], ayla_user_id: uuid.UUID, *, reque
     from apps.identity.services.staff_revoke import OwnerRevokeRefused, revoke_staff_access
     from apps.tenancy.models import TenantStaff
 
-    roles = cards = owner_kept = 0
+    roles = cards = owner_kept = solo_erased = solo_shared = 0
     try:
         shell_ids = [shell.id for shell in shells]
         staffed = list(
@@ -139,6 +182,7 @@ def remove_staff_access(shells: list[BotUser], ayla_user_id: uuid.UUID, *, reque
                 "tenant", "linked_bot_user"
             )
         )
+        own_solo_slugs = _own_solo_slugs(shells)
         # Пара «салон, оболочка» — единица отзыва у ``revoke_staff_access``.
         pairs: dict[tuple[Any, Any], tuple[Tenant, BotUser]] = {}
         for row in staffed:
@@ -177,6 +221,14 @@ def remove_staff_access(shells: list[BotUser], ayla_user_id: uuid.UUID, *, reque
                 Q(pk__in=[card.pk for card in linked]) | Q(ayla_user_id=ayla_user_id)
             )
             for card in mine:
+                if card.tenant.slug in own_solo_slugs:
+                    # Свой соло-кабинет: карточка говорит о самом человеке, и
+                    # её личное стирается (см. докстринг). Делит кабинет с
+                    # кем-то — остаётся общее правило ниже.
+                    if _sole_person_in_cabinet(card, shell_ids):
+                        solo_erased += _erase_solo_card(card)
+                        continue
+                    solo_shared += 1
                 if card.linked_bot_user_id in shell_ids:
                     # Связь осталась — это салон, где человек владелец, и роль
                     # не снята (см. выше). Карточка остаётся цельной: полу-
@@ -200,7 +252,107 @@ def remove_staff_access(shells: list[BotUser], ayla_user_id: uuid.UUID, *, reque
     detail = f"roles={roles} cards={cards}"
     if owner_kept:
         detail += f" owner_role_kept={owner_kept}"
+    if solo_erased:
+        detail += f" solo_cards_erased={solo_erased}"
+    if solo_shared:
+        detail += f" solo_shared={solo_shared}"
     return {"step": STAFF_ACCESS_STEP, "ok": True, "detail": detail}
+
+
+def _own_solo_slugs(shells: list[BotUser]) -> set[str]:
+    """Слаги кабинетов, которые саморегистрация завела бы для личностей этого человека."""
+    from apps.identity.services.solo_onboarding import _solo_tenant_slug
+
+    return {
+        _solo_tenant_slug(shell.channel, shell.channel_user_id)
+        for shell in shells
+        if shell.channel and shell.channel_user_id
+    }
+
+
+def _sole_person_in_cabinet(card: Any, shell_ids: list[Any]) -> bool:
+    """В кабинете нет никого, кроме этого человека (всех его оболочек).
+
+    Правило состава — как у ``deletion_eligibility._scan_cabinet``: чужая
+    действующая роль или живая карточка, привязанная к другому человеку.
+    """
+    from apps.catalog.models import CatalogMaster
+    from apps.tenancy.models import TenantStaff
+
+    other_role = (
+        TenantStaff.all_tenants.filter(
+            tenant_id=card.tenant_id,
+            deactivated_at__isnull=True,
+            bot_user__deleted_at__isnull=True,
+        )
+        .exclude(bot_user_id__in=shell_ids)
+        .exists()
+    )
+    other_card = (
+        CatalogMaster.all_tenants.filter(
+            tenant_id=card.tenant_id, archived_at__isnull=True, linked_bot_user_id__isnull=False
+        )
+        .exclude(linked_bot_user_id__in=shell_ids)
+        .exists()
+    )
+    return not other_role and not other_card
+
+
+def _erase_solo_card(card: Any) -> int:
+    """Стереть личное с карточки соло и с названия кабинета; ``1`` — что-то изменилось.
+
+    Зовётся внутри транзакции шага, карточка уже под ``select_for_update``.
+    Повтор ничего не меняет: дата архива не сдвигается.
+    """
+    tenant = card.tenant
+
+    # Пары «поле → стёртое значение», а не словарь: это не выдача наружу, и
+    # словарь с ключом фото попал бы под перепись сырых фото на проводе (DRF-2539).
+    erased: tuple[tuple[str, Any], ...] = (
+        ("name", ERASED_CARD_NAME),
+        ("bio", ""),
+        ("experience", ""),
+        ("photo_url", ""),
+        ("address", None),
+        ("location_lat", None),
+        ("location_lng", None),
+        ("max_handle", ""),
+        ("ayla_user_id", None),
+        ("raw", {}),
+        ("is_active", False),
+    )
+    fields = []
+    for name, value in erased:
+        if getattr(card, name) != value:
+            setattr(card, name, value)
+            fields.append(name)
+    if card.archived_at is None:
+        card.archived_at = timezone.now()
+        card.archive_reason = SOLO_CARD_ARCHIVE_REASON
+        fields += ["archived_at", "archive_reason"]
+    if fields:
+        card.save(update_fields=fields)
+
+    tenant_erased: dict[str, Any] = {"name": ERASED_SOLO_TENANT_NAME, "city": "", "address": None}
+    tenant_fields = [
+        name for name, value in tenant_erased.items() if getattr(tenant, name) != value
+    ]
+    for name in tenant_fields:
+        setattr(tenant, name, tenant_erased[name])
+    if tenant_fields:
+        tenant.save(update_fields=[*tenant_fields, "updated_at"])
+
+    if not fields and not tenant_fields:
+        return 0
+    logger.info(
+        "identity.account_deletion.solo_card_erased tenant=%s card=%s "
+        "card_fields=%d tenant_fields=%d",
+        tenant.slug,
+        card.pk,
+        len(fields),
+        len(tenant_fields),
+    )
+    return 1
 
 
 def execute_bot_half(
