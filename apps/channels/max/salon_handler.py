@@ -276,8 +276,12 @@ SOLO_NOT_LINKED_TEXT = (
 
 #: Обычная реплика дозванивается до каталога не чаще раза в столько секунд:
 #: повтор — это до трёх вызовов каталога, а NOT_LINKED отвечает на каждое
-#: сообщение. «Повторить проверку» и «/start» — явная просьба, их не тормозим.
+#: сообщение.
 SOLO_LINK_RETRY_COOLDOWN_SECONDS = 60
+
+#: «Повторить проверку» и «/start» — явная просьба: длинного интервала не ждут,
+#: но двойной тап подряд второй раз каталог не зовёт (см. ``_solo_link_retry_due``).
+SOLO_LINK_EXPLICIT_RETRY_COOLDOWN_SECONDS = 10
 
 #: Повторное нажатие — не ошибка и не повод молчать.
 SOLO_ALREADY_REGISTERED = (
@@ -690,11 +694,12 @@ def _handle_salon_event_inner(event: CanonicalEvent, trace_id: str | uuid.UUID |
 
     try:
         verdict = salon_entry.precheck(event, chosen_slug=chosen)
-        if verdict.code == salon_entry.NOT_LINKED and _heal_solo_link(event, verdict):
-            # Связь дозвонилась в этом же ходе — пре-чек заново, и человек
-            # идёт дальше как персонал, а не читает «повторите проверку» о
-            # том, что уже сделано.
-            verdict = salon_entry.precheck(event, chosen_slug=chosen)
+        if _solo_link_may_need_healing(event, verdict) and _heal_solo_link(event, verdict):
+            if verdict.code == salon_entry.NOT_LINKED:
+                # Связь дозвонилась в этом же ходе — пре-чек заново, и человек
+                # идёт дальше как персонал, а не читает «повторите проверку»
+                # о том, что уже сделано.
+                verdict = salon_entry.precheck(event, chosen_slug=chosen)
     except SalonChoiceRequired as exc:
         _ask_which_salon(event, exc.tenants)
         return
@@ -741,22 +746,60 @@ def _solo_link_of(bot_user):
         return None
 
 
-def _solo_link_retry_due(event: CanonicalEvent) -> bool:
-    """Можно ли дозваниваться по обычной реплике — не чаще раза в интервал."""
+def _solo_link_retry_due(event: CanonicalEvent, *, explicit: bool) -> bool:
+    """Можно ли дозваниваться сейчас — не чаще раза в интервал на человека.
+
+    Обычная реплика — раз в ``SOLO_LINK_RETRY_COOLDOWN_SECONDS``. Явная просьба
+    («Повторить проверку», ``/start``) длинного интервала не ждёт, но и у неё
+    есть короткий: дозвон — это несколько синхронных походов в каталог на
+    потоке входящих, и двойной тап не должен ни запускать их дважды подряд, ни
+    сталкивать два провижининга одного кабинета.
+    """
 
     from django.core.cache import cache
 
-    key = f"salon_solo_link_retry:{event.channel}:{event.channel_user_id}"
+    kind, timeout = (
+        ("explicit", SOLO_LINK_EXPLICIT_RETRY_COOLDOWN_SECONDS)
+        if explicit
+        else ("plain", SOLO_LINK_RETRY_COOLDOWN_SECONDS)
+    )
+    key = f"salon_solo_link_retry:{kind}:{event.channel}:{event.channel_user_id}"
     try:
-        return bool(cache.add(key, 1, timeout=SOLO_LINK_RETRY_COOLDOWN_SECONDS))
+        return bool(cache.add(key, 1, timeout=timeout))
     except Exception:  # noqa: BLE001 — кэш недоступен → пробуем, как без тормоза
         return True
 
 
-def _heal_solo_link(event: CanonicalEvent, verdict) -> bool:
-    """NOT_LINKED у соло-мастера с недоделанной связью — довязать самим.
+def _solo_link_may_need_healing(event: CanonicalEvent, verdict) -> bool:
+    """Дешёвый отсев до чтения базы: у кого вообще может висеть связь соло.
 
-    ``True`` — связь появилась в этом ходе, пре-чек надо пройти заново.
+    ``NOT_LINKED`` — очевидный случай. ``STAFF`` — неочевидный и замеренный
+    ревью: у владельца пре-чек смотрит на ключ ``BotUser``, а его переводит в
+    настоящий сам ``ensure_ayla_link``, как только каталог ответил настоящим.
+    Карточку мастера и ``SoloIdentityLink`` он не трогает — и связь остаётся
+    ``PENDING`` под вердиктом ``STAFF``: меню есть, продажи нет, и без этого
+    захода дозвон её бы уже никогда не взял. Соло-мастер — владелец своего
+    кабинета по построению, поэтому у ``STAFF`` без роли владельца читать
+    нечего, и салонный персонал за этот заход не платит запросами.
+
+    Тап «Обратиться в поддержку» — просьба о контакте, а не о проверке:
+    удачный дозвон увёл бы его в меню, где у этого тапа нет строки.
+    """
+
+    from apps.channels.max import salon_entry
+
+    if event.text.strip() == CB_SALON_SUPPORT:
+        return False
+    if verdict.code == salon_entry.NOT_LINKED:
+        return True
+    return bool(verdict.is_staff and getattr(verdict.role_ctx, "is_owner", False))
+
+
+def _heal_solo_link(event: CanonicalEvent, verdict) -> bool:
+    """У соло-мастера недоделанная связь с каталогом — довязать самим.
+
+    ``True`` — связь появилась в этом ходе; при ``NOT_LINKED`` пре-чек надо
+    пройти заново.
 
     §77 п.38: человека в регистрации мастеров нет. Первый ход связывает сам
     (DRF-2450), но у его неудачи не было продолжения: повтор жил в ветке
@@ -771,12 +814,13 @@ def _heal_solo_link(event: CanonicalEvent, verdict) -> bool:
     """
 
     from apps.identity.services.solo_link_retry import retry_solo_link
+    from apps.tenancy.context import tenant_scope
 
     found = _solo_link_of(verdict.bot_user)
     if found is None or not found.is_pending:
         return False
     explicit = event.text.strip() == CB_SALON_RECHECK or _is_entry_start(event.text)
-    if not explicit and not _solo_link_retry_due(event):
+    if not _solo_link_retry_due(event, explicit=explicit):
         return False
     try:
         retry = retry_solo_link(
@@ -786,17 +830,18 @@ def _heal_solo_link(event: CanonicalEvent, verdict) -> bool:
         logger.exception("channels.max.salon.solo_link_retry_failed")
         return False
 
-    emit(
-        "channels.max.salon.solo_link_retried",
-        payload={
-            "bot_user_id": str(verdict.bot_user.id),
-            "linked": retry.linked,
-            "explicit": explicit,
-            "catalog_provisioning_refusal": retry.catalog_refusal,
-            "identity_link_refusal": retry.identity_link_refusal,
-            "link_refusal": retry.link_refusal,
-        },
-    )
+    with tenant_scope(verdict.tenant):  # событие — в тенанте кабинета, а не «ничьё»
+        emit(
+            "channels.max.salon.solo_link_retried",
+            payload={
+                "bot_user_id": str(verdict.bot_user.id),
+                "linked": retry.linked,
+                "explicit": explicit,
+                "catalog_provisioning_refusal": retry.catalog_refusal,
+                "identity_link_refusal": retry.identity_link_refusal,
+                "link_refusal": retry.link_refusal,
+            },
+        )
     logger.info(
         "channels.max.salon.solo_link_retried bot_user=%s tenant=%s linked=%s "
         "catalog_refusal=%s identity_link_refusal=%s link_refusal=%s",

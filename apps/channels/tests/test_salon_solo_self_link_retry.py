@@ -321,15 +321,47 @@ class TestWhileTheCatalogStillRefuses:
         assert catalog.doors() == doors_before + 1, "обычная реплика — раз в интервал"
         assert _text(sent) == salon_handler.SOLO_NOT_LINKED_TEXT
 
-    def test_an_explicit_recheck_is_never_throttled(self, catalog, sent, emitted) -> None:
+    def test_an_explicit_recheck_does_not_wait_for_the_plain_line_interval(
+        self, catalog, sent, emitted
+    ) -> None:
         _registered_with_a_failed_link(catalog, sent)
         doors_before = catalog.doors()
 
         _handle("привет")
         _handle(salon_handler.CB_SALON_RECHECK)
+
+        assert catalog.doors() == doors_before + 2
+
+    def test_a_double_tap_calls_the_catalog_once(self, catalog, sent, emitted) -> None:
+        """Ревью: явная просьба без интервала — это синхронные походы в каталог на каждый тап."""
+        _registered_with_a_failed_link(catalog, sent)
+        doors_before = catalog.doors()
+
+        _handle(salon_handler.CB_SALON_RECHECK)
         _handle(salon_handler.CB_SALON_RECHECK)
 
-        assert catalog.doors() == doors_before + 3
+        assert catalog.doors() == doors_before + 1
+        assert _text(sent) == salon_handler.SOLO_NOT_LINKED_TEXT, "второй тап — ответ, не тишина"
+
+        cache.clear()  # короткий интервал прошёл
+        _handle(salon_handler.CB_SALON_RECHECK)
+
+        assert catalog.doors() == doors_before + 2
+
+    def test_a_support_tap_gets_the_support_answer_not_a_retry(
+        self, catalog, sent, emitted, settings
+    ) -> None:
+        """Ревью: удачный дозвон на тапе поддержки увёл бы человека в меню без контакта."""
+        settings.AYLA_SUPPORT_CONTACT = "@ayla_support_901"
+        _registered_with_a_failed_link(catalog, sent)
+        catalog.door_refusal = None
+        doors_before = catalog.doors()
+
+        _handle(salon_handler.CB_SALON_SUPPORT)
+
+        assert "@ayla_support_901" in _text(sent)
+        assert catalog.doors() == doors_before
+        assert _link().status == SoloIdentityLink.Status.PENDING
 
     def test_a_crashing_retry_still_answers(self, catalog, sent, emitted, monkeypatch) -> None:
         """Ошибка настройки или базы внутри дозвона — не молчание человеку."""
@@ -365,6 +397,85 @@ class TestAnOperatorsRejectionStands:
         assert _text(sent) == REJECTED_RECOVERY_TEXT
         assert _button_payloads(sent) == [salon_handler.CB_SALON_SUPPORT]
 
+    def test_a_rejection_landing_during_the_retry_is_not_overwritten(
+        self, catalog, sent, emitted
+    ) -> None:
+        """Ревью: исход писался целой строкой из экземпляра, прочитанного до сети.
+
+        Оператор отклоняет, пока дозвон ходит в каталог; каталог при этом
+        отвечает настоящим ключом. Красный до правки: связь становилась LINKED.
+        """
+        from django.contrib.auth import get_user_model
+
+        _registered_with_a_failed_link(catalog, sent)
+        operator = get_user_model().objects.create_user(username="op-902", password="x")  # noqa: S106
+        catalog.door_refusal = None
+        bind = catalog.door
+
+        def _door_while_the_operator_rejects(**kwargs: Any) -> None:
+            reject_by_operator(_link(), operator=operator, reason="fraud_suspected")
+            bind(**kwargs)
+
+        with patch.object(
+            door_client, "bind_master_identity_in_catalog", _door_while_the_operator_rejects
+        ):
+            _handle(salon_handler.CB_SALON_RECHECK)
+
+        link = _link()
+        assert link.status == SoloIdentityLink.Status.REJECTED
+        assert link.reject_reason == "fraud_suspected"
+        assert link.provenance != SoloIdentityLink.Provenance.CATALOG_RESOLVED
+        assert _text(sent) == REJECTED_RECOVERY_TEXT
+
+
+# ─── ключ строки уже настоящий, а связь всё ещё ждёт ────────────────────────
+
+
+class TestALinkPendingBehindAStaffVerdict:
+    """Ревью: пре-чек владельца смотрит на ключ ``BotUser``, а не на связь.
+
+    Дверь каталога привязала личность, а следующий за ней резолв не ответил
+    (или оператор привязал в каталоге и не нажал «проверить» в боте). На
+    следующем сообщении пре-чек сам переводит ключ строки в настоящий и
+    отвечает ``STAFF`` — а карточка мастера без ключа и связь ``PENDING``.
+    Меню есть, продажи нет, и дозвон, стоявший только на ``NOT_LINKED``, сюда
+    не заходил бы никогда.
+    """
+
+    @staticmethod
+    def _bound_in_the_catalog_but_not_recorded(catalog: _FakeCatalog, sent) -> None:
+        _registered_with_a_failed_link(catalog, sent)
+        catalog.door_refusal = None
+        catalog.bound.add(external_user_id_for(_row()))
+
+    def test_the_next_message_finishes_the_link(self, catalog, sent, emitted) -> None:
+        self._bound_in_the_catalog_but_not_recorded(catalog, sent)
+
+        _handle("привет")
+
+        link = _link()
+        assert link.status == SoloIdentityLink.Status.LINKED
+        link.master.refresh_from_db()
+        assert link.master.ayla_user_id == REAL_ID
+        assert _row().tenant.name in _text(sent), "человек при этом в меню персонала"
+
+    def test_without_the_heal_the_menu_hides_a_pending_link(
+        self, catalog, sent, emitted, monkeypatch
+    ) -> None:
+        """Подмена: дозвон выключен — состояние из докстринга класса настоящее."""
+        self._bound_in_the_catalog_but_not_recorded(catalog, sent)
+        monkeypatch.setattr(salon_handler, "_heal_solo_link", lambda event, verdict: False)
+
+        _handle("привет")
+
+        row = _row()
+        assert row.ayla_user_id == REAL_ID and row.ayla_user_id_is_proxy is False
+        assert row.tenant.name in _text(sent)
+        link = _link()
+        assert link.status == SoloIdentityLink.Status.PENDING
+        link.master.refresh_from_db()
+        assert link.master.ayla_user_id is None
+
 
 # ─── контроль: салонный персонал не задет ───────────────────────────────────
 
@@ -386,6 +497,32 @@ class TestSalonStaffAreUntouched:
         assert _text(sent) == salon_handler.NOT_LINKED_TEXT
         assert "door" not in catalog.calls and "provision" not in catalog.calls
         assert not [n for n, _ in emitted if n == "channels.max.salon.solo_link_retried"]
+
+    def test_linked_staff_without_the_owner_role_cost_no_link_lookup(
+        self, catalog, sent, emitted, monkeypatch
+    ) -> None:
+        """Заход под ``STAFF`` читает базу только у владельца — соло им является всегда."""
+        tenant, _ = Tenant.all_objects.get_or_create(
+            slug="formula-tela", defaults={"name": "Формула тела"}
+        )
+        user = BotUser.all_tenants.create(
+            tenant=tenant,
+            channel="max",
+            channel_user_id=CHANNEL_USER_ID,
+            chat_id=CHAT_ID,
+            ayla_user_id=REAL_ID,
+            ayla_user_id_is_proxy=False,
+        )
+        TenantStaff.all_tenants.create(tenant=tenant, bot_user=user, role=TenantStaff.Role.ADMIN)
+        lookups: list[Any] = []
+        monkeypatch.setattr(
+            solo_link_retry, "solo_workspace_link", lambda bot_user: lookups.append(bot_user)
+        )
+
+        _handle("привет")
+
+        assert tenant.name in _text(sent), "администратор салона — в своём меню"
+        assert lookups == []
 
     def test_a_salon_master_card_is_not_a_solo_workspace(self, catalog) -> None:
         tenant, _ = Tenant.all_objects.get_or_create(
