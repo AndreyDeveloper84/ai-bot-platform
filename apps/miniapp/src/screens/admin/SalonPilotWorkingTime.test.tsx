@@ -248,14 +248,22 @@ describe("кадр 1 — список мастеров", () => {
     renderAt("/admin/working-time");
 
     expect(await screen.findByRole("heading", { name: "Нет мастеров" })).toBeInTheDocument();
+    // Кадр 10: искать не в чем — карточка одна.
+    expect(screen.queryByRole("searchbox")).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Добавить мастера" }));
     expect(where()).toMatch(/^\/admin\/team\/add\|/);
   });
 
   it("поиск уходит на сервер", async () => {
-    mocked.listMasters.mockResolvedValue({ items: [], next_cursor: null, total_count: 0 });
+    mocked.listMasters.mockResolvedValue({
+      items: [
+        { id: "m-1", name: "Мастер Один", specialization: "", photo_url: "", is_active: true, invite_status: "accepted", last_seen_at: null, services_count: 1 },
+      ],
+      next_cursor: null,
+      total_count: 1,
+    });
     renderAt("/admin/working-time");
-    await screen.findByRole("heading", { name: "Нет мастеров" });
+    await screen.findByRole("button", { name: /Мастер Один/ });
 
     fireEvent.change(screen.getByRole("searchbox", { name: "Поиск мастера" }), { target: { value: "Од" } });
 

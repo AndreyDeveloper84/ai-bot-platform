@@ -10505,6 +10505,9 @@ a {
   border-radius: var(--r-lg);
   text-align: center;
 }
+.wt-state--page {
+  margin-top: calc(var(--s-6) * 3);
+}
 .wt-state__icon {
   display: inline-flex;
   align-items: center;

@@ -159,11 +159,12 @@ export function SalonPilotWorkingTimeWeekScreen() {
       <div className="wt-body">
         {!online ? <SystemState kind="offline" /> : null}
         {phase.kind === "loading" ? <SystemState kind="loading" lines={7} /> : null}
-        {phase.kind === "error" ? <WtLoadError err={phase.err} onRetry={retry} /> : null}
+        {phase.kind === "error" ? <WtLoadError page err={phase.err} onRetry={retry} /> : null}
         {phase.kind === "ready" &&
         scheduleNotSet(phase.schedule, phase.exceptions) &&
         !openWeekAnyway ? (
           <WtStateCard
+            page
             tone="accent"
             icon={<IconCalendar />}
             title={WT_COPY.empty.notSet.title}

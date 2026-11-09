@@ -101,6 +101,11 @@ export function SalonPilotWorkingTimeScreen() {
     };
   }, [query, load]);
 
+  // Кадр 10: «Нет мастеров» и ошибка загрузки — карточка одна, без поиска:
+  // искать не в чем. Поиск, давший пустоту, остаётся — по нему уходят назад.
+  const emptySalon = phase.kind === "ready" && phase.items.length === 0 && phase.query === "";
+  const showSearch = !(phase.kind === "error" || emptySalon) || query !== "";
+
   const retry = () => {
     setPhase({ kind: "loading" });
     const controller = new AbortController();
@@ -112,24 +117,27 @@ export function SalonPilotWorkingTimeScreen() {
       <WtHeader title={WT_COPY.title} />
       <div className="wt-body">
         {!online ? <SystemState kind="offline" /> : null}
-        <label className="wt-search">
-          <span className="wt-search__icon" aria-hidden="true">
-            <IconSearch />
-          </span>
-          <input
-            type="search"
-            className="wt-search__input"
-            placeholder={WT_COPY.search}
-            aria-label={WT_COPY.search}
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-          />
-        </label>
+        {showSearch ? (
+          <label className="wt-search">
+            <span className="wt-search__icon" aria-hidden="true">
+              <IconSearch />
+            </span>
+            <input
+              type="search"
+              className="wt-search__input"
+              placeholder={WT_COPY.search}
+              aria-label={WT_COPY.search}
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+            />
+          </label>
+        ) : null}
 
         {phase.kind === "loading" ? <SystemState kind="loading" /> : null}
-        {phase.kind === "error" ? <WtLoadError err={phase.err} onRetry={retry} /> : null}
-        {phase.kind === "ready" && phase.items.length === 0 && phase.query === "" ? (
+        {phase.kind === "error" ? <WtLoadError page err={phase.err} onRetry={retry} /> : null}
+        {emptySalon ? (
           <WtStateCard
+            page
             tone="neutral"
             icon={<IconPeople />}
             title={WT_COPY.empty.noMasters.title}

@@ -90,6 +90,7 @@ export function WtStateCard({
   title,
   body,
   role = "status",
+  page = false,
   children,
 }: {
   tone: WtTone;
@@ -97,10 +98,12 @@ export function WtStateCard({
   title: string;
   body?: string | null;
   role?: "status" | "alert";
+  /** Карточка — весь экран (кадр 10): ниже, ближе к середине, как на макете. */
+  page?: boolean;
   children?: ReactNode;
 }) {
   return (
-    <section className={`wt-state wt-state--${tone}`} role={role}>
+    <section className={`wt-state wt-state--${tone}${page ? " wt-state--page" : ""}`} role={role}>
       <span className="wt-state__icon" aria-hidden="true">
         {icon}
       </span>
@@ -119,10 +122,12 @@ export function WtStateCard({
 export function WtLoadError({
   err,
   busy = false,
+  page = false,
   onRetry,
 }: {
   err: unknown;
   busy?: boolean;
+  page?: boolean;
   onRetry: () => void;
 }) {
   if (
@@ -133,7 +138,13 @@ export function WtLoadError({
   }
   const { initial, subjects } = SYSTEM_STATE_COPY.load_error;
   return (
-    <WtStateCard tone="danger" role="alert" icon={<IconAlert />} title={`${initial.title} ${subjects.workingHours}`}>
+    <WtStateCard
+      tone="danger"
+      role="alert"
+      page={page}
+      icon={<IconAlert />}
+      title={`${initial.title} ${subjects.workingHours}`}
+    >
       <button type="button" className="btn-secondary wt-btn" disabled={busy} onClick={onRetry}>
         {initial.retry}
       </button>
