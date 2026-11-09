@@ -1295,6 +1295,20 @@ def _match_precision(stems: list[str]) -> Coalesce:
     )
 
 
+def _whole_request_row_q(stems: list[str]) -> Q:
+    """ONE service row of the master that carries EVERY stem.
+
+    The row conditions are :func:`_service_row_q` — active, same tenant and
+    SELLABLE (DRF-1964a) — so a service the master may not be sold for never
+    counts as «the service that was named». Written once: the annotation and
+    the name read in :func:`_only_the_named_service` must mean the same row.
+    """
+    every_stem = _service_row_q()
+    for stem in stems:
+        every_stem &= _stem_match_q("services_offered__service__name", stem)
+    return every_stem
+
+
 def _whole_request_match(stems: list[str]) -> Coalesce:
     """1 when ONE service row of the master carries EVERY stem, else 0.
 
@@ -1315,11 +1329,14 @@ def _whole_request_match(stems: list[str]) -> Coalesce:
     ``COALESCE`` so a master matched only through the free-text
     ``specialization`` reads as 0 rather than NULL.
     """
-    every_stem = _service_row_q()
-    for stem in stems:
-        every_stem &= _stem_match_q("services_offered__service__name", stem)
     return Coalesce(
-        Max(Case(When(every_stem, then=Value(1)), default=Value(0), output_field=IntegerField())),
+        Max(
+            Case(
+                When(_whole_request_row_q(stems), then=Value(1)),
+                default=Value(0),
+                output_field=IntegerField(),
+            )
+        ),
         Value(0),
         output_field=IntegerField(),
     )
@@ -1734,15 +1751,12 @@ def _only_the_named_service(
     named = [master for master in candidates if getattr(master, "match_whole", 0)]
     if not named or len(stems) < 2:
         return candidates
-    every_stem = _service_row_q()
-    for stem in stems:
-        every_stem &= _stem_match_q("services_offered__service__name", stem)
     # ONE .filter() for the whole condition set, for the reason
     # ``_matched_services`` gives: the names must be read from the same joined
     # row the conditions bound to.
     names = (
         CatalogMaster.all_tenants.filter(id__in=[master.id for master in named])
-        .filter(every_stem)
+        .filter(_whole_request_row_q(stems))
         .order_by()
         .values_list("services_offered__service__name", flat=True)
         .distinct()
