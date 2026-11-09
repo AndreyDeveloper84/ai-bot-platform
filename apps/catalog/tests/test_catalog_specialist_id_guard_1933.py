@@ -102,7 +102,8 @@ NOT_A_MIRROR_ROW: dict[tuple[str, str], tuple[int, str]] = {
     ),
     ("apps/skills/booking/provider.py", "cancel_appointment"): (1, "id из записи каталога"),
     # DRF-2885 — запись от шага плана: мастер и услуга приходят из ответа
-    # каталога о кандидатах шага, зеркало в этой ветке не участвует вовсе.
+    # каталога о кандидатах шага; зеркало в выборе и записи не участвует
+    # (читается только салон услуги ради правила предоплаты, DRF-2868).
     ("apps/orchestrator/plan_step_card.py", "create_appointment"): (
         1,
         "specialist_ref из ответа каталога о кандидатах шага",

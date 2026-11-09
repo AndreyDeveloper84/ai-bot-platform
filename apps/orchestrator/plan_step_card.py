@@ -9,21 +9,24 @@
 1. под сохранённым планом («мой план») — кнопка на каждый шаг;
 2. тап по шагу → каталог отдаёт услуги, которыми шаг можно выполнить
    (:func:`_show_offers`); кнопка — на каждую пару «услуга × мастер»;
-3. тап по услуге → выбор фиксируется в каталоге, показывается ближайший
-   день со свободным временем (:func:`_choose_offer`);
+3. тап по услуге → сначала читается свободное время мастера, и только если
+   оно есть — выбор фиксируется в каталоге и показывается ближайший день
+   (:func:`_choose_offer`);
 4. тап по времени → запись в каталоге с блоком происхождения «шаг плана»
    (:func:`_book_slot`).
 
 Выбор услуги и времени — всегда нажатие человека на КОНКРЕТНУЮ кнопку: модель
 здесь не участвует вовсе, и ничего не выбирается за человека.
 
-### Зеркало каталога не участвует
+### Зеркало каталога не участвует в выборе и записи
 
 Существующие пути записи бота ищут услугу и мастера в зеркале каталога; для
 шага плана этого делать нельзя — услуга может быть помечена синтетической и в
 зеркало не попадает по построению. Все идентификаторы (услуга салона, мастер)
 и все слова для показа (услуга, салон, мастер, цена, длительность, адрес)
 берутся из ответа каталога о кандидатах и держатся в состоянии разговора.
+Единственное чтение зеркала — салон настоящей услуги ради правила предоплаты
+и кнопка обычной записи (раздел «Деньги»); синтетической услуги оно не касается.
 
 ### Что едет с каждым вызовом
 
@@ -35,17 +38,27 @@
 
 ### Деньги
 
-Запись от шага создаётся БЕЗ предоплаты и только на услугу, помеченную
-каталогом синтетической (решение ждёт владельца: правила предоплаты салона в
-каталоге нет, а у ветки плана нет зеркала, откуда обычная запись берёт
-настройку салона). Для настоящей услуги запись от шага не создаётся —
-:data:`PLAN_STEP_BOOKING_NOT_AVAILABLE`.
+Запись от шага создаётся только БЕЗ предоплаты (решение владельца 08.11.2026,
+вариант А, DRF-2868): карточка шага не умеет вести запись, ждущую оплаты.
+
+* синтетическая услуга — без предоплаты всегда («реальные списания не
+  выполнять», решение 08.10);
+* настоящая услуга — решает то же правило, что у обычной записи
+  (``apps.skills.booking.tools._resolve_payment_required``): салон из
+  ``BOOKING_NO_PREPAYMENT_TENANTS`` записывается без предоплаты. Салон варианта
+  читается из зеркала по идентификатору услуги каталога — это единственное
+  место ветки, где зеркало участвует, и только ради настройки салона;
+* салон вне списка, либо услуги нет в зеркале (салон неизвестен) — запись от
+  шага не создаётся и выбор в каталоге не фиксируется: человеку предлагается
+  обычная запись на ту же услугу (:data:`PLAN_STEP_BOOKING_VIA_REGULAR`).
+  Неизвестное не читается как «без предоплаты».
 
 ### Слова
 
 Слова каталога показываются как есть. Всё остальное — имя исхода с пометкой
 «тест»: слов владельца для этих мест нет. Пометка синтетики — пример
 владельца (решение 08.10): «Допущено для теста · синтетические данные».
+Слова переадресации на обычную запись — из решения владельца 08.11.
 """
 
 from __future__ import annotations
@@ -80,10 +93,17 @@ PLAN_STEP_SLOTS = "PLAN_STEP_SLOTS"
 PLAN_STEP_NO_SLOTS = "PLAN_STEP_NO_SLOTS"
 PLAN_STEP_BOOKED = "PLAN_STEP_BOOKED"
 PLAN_STEP_EXPIRED = "PLAN_STEP_EXPIRED"
-PLAN_STEP_BOOKING_NOT_AVAILABLE = "PLAN_STEP_BOOKING_NOT_AVAILABLE"
+PLAN_STEP_BOOKING_VIA_REGULAR = "PLAN_STEP_BOOKING_VIA_REGULAR"
 PLAN_STEP_BOOKING_FAILED = "PLAN_STEP_BOOKING_FAILED"
 HEALTH_CHECK_REQUIRED = "HEALTH_CHECK_REQUIRED"
 AYLA_LINK_UNAVAILABLE = "AYLA_LINK_UNAVAILABLE"
+
+#: Переадресация на обычную запись — слова решения владельца 08.11 (вариант А).
+REGULAR_BOOKING_TEXT = (
+    "Запись через план пока доступна не во всех салонах. "
+    "Записаться на эту услугу можно обычным способом."
+)
+REGULAR_BOOKING_BUTTON = "Записаться обычным способом"
 
 #: Сколько вариантов и времён показывается кнопками за раз.
 MAX_OFFERS = 8
@@ -532,6 +552,87 @@ def _show_offers(
     return _reply(lines[:-1], PLAN_STEP_OFFERS, buttons)
 
 
+# ─── деньги: предоплата и обычная запись ─────────────────────────────────
+
+
+def _mirror_service(option: dict[str, Any]) -> Any | None:
+    """Строка зеркала для услуги варианта — ради салона, которому она принадлежит.
+
+    Идентификатор услуги каталога (``tenant_offer_ref``) в зеркале — это
+    ``ayla_service_id``. ``None`` — услуги в зеркале нет, идентификатор не
+    разобран, либо строк больше одной: салон по такому ответу не называется.
+    Само чтение — в ``apps.marketplace.discovery``: салон здесь ещё не
+    известен, а межтенантное чтение зеркала разрешено только там (MKT1).
+    """
+    import uuid
+
+    from apps.marketplace.discovery import service_by_catalog_id
+
+    try:
+        offer_id = uuid.UUID(str(option.get("tenant_offer_ref")))
+    except ValueError:
+        return None
+    return service_by_catalog_id(offer_id)
+
+
+def _prepayment_required(option: dict[str, Any]) -> bool:
+    """Нужна ли предоплата записи на этот вариант — правилом обычной записи.
+
+    Синтетическая услуга — никогда. Настоящая — по настройке салона
+    (``BOOKING_NO_PREPAYMENT_TENANTS``) тем же резолвером, что у обычной
+    записи. Салон не найден — «нужна»: неизвестное не читается как
+    разрешение записать без предоплаты.
+    """
+    if option.get("synthetic") is True:
+        return False
+    service = _mirror_service(option)
+    if service is None:
+        return True
+    from apps.skills.booking.tools import _resolve_payment_required
+
+    return _resolve_payment_required(service.tenant, {})
+
+
+def _regular_booking_button(option: dict[str, Any]) -> dict[str, str] | None:
+    """Кнопка обычной записи на ту же услугу у того же мастера — или ``None``.
+
+    Тот же вход, что у карточки мастера в поиске
+    (``cb:discover:book:<салон>:<мастер>:<услуга>``): идентификаторы — строк
+    зеркала. Мастер ищется по ``catalog_specialist_id``: ``specialist_ref``
+    каталога — id профиля, а не человека. Нет услуги или мастера в зеркале —
+    кнопки нет: вести в запись «на что-нибудь похожее» нельзя.
+    """
+    import uuid
+
+    from apps.marketplace.discovery import master_by_specialist_id
+    from apps.orchestrator.discovery import CALLBACK_DISCOVER_BOOK_PREFIX
+
+    service = _mirror_service(option)
+    if service is None or not getattr(service, "is_active", False):
+        return None
+    try:
+        specialist_id = uuid.UUID(str(option.get("specialist_ref")))
+    except ValueError:
+        return None
+    master = master_by_specialist_id(service.tenant_id, specialist_id)
+    if master is None:
+        return None
+    return {
+        "label": REGULAR_BOOKING_BUTTON,
+        "callback": f"{CALLBACK_DISCOVER_BOOK_PREFIX}{service.tenant_id}:{master.id}:{service.id}",
+    }
+
+
+def _regular_booking_reply(option: dict[str, Any]) -> SkillResult:
+    """Запись от шага не создаётся — человеку предлагается обычная запись."""
+    button = _regular_booking_button(option)
+    return _reply(
+        [*_option_lines(option), "", REGULAR_BOOKING_TEXT],
+        PLAN_STEP_BOOKING_VIA_REGULAR,
+        [button] if button is not None else [],
+    )
+
+
 # ─── услуга → время ──────────────────────────────────────────────────────
 
 
@@ -606,6 +707,25 @@ def _slots_reply(waiting: dict[str, Any]) -> SkillResult:
     return _reply(_option_lines(option), outcome, buttons)
 
 
+def _no_slots_reply(waiting: dict[str, Any], index: int) -> SkillResult:
+    """У выбранного варианта времени нет: он назван, остальные — кнопками.
+
+    Выбор в каталоге не зафиксирован, поэтому остальные варианты того же
+    подбора по-прежнему можно выбрать — без повторного открытия шага.
+    """
+    options = waiting["options"]
+    token = _hex8(waiting["search_id"])
+    buttons = [
+        {
+            "label": f"{option['service_name']} · {option['master_name']}",
+            "callback": f"{CB_OFFER_PREFIX}{token}:{n}",
+        }
+        for n, option in enumerate(options)
+        if n != index and isinstance(option, dict)
+    ]
+    return _reply(_option_lines(options[index]), PLAN_STEP_NO_SLOTS, buttons)
+
+
 def _choose_day(
     conversation: Any, trace_id: str, waiting: dict[str, Any], index: int
 ) -> SkillResult:
@@ -671,6 +791,29 @@ def _choose_offer(
         # разобран): запись от шага не идёт. Неизвестное не читается как
         # «не нужен».
         return _named(HEALTH_CHECK_REQUIRED)
+    if _prepayment_required(option):
+        # Запись от шага в этот салон не создаётся — выбор не фиксируется и
+        # время не читается: показать времена, а на нажатии отказать, было
+        # бы тупиком.
+        return _regular_booking_reply(option)
+
+    # Время — ДО фиксации выбора. Зафиксированный уровень каталог не
+    # откатывает (§4.3): выбор, закреплённый за мастером без свободного
+    # времени, оставлял шаг мёртвым до новой ревизии плана. Принятый риск:
+    # время может исчезнуть между этим чтением и записью — тогда запись
+    # откажет именем каталога (слот занят), а «другой день» перечитает время.
+    try:
+        days, slots = _free_days(option)
+    except BookingAPIError as exc:
+        logger.warning(
+            "orchestrator.plan_step_card.slots_failed trace=%s class=%s",
+            trace_id,
+            type(exc).__name__,
+        )
+        return _named(PLAN_ENGINE_UNAVAILABLE)
+    if not slots:
+        # Состояние не трогаем: варианты подбора остаются открытыми.
+        return _no_slots_reply(waiting, index)
 
     try:
         PlanEngineHttpClient().resolve_step(
@@ -686,25 +829,14 @@ def _choose_offer(
     except PlanEngineError as exc:
         return _plan_refusal(exc, trace_id, "resolution")
 
-    try:
-        days, slots = _free_days(option)
-    except BookingAPIError as exc:
-        logger.warning(
-            "orchestrator.plan_step_card.slots_failed trace=%s class=%s",
-            trace_id,
-            type(exc).__name__,
-        )
-        return _named(PLAN_ENGINE_UNAVAILABLE)
     state = {
         **waiting,
         "chosen": index,
         "days": days,
-        "day": days[0] if days else None,
+        "day": days[0],
         "slots": slots,
     }
     _write(conversation, state)
-    if not slots:
-        return _named(PLAN_STEP_NO_SLOTS)
     return _slots_reply(state)
 
 
@@ -767,13 +899,11 @@ def _book_slot(
     iso = slots[slot_index]
     if option.get("health_check") != "not_required":
         return _named(HEALTH_CHECK_REQUIRED)
-    if option.get("synthetic") is not True:
-        # Правила предоплаты салона у ветки плана нет (в каталоге его нет
-        # вовсе, а зеркала, откуда его берёт обычная запись, здесь нет по
-        # построению). Слать признак наугад — либо списание без спроса, либо
-        # обход правила салона. До решения владельца запись от шага создаётся
-        # только на услугу, помеченную синтетической.
-        return _named(PLAN_STEP_BOOKING_NOT_AVAILABLE)
+    if _prepayment_required(option):
+        # Второй рубеж после выбора услуги: настройка салона могла смениться
+        # между выбором и нажатием времени. Запись, ждущую оплаты, карточка
+        # шага вести не умеет — её не создаём, предлагаем обычную запись.
+        return _regular_booking_reply(option)
 
     ayla_user_id = ensure_ayla_link(bot_user, trigger="plan_step_booking")
     if not ayla_user_id:
@@ -787,8 +917,8 @@ def _book_slot(
             service_id=option["tenant_offer_ref"],
             start_datetime=iso,
             idempotency_key=_idempotency_key(external_user_id, waiting, option, iso),
-            # Синтетическая услуга — без предоплаты: «реальные списания не
-            # выполнять» (решение владельца 08.10).
+            # Сюда доходит только запись без предоплаты: синтетическая услуга
+            # (решение 08.10) либо салон из списка «без предоплаты» (08.11).
             payment_required=False,
             quoted_price=str(option["price"]) if option.get("price") else None,
             quoted_duration_minutes=option["duration_minutes"]
