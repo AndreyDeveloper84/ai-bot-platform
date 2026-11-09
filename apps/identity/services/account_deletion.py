@@ -306,22 +306,26 @@ def _erase_solo_card(card: Any) -> int:
     """
     tenant = card.tenant
 
-    erased: dict[str, Any] = {
-        "name": ERASED_CARD_NAME,
-        "bio": "",
-        "experience": "",
-        "photo_url": "",
-        "address": None,
-        "location_lat": None,
-        "location_lng": None,
-        "max_handle": "",
-        "ayla_user_id": None,
-        "raw": {},
-        "is_active": False,
-    }
-    fields = [name for name, value in erased.items() if getattr(card, name) != value]
-    for name in fields:
-        setattr(card, name, erased[name])
+    # Пары «поле → стёртое значение», а не словарь: это не выдача наружу, и
+    # словарь с ключом фото попал бы под перепись сырых фото на проводе (DRF-2539).
+    erased: tuple[tuple[str, Any], ...] = (
+        ("name", ERASED_CARD_NAME),
+        ("bio", ""),
+        ("experience", ""),
+        ("photo_url", ""),
+        ("address", None),
+        ("location_lat", None),
+        ("location_lng", None),
+        ("max_handle", ""),
+        ("ayla_user_id", None),
+        ("raw", {}),
+        ("is_active", False),
+    )
+    fields = []
+    for name, value in erased:
+        if getattr(card, name) != value:
+            setattr(card, name, value)
+            fields.append(name)
     if card.archived_at is None:
         card.archived_at = timezone.now()
         card.archive_reason = SOLO_CARD_ARCHIVE_REASON
