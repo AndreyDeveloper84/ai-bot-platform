@@ -235,6 +235,13 @@ STRANGER_TEXT = (
     "Если вы хотите записаться или вести дневник — вам к Ayla для клиентов:"
 )
 CLIENT_BOT_BUTTON = "Ayla для клиентов"
+#: Двоеточие в конце STRANGER-текста обещает кнопку-ссылку под ним. Ссылки на
+#: клиентский бот в реестре нет — кнопки нет, и обещать её нечем: фраза
+#: заканчивается точкой (живой прогон 09.11.2026: текст обрывался на «:»).
+#: Вариант с точкой — не с листа владельца, а запасной вид на случай пробела
+#: в настройке; сам пробел (``MAX_BOT_<S>_LINK`` у ``max_global``) он не
+#: лечит — о нём пишет журнал, чтобы запасной вид его не спрятал.
+STRANGER_LINK_PROMISE = ":"
 
 SUPPORT_FALLBACK_TEXT = "Напишите в поддержку Ayla."
 
@@ -1048,7 +1055,22 @@ def _client_bot_link_button() -> dict[str, str] | None:
     return {"label": CLIENT_BOT_BUTTON, "url": link}
 
 
-def _stranger_text(entry) -> str:
+def _stranger_text(entry, *, link: bool) -> str:
+    """STRANGER-текст; без кнопки-ссылки (``link=False``) — без двоеточия в конце."""
+
+    text = _stranger_text_with_link(entry)
+    if link:
+        return text
+    logger.warning(
+        "channels.max.salon.client_bot_link_missing — stranger is pointed to the "
+        "client bot without a link; set MAX_BOT_<S>_LINK for the max_global entry"
+    )
+    if not text.endswith(STRANGER_LINK_PROMISE):
+        return text
+    return text[: -len(STRANGER_LINK_PROMISE)] + "."
+
+
+def _stranger_text_with_link(entry) -> str:
     """Имя салона — из слага записи салонного бота, если он задан."""
 
     slug = (getattr(entry, "tenant_slug", "") or "").strip()
@@ -1393,7 +1415,8 @@ def _greet_stranger(event: CanonicalEvent, *, entry=None) -> None:
 
     По личности события, без строки (DRF-1784). Текст — листа дословно;
     кнопка ``link`` на клиентского бота — из реестра (без записи — без
-    кнопки, текст тот же); «Я работаю сам» остаётся (владелец D2 12.09 —
+    кнопки, и фраза кончается точкой, а не двоеточием перед пустотой);
+    «Я работаю сам» остаётся (владелец D2 12.09 —
     соло-мастер тоже персонал). После :data:`STRANGER_REPLY_LIMIT` ответов
     без кода — молчание. ``entry`` — запись салонного бота: имя салона и
     дверь в кабинет вернувшемуся владельцу.
@@ -1406,7 +1429,7 @@ def _greet_stranger(event: CanonicalEvent, *, entry=None) -> None:
         button = _client_bot_link_button()
         _reply(
             event,
-            _stranger_text(entry),
+            _stranger_text(entry, link=button is not None),
             attachments=[outbound.make_inline_keyboard_attachment([button], columns=1)]
             if button
             else None,
@@ -1439,7 +1462,7 @@ def _greet_stranger(event: CanonicalEvent, *, entry=None) -> None:
     buttons.append({"label": SOLO_OFFER_BUTTON, "callback": SOLO_REGISTER_CALLBACK})
     _reply(
         event,
-        _stranger_text(entry) + SOLO_OFFER,
+        _stranger_text(entry, link=link_button is not None) + SOLO_OFFER,
         attachments=[outbound.make_inline_keyboard_attachment(buttons, columns=1)],
     )
 

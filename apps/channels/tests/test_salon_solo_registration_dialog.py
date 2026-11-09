@@ -17,6 +17,7 @@ from typing import cast
 import pytest
 from django.utils import timezone
 
+from apps.catalog.models import CatalogMaster
 from apps.channels.max import salon_handler
 from apps.channels.max.parser import CanonicalEvent
 from apps.identity.models import BotUser, SoloRegistrationDraft
@@ -137,9 +138,35 @@ class TestNothingIsCreatedBeforeConfirmation:
         assert tenants[0].name == "Студия Ольга"
         row = BotUser.all_tenants.get(channel_user_id=IDENTITY)
         assert row.display_name == "Ольга Петрова"
+        # Карточка мастера носит подтверждённое имя человека, а не имя кабинета:
+        # до правки здесь было «Студия Ольга» — и приветствие «Здравствуйте, Студия!».
+        card = CatalogMaster.all_tenants.get(tenant=tenants[0], linked_bot_user=row)
+        assert card.name == "Ольга Петрова"
         assert said[-1]["text"] == salon_handler.SOLO_CREATED_PENDING
         # Черновик отработал и снят.
         assert not SoloRegistrationDraft.objects.filter(channel_user_id=IDENTITY).exists()
+
+    def test_the_new_master_is_greeted_by_their_own_name(self, said):
+        """Красный до правки: «Здравствуйте, Студия!» — первое слово имени кабинета."""
+        from apps.channels.max.salon_greeting import _display_name
+        from apps.identity.services.role_resolver import resolve_role
+        from apps.tenancy.context import tenant_scope
+
+        _tap(salon_handler.SOLO_REGISTER_CALLBACK)
+        assert _say("Ольга Петрова") is True
+        _tap(_city_callback(said[-1], "Пенза"))
+        _tap(salon_handler.SOLO_CONFIRM_CALLBACK)
+
+        tenant = _solo_tenants()[0]
+        row = BotUser.all_tenants.get(channel_user_id=IDENTITY)
+        # Роль — настоящая, не собранная руками: у соло она обязана нести карточку.
+        role_ctx = resolve_role(row)
+        assert role_ctx.is_master and role_ctx.master_id
+        # Имя в канале намеренно другое: приветствие обязано взять его из карточки.
+        row.display_name = "Не то имя"
+
+        with tenant_scope(tenant):
+            assert _display_name(row, role_ctx) == "Ольга"
 
     def test_cancel_discards_the_draft_and_creates_nothing(self, said):
         _tap(salon_handler.SOLO_REGISTER_CALLBACK)

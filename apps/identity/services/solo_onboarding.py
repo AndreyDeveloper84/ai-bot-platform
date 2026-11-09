@@ -336,10 +336,12 @@ def create_solo_provider(
     Args:
         channel: Channel slug — `"max"`, `"telegram"`, etc.
         channel_user_id: Stable identifier within the channel.
-        display_name: For default tenant name + BotUser display_name field.
+        display_name: The person's name — BotUser display_name and the master
+            card's name; its first token also makes the default tenant name.
         phone: E.164 phone (PII — never logged raw).
         chat_id: Channel-side chat identifier for outbound dispatch.
         tenant_name: Optional override of the default «Студия {first_name}».
+            Names the workspace only; the master card keeps the person's name.
 
     Returns:
         SoloOnboardingResult with all 5 records + `created` flag.
@@ -454,6 +456,12 @@ def create_solo_provider(
 
     # Fresh seed — create all 5 rows atomically.
     final_name = tenant_name or _default_tenant_name(display_name)
+    # Карточка мастера — это человек, а не кабинет: каталог получает то же
+    # имя (``provision_solo_workspace(display_name=…)``) и с той же
+    # нормализацией пробелов. Раньше карточка называлась именем кабинета — и
+    # мастера приветствовали «Здравствуйте, Студия!», а в карточке стояло
+    # «Студия Ольга» (живой прогон 09.11.2026). Без имени — прежний запасной вид.
+    master_name = " ".join((display_name or "").split()) or final_name
 
     new_tenant = Tenant.objects.create(
         slug=target_slug,
@@ -485,7 +493,7 @@ def create_solo_provider(
         tenant=new_tenant,
         external_id=_solo_external_id(new_bot_user.id),
         external_updated_at=timezone.now(),
-        name=final_name,
+        name=master_name,
         linked_bot_user=new_bot_user,
         invite_status=CatalogMaster.InviteStatus.ACCEPTED,
         mode=CatalogMaster.Mode.INVITE,

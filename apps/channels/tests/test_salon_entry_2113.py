@@ -283,8 +283,10 @@ class TestE2NotLinkedIsAnHonestStateNotAnAdminPanel:
 
 
 class TestE3StrangerIsToldWhoIsHereAndWhereToGo:
-    def test_named_text_and_the_client_bot_link(self, tenant, sent) -> None:
-        _handle("привет")
+    def test_named_text_and_the_client_bot_link(self, tenant, sent, caplog) -> None:
+        with caplog.at_level("WARNING"):
+            _handle("привет")
+        assert "client_bot_link_missing" not in caplog.text
         text = sent.call_args.kwargs["text"]
         assert text.startswith(salon_handler.STRANGER_TEXT_NAMED.format(name="Формула тела"))
         assert salon_handler.SOLO_OFFER.strip() in text  # дверь соло остаётся (D2 12.09)
@@ -294,14 +296,22 @@ class TestE3StrangerIsToldWhoIsHereAndWhereToGo:
         ]
         assert salon_handler.SOLO_OFFER_BUTTON in _labels(sent.call_args)
 
-    def test_without_a_link_in_the_registry_no_button_same_text(
-        self, tenant, sent, settings
+    def test_without_a_link_in_the_registry_no_button_and_no_dangling_colon(
+        self, tenant, sent, settings, caplog
     ) -> None:
+        """Живой прогон 09.11.2026: без ссылки текст обрывался на «…для клиентов:»."""
         settings.MAX_BOT_REGISTRY = (SALON_BOT, CLIENT_BOT_NO_LINK)
-        _handle("привет")
+        with caplog.at_level("WARNING"):
+            _handle("привет")
+        # Запасной вид пробел в настройке не прячет: о нём сказано в журнале.
+        assert "client_bot_link_missing" in caplog.text
         text = sent.call_args.kwargs["text"]
-        assert text.startswith(salon_handler.STRANGER_TEXT_NAMED.format(name="Формула тела"))
+        named = salon_handler.STRANGER_TEXT_NAMED.format(name="Формула тела")
+        assert named.endswith("для клиентов:")  # лист: двоеточие — перед кнопкой
+        assert text.startswith(named[:-1] + ".")  # кнопки нет — точка, тот же текст
+        assert "для клиентов:" not in text
         assert not [b for b in _buttons(sent.call_args) if b.get("type") == "link"]
+        assert salon_handler.SOLO_OFFER_BUTTON in _labels(sent.call_args)  # дверь соло на месте
 
     def test_without_a_tenant_slug_no_name(self, sent, settings) -> None:
         settings.MAX_BOT_REGISTRY = (
