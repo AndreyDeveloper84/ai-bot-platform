@@ -339,3 +339,43 @@ def test_with_the_rest_flag_off_the_reply_is_unchanged(tenant, service, conversa
 
     assert result.reply_text == _DATE_PICKER_FALLBACK_NO_DATES
     assert result.action_data is None
+    conversation.refresh_from_db()
+    assert _NO_DATES_STATE_KEY not in (conversation.skill_state or {})
+
+
+def test_the_sole_master_leaves_the_dialog_state_alone(tenant, service, conversation, settings):
+    settings.BOOKING_VIA_AYLA_REST = True
+    only = _master(tenant, "Анна", service)
+
+    _tap(tenant, only, conversation)
+
+    conversation.refresh_from_db()
+    assert _NO_DATES_STATE_KEY not in (conversation.skill_state or {})
+
+
+def test_found_dates_forget_the_masters_checked_before(tenant, service, conversation, settings):
+    """Расписание могли дописать минуту назад: как только у мастера нашлись
+    даты, список «проверенных без дат» стирается, и при следующем тупике
+    эти мастера предлагаются снова."""
+    settings.BOOKING_VIA_AYLA_REST = True
+    tapped = _master(tenant, "Анна", service)
+    colleague = _master(tenant, "Борис", service)
+
+    class _Dates:
+        def get_available_dates(self, *, specialist_id: str, service_id: str) -> list[str]:
+            return ["2026-11-20", "2026-11-21"]
+
+    _tap(tenant, colleague, conversation)
+    conversation.refresh_from_db()
+    assert conversation.skill_state[_NO_DATES_STATE_KEY]["masters"] == [str(colleague.pk)]
+
+    with_dates = AylaYClientsAdapter(
+        client=cast(Any, _Dates()),
+        external_user_id="bot:max:no-dates",
+        client_id="c-nd",
+        tenant=tenant,
+    )
+    _tap(tenant, tapped, conversation, yclients=with_dates)
+    conversation.refresh_from_db()
+
+    assert _NO_DATES_STATE_KEY not in (conversation.skill_state or {})

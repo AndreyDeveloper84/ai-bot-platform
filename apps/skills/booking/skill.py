@@ -263,7 +263,7 @@ _NO_DATES_OTHER_MASTERS_PROMPT = (
 )
 _NO_DATES_NOBODY_LEFT = (
     "У выбранного мастера нет свободных дат в ближайшее время. "
-    "У других мастеров этой услуги свободных дат тоже нет."
+    "У других мастеров этой услуги свободных дат тоже не нашлось."
 )
 _NO_DATES_STATE_KEY = "booking_no_dates"
 _NO_DATES_STATE_TTL = timedelta(minutes=30)
@@ -2393,6 +2393,11 @@ def _render_date_picker(
             conversation=conversation,
         )
 
+    # Даты нашлись — список «проверенных без дат» больше не о чём: расписание
+    # могли дописать минуту назад, и держать его до конца срока значило бы
+    # говорить «не нашлось» о мастере, у которого уже есть что предложить.
+    _forget_no_dates(conversation)
+
     # «Сегодня» is computed in the SALON's zone, never the server's: the
     # server runs on UTC and Moscow is three hours ahead of it, so a
     # server-side "today" is the salon's yesterday for the first three hours
@@ -3110,11 +3115,17 @@ def _no_dates_reply(
 
     Колбэк может нести мастера любым из двух ключей — pk зеркала или id
     каталога (DRF-2695), поэтому и память, и исключение сравнивают по обоим.
+    Память пишется, только когда есть кого помнить: единственному мастеру
+    услуги и выключенному флагу прежний ответ достаётся без записи в диалог.
     """
-    known_empty = _remember_no_dates(conversation, master_id=master_id, service_id=service_id)
     candidates = _masters_of_service(tenant=tenant, service_id=service_id)
     tapped = {_id_text(master_id)}
     others = [m for m in (candidates or []) if not (m.ids() & tapped)]
+    known_empty = (
+        _remember_no_dates(conversation, master_id=master_id, service_id=service_id)
+        if others
+        else tapped
+    )
     fresh = [m for m in others if not (m.ids() & known_empty)]
     logger.info(
         "booking.pick_master.no_dates master=%s service=%s others=%s offered=%s known_empty=%s",
@@ -3161,8 +3172,9 @@ def _remember_no_dates(
             expires_at = None
         if expires_at is not None and expires_at.tzinfo is None:
             expires_at = timezone.make_aware(expires_at)
-        if expires_at is not None and expires_at > now:
-            masters = [_id_text(m) for m in raw.get("masters") or []]
+        remembered = raw.get("masters")
+        if expires_at is not None and expires_at > now and isinstance(remembered, list):
+            masters = [_id_text(m) for m in remembered]
     if _id_text(master_id) not in masters:
         masters.append(_id_text(master_id))
     if conversation is not None:
@@ -3193,6 +3205,22 @@ def _remember_no_dates(
     return set(masters)
 
 
+def _forget_no_dates(conversation: Any) -> None:
+    """Стереть список «проверенных без дат», когда у мастера даты нашлись."""
+    if not (getattr(conversation, "skill_state", None) or {}).get(_NO_DATES_STATE_KEY):
+        return
+    from apps.conversations.services import write_skill_state
+
+    try:
+        write_skill_state(conversation, _NO_DATES_STATE_KEY, None)
+    except Exception:  # noqa: BLE001 — та же логика, что у _remember_no_dates
+        logger.warning(
+            "booking.no_dates.state_clear_failed conversation=%s",
+            getattr(conversation, "id", "?"),
+            exc_info=True,
+        )
+
+
 def _masters_of_service(*, tenant: Any, service_id: int | str) -> list[_OtherMaster] | None:
     """Продаваемые мастера салона с этой услугой, по имени.
 
@@ -3217,8 +3245,11 @@ def _masters_of_service(*, tenant: Any, service_id: int | str) -> list[_OtherMas
         from apps.catalog.master_state import available_q
         from apps.catalog.models import CatalogMaster, MasterService
 
+        # ``all_tenants`` с явным ``tenant=``, как у остальных читателей зеркала
+        # в этом файле: колбэк может прийти и без активного ``tenant_scope``,
+        # а ``.objects`` в режиме аудита отдал бы пустую выборку без ошибки.
         master_ids = (
-            MasterService.objects.filter(
+            MasterService.all_tenants.filter(
                 tenant=tenant,
                 service__tenant=tenant,
                 service__is_active=True,
@@ -3228,7 +3259,7 @@ def _masters_of_service(*, tenant: Any, service_id: int | str) -> list[_OtherMas
             .values_list("master_id", flat=True)
         )
         rows = list(
-            CatalogMaster.objects.filter(
+            CatalogMaster.all_tenants.filter(
                 available_q(),
                 tenant=tenant,
                 id__in=master_ids,
