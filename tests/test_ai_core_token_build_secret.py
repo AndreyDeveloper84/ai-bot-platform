@@ -78,7 +78,9 @@ def _construct_tagged(loader: yaml.SafeLoader, _suffix: str, node: yaml.Node):
         return loader.construct_mapping(node)
     if isinstance(node, yaml.SequenceNode):
         return loader.construct_sequence(node)
-    return loader.construct_scalar(node)
+    if isinstance(node, yaml.ScalarNode):
+        return loader.construct_scalar(node)
+    raise TypeError(f"unexpected YAML node type {type(node).__name__}")
 
 
 _TagTolerantLoader.add_multi_constructor("!", _construct_tagged)
