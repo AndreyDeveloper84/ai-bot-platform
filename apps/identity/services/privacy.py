@@ -74,6 +74,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from django.db import transaction
+from django.db.models import Q
 from django.utils import timezone
 
 from apps.audit.services import write_audit
@@ -369,12 +370,45 @@ def _erase_bot_user_pii(bot_user: BotUser, link: _PersonLink) -> None:
     with transaction.atomic():
         BotUser.all_tenants.filter(id__in=ids).update(context={}, **dict.fromkeys(_PII_FIELDS, ""))
         UserPreferences.all_tenants.filter(bot_user_id__in=ids).delete()
+        _erase_solo_link_phone(ids, link)
 
     # Keep the caller's in-memory instance consistent with the row — the
     # view must never render a value we just erased.
     for field_name in _PII_FIELDS:
         setattr(bot_user, field_name, "")
     bot_user.context = {}
+
+
+def _erase_solo_link_phone(shell_ids: set[uuid.UUID], link: _PersonLink) -> int:
+    """Blank the phone copied onto the person's solo identity link(s).
+
+    ``SoloIdentityLink`` (the audit package of how a solo master's card got
+    its Ayla key) copies ``BotUser.phone`` at open time (``open_link``). It is
+    keyed by the master card, not by the person, so the personal-field
+    registry does not see it and nothing erased it: the shell's phone went
+    blank while the same number stayed readable on the link (found on the
+    live run of 2026-11-09).
+
+    Two keys, because either alone misses a row: the card's link to a shell
+    (account deletion unlinks cards of non-owners *before* this cascade runs),
+    and the channel identity the link snapshotted at open time. The channel
+    key is skipped when the identity graph is in ``conflict`` — the same
+    fail-closed narrowing ``_person_shell_ids`` applies to the shells
+    themselves. The rest of the row — status, provenance, operator,
+    timestamps, channel ids — is the audit trail and stays, exactly like the
+    shell's routing keys.
+    """
+    from apps.identity.models import SoloIdentityLink
+
+    where = Q(master__linked_bot_user_id__in=shell_ids)
+    if not link.conflict:
+        shells = BotUser.all_tenants.filter(id__in=shell_ids).values_list(
+            "channel", "channel_user_id"
+        )
+        for channel, channel_user_id in shells:
+            if (channel or "").strip() and (channel_user_id or "").strip():
+                where |= Q(channel=channel, channel_user_id=channel_user_id)
+    return SoloIdentityLink.objects.filter(where).exclude(phone="").update(phone="")
 
 
 def _erase_staff_assistant(bot_user: BotUser, link: _PersonLink) -> None:
