@@ -137,7 +137,7 @@ function exceptionOn(isWorking: boolean, start: string | null, end: string | nul
           end,
           break_start: null,
           break_end: null,
-          note: "",
+          has_note: false,
         },
       ],
       seen_fields: [],
