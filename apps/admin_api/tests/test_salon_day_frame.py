@@ -458,6 +458,48 @@ class TestAbsencesComeAsMomentsNotHours:
         assert body["masters"][0]["absences"]["rows"] == []
         assert body["unreadable_lists"] == []
 
+    def test_an_unreadable_row_is_not_hidden_by_a_neighbour_from_another_day(
+        self, client: Client, owner_bot_user: BotUser, ayla
+    ) -> None:
+        # Одна строка опознана и не про эти сутки, другая не опознана вовсе.
+        # «Отсутствий нет» здесь — неправда: одну строку мы не поняли.
+        ayla(
+            _day_payload(
+                _master_row(
+                    absences=[
+                        _absence("2026-09-09T18:00:00+03:00", "2026-09-10T00:00:00+03:00"),
+                        {"unknown": 1},
+                    ]
+                )
+            )
+        )
+
+        body = _get(client, date="2026-09-10").json()
+
+        assert body["masters"][0]["absences"]["state"] == "unreadable"
+        assert body["unreadable_lists"] == ["absences"]
+
+    def test_an_absence_shorter_than_a_minute_is_not_an_event(
+        self, client: Client, owner_bot_user: BotUser, ayla
+    ) -> None:
+        # После обрезки до минут «18:00:10–18:00:40» и «…–00:00:30 этого дня»
+        # стали бы событиями нулевой длины.
+        ayla(
+            _day_payload(
+                _master_row(
+                    absences=[
+                        _absence("2026-09-10T18:00:10+03:00", "2026-09-10T18:00:40+03:00"),
+                        _absence("2026-09-09T20:00:00+03:00", "2026-09-10T00:00:30+03:00"),
+                        _absence("2026-09-10T14:00:00+03:00", "2026-09-10T16:00:00+03:00"),
+                    ]
+                )
+            )
+        )
+
+        rows = _get(client, date="2026-09-10").json()["masters"][0]["absences"]["rows"]
+
+        assert rows == [{"start": "14:00", "end": "16:00"}]
+
     def test_the_reason_stays_behind(self, client: Client, owner_bot_user: BotUser, ayla) -> None:
         # «Больничный» — сведения о человеке; кадр читает и ресепшн.
         ayla(

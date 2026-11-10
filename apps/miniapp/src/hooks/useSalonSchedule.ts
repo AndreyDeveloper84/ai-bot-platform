@@ -33,12 +33,19 @@ import {
   type SalonDayFrame,
   type SalonDayResponse,
 } from "../lib/admin-api";
+import { ApiError } from "../lib/api";
 
 export interface SalonDayData {
   day: SalonDayResponse;
   /** Смены и закрытия; `null` — кадр не прочитан или ответил про другой день. */
   frame: SalonDayFrame | null;
   frameFailed: boolean;
+  /**
+   * Салон ведёт расписание в локальных таблицах (`BOOKING_VIA_AYLA_REST`
+   * выключен): кадр каталога к нему не относится и отвечает названным
+   * отказом. Это не «закрытия неизвестны» — закрытий каталога у него нет.
+   */
+  localSchedule: boolean;
   /** Когда пришёл ответ — пометка актуальности и ключ перечитывания зависимого. */
   loadedAt: number;
 }
@@ -48,13 +55,21 @@ export type SalonDayPhase =
   | { kind: "error"; err: unknown }
   | { kind: "ready"; data: SalonDayData; refreshing: boolean; refreshErr: unknown | null };
 
-type FrameResult = { frame: SalonDayFrame | null; failed: boolean };
+type FrameResult = { frame: SalonDayFrame | null; failed: boolean; local: boolean };
+
+const LOCAL_SCHEDULE_SLUG = "frame_source_local_unsupported";
 
 function readFrame(date: string, signal: AbortSignal): Promise<FrameResult> {
   return getSalonDayFrame(date, { signal }).then(
     (frame): FrameResult =>
-      frame.date && frame.date !== date ? { frame: null, failed: true } : { frame, failed: false },
-    (): FrameResult => ({ frame: null, failed: true }),
+      frame.date && frame.date !== date
+        ? { frame: null, failed: true, local: false }
+        : { frame, failed: false, local: false },
+    (err: unknown): FrameResult => ({
+      frame: null,
+      failed: true,
+      local: err instanceof ApiError && err.slug === LOCAL_SCHEDULE_SLUG,
+    }),
   );
 }
 
@@ -78,13 +93,19 @@ export function useSalonDay(wanted: string | null, attempt: number): SalonDayPha
       const early = wanted ? readFrame(wanted, signal) : null;
       try {
         const day = await getSalonDay(wanted ?? undefined, { signal });
-        const { frame, failed } = await (early ?? readFrame(day.date, signal));
+        const { frame, failed, local } = await (early ?? readFrame(day.date, signal));
         if (signal.aborted) return;
         const usable = frame && (!frame.date || frame.date === day.date) ? frame : null;
         shownFor.current = wanted;
         setPhase({
           kind: "ready",
-          data: { day, frame: usable, frameFailed: failed || (frame !== null && usable === null), loadedAt: Date.now() },
+          data: {
+            day,
+            frame: usable,
+            frameFailed: failed || (frame !== null && usable === null),
+            localSchedule: local,
+            loadedAt: Date.now(),
+          },
           refreshing: false,
           refreshErr: null,
         });

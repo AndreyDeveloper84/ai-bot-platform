@@ -241,7 +241,8 @@ describe("свободное окно из «Расписания» салона
         </Routes>
       </MemoryRouter>,
     );
-    (await screen.findByRole("button", { name: "← Расписание" })).click();
+    // Подпись называет место, куда кнопка ведёт на самом деле.
+    (await screen.findByRole("button", { name: "← Мастер" })).click();
     expect(await screen.findByTestId("where")).toHaveTextContent("/admin/schedule/master/m-1?date=2026-08-21");
   });
 });

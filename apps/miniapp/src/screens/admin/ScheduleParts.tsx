@@ -9,7 +9,7 @@
  * Свободное окно на этих компонентах — только то, что экран получил от
  * сервера; ни сетка, ни лента его не выводят.
  */
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import type { CSSProperties, MouseEvent, ReactNode, RefObject } from "react";
 
 import { SystemState } from "../../components/OperationalSystemState";
@@ -21,6 +21,7 @@ import {
   addMonths,
   axisFor,
   axisHours,
+  cardTop,
   conflictItems,
   dayAria,
   dayNumber,
@@ -217,6 +218,8 @@ export interface ColumnFree {
   status: "loading" | "ready" | "error";
   windows: FreeWindow[];
   selected: FreeWindow | null;
+  /** Минута, на которую нажали, — карточка окна встаёт под палец; `null` — с клавиатуры. */
+  anchor: number | null;
 }
 
 function minuteFromClick(e: MouseEvent<HTMLElement>, axis: Axis): number | null {
@@ -255,8 +258,11 @@ export function ScheduleGrid({
   onSelectWindow: (masterId: string, window: FreeWindow) => void;
   onBook: (masterId: string, window: FreeWindow) => void;
 }) {
-  // Ось — по всем записям колонок: фильтр услуг не должен двигать время под пальцем.
-  const axis = useMemo(() => axisFor(columns), [columns]);
+  // Ось — по всем записям колонок: фильтр услуг не должен двигать время под
+  // пальцем. Окна открытой колонки ось расширяют: окно сервера вне оси иначе
+  // не было бы нарисовано, а экран говорил бы, что окна есть.
+  const shownWindows = free && free.status === "ready" ? free.windows : null;
+  const axis = useMemo(() => axisFor(columns, shownWindows ?? []), [columns, shownWindows]);
   const hours = axisHours(axis);
   const steps = Math.max(1, hours.length - 1);
   const untimed = columns.flatMap((col) =>
@@ -357,6 +363,8 @@ function GridColumn({
   // занятое время, исчезнувшее из колонки, выглядело бы свободным.
   const placed = placeVisits(axis, col.visits);
   const windows = free && free.status === "ready" ? free.windows : [];
+  /** Окно выбрали кнопкой — фокус уходит на «Записать», а не в никуда. */
+  const focusCta = useRef(false);
 
   return (
     <div
@@ -383,13 +391,13 @@ function GridColumn({
         </span>
       ) : null}
 
-      {col.blocks.map((block) => {
+      {col.blocks.map((block, i) => {
         const span = spanOf(axis, block.start, block.end);
         if (!span) return null;
         const title = block.kind === "break" ? SS_COPY.breakLabel : SS_COPY.block;
         return (
           <button
-            key={`${block.kind}-${block.start}-${block.end}`}
+            key={`${block.kind}-${block.start}-${block.end}-${i}`}
             type="button"
             className="ss-block ss-block--gray"
             style={pos(span)}
@@ -409,24 +417,34 @@ function GridColumn({
         const open = free?.selected?.start === window.start && free.selected.end === window.end;
         if (open) {
           return (
-            <div
-              key={`free-${window.start}`}
-              className="ss-free ss-free--open"
-              style={{ top: `${span.top * 100}%`, minHeight: `${span.height * 100}%` }}
-              role="group"
-              aria-label={`${SS_COPY.free} ${window.start}–${window.end}`}
-            >
-              <span className="ss-free__time">{`${window.start} – ${window.end}`}</span>
-              <span className="ss-free__badge">{SS_COPY.free}</span>
-              <button
-                type="button"
-                className="ss-free__cta"
-                disabled={!bookable}
-                onClick={() => onBook(master.id, window)}
+            <div key={`free-${window.start}`} className="ss-free-open">
+              {/* Само окно остаётся пунктиром на всю свою длину; карточка
+                  кадра 3 стоит там, куда нажали, а не в начале окна. */}
+              <span className="ss-free ss-free--range" style={pos(span)} aria-hidden="true" />
+              <div
+                className="ss-free ss-free--open"
+                style={{ top: `${cardTop(axis, window, free?.anchor ?? null) * 100}%` }}
+                role="group"
+                aria-label={`${SS_COPY.free} ${window.start}–${window.end}`}
               >
-                {SS_COPY.book}
-                <IconPlus />
-              </button>
+                <span className="ss-free__time">{`${window.start} – ${window.end}`}</span>
+                <span className="ss-free__badge">{SS_COPY.free}</span>
+                <button
+                  type="button"
+                  className="ss-free__cta"
+                  disabled={!bookable}
+                  ref={(el) => {
+                    if (el && focusCta.current) {
+                      focusCta.current = false;
+                      el.focus();
+                    }
+                  }}
+                  onClick={() => onBook(master.id, window)}
+                >
+                  {SS_COPY.book}
+                  <IconPlus />
+                </button>
+              </div>
             </div>
           );
         }
@@ -437,7 +455,10 @@ function GridColumn({
             className="ss-free"
             style={pos(span)}
             aria-label={`${SS_COPY.free} ${window.start}–${window.end}`}
-            onClick={() => onSelectWindow(master.id, window)}
+            onClick={() => {
+              focusCta.current = true;
+              onSelectWindow(master.id, window);
+            }}
           >
             <span className="ss-free__badge" aria-hidden="true">
               {SS_COPY.free}
@@ -821,7 +842,16 @@ export function FiltersSheet({
       triggerRef={triggerRef}
       onClose={onClose}
     >
-      <button type="button" className="ss-sheet__close" aria-label={SS_COPY.master.close} onClick={onClose}>
+      <button
+        type="button"
+        className="ss-sheet__close"
+        aria-label={SS_COPY.master.close}
+        onClick={() => {
+          onClose();
+          // Свой «✕» идёт мимо `close()` шторки — фокус возвращаем сами.
+          triggerRef.current?.focus();
+        }}
+      >
         <IconCross />
       </button>
 

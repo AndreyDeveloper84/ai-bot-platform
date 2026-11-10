@@ -137,6 +137,8 @@ export const SS_COPY = {
   closedFull: "В этот день салон закрыт",
   closedPart: (from: string, to: string) => `Салон закрыт ${from}–${to}`,
   closedNoWindows: "Свободные окна на этот день не показываются.",
+  /** Закрытия не прочитаны: «салон открыт» сказать нельзя — и окна продавать тоже. */
+  closuresUnknown: "Не удалось проверить закрытия салона — свободные окна не показываются.",
   conflict: {
     double_booking: "Записи пересекаются по времени",
     outside_hours: "Запись вне рабочих часов",
@@ -608,10 +610,16 @@ export interface Axis {
 const DEFAULT_AXIS: Axis = { start: 9 * 60, end: 19 * 60 };
 
 /**
- * Ось времени сетки: от самого раннего до самого позднего из показанного —
- * смен, записей, блоков, — по целым часам. Ничего не известно — 09–19.
+ * Ось времени сетки: от самого раннего до самого позднего из смен и записей,
+ * по целым часам. Ничего не известно — 09–19.
+ *
+ * Блоки ось не двигают: отпуск сервер отдаёт как «00:00–24:00», и ось
+ * растянулась бы на сутки с пустыми девятью часами наверху; блок и так
+ * обрезается краями оси. Окна открытой колонки (`windows`) — двигают: окно
+ * сервера вне оси иначе не было бы нарисовано вовсе, а экран при этом
+ * говорил бы, что окна есть.
  */
-export function axisFor(columns: readonly MasterColumn[]): Axis {
+export function axisFor(columns: readonly MasterColumn[], windows: readonly FreeWindow[] = []): Axis {
   let start = Number.POSITIVE_INFINITY;
   let end = Number.NEGATIVE_INFINITY;
   const take = (from: string | null, to: string | null) => {
@@ -623,9 +631,9 @@ export function axisFor(columns: readonly MasterColumn[]): Axis {
   };
   for (const col of columns) {
     if (col.shift.kind === "working") col.shift.intervals.forEach((r) => take(r.start, r.end));
-    col.blocks.forEach((b) => take(b.start, b.end));
     col.visits.forEach((v) => take(v.start, v.end));
   }
+  windows.forEach((w) => take(w.start, w.end));
   if (!Number.isFinite(start) || !Number.isFinite(end)) return DEFAULT_AXIS;
   const from = Math.max(0, Math.floor(start / 60) * 60);
   const to = Math.min(24 * 60, Math.ceil(end / 60) * 60);
@@ -653,6 +661,9 @@ export function spanOf(axis: Axis, from: string, to: string): Span | null {
   return { top: (a - axis.start) / total, height: (b - a) / total };
 }
 
+/** Наименьшая длина записи на оси, минут. */
+const MIN_VISIT_MIN = 25;
+
 export interface PlacedVisit {
   visit: ColumnVisit;
   span: Span;
@@ -671,7 +682,10 @@ export function placeVisits(axis: Axis, visits: readonly ColumnVisit[]): PlacedV
     .filter((v): v is ColumnVisit & { start: string } => v.start !== null)
     .map((v) => {
       const from = toMinutes(v.start);
-      const to = v.end ? Math.max(toMinutes(v.end), from + 15) : from + 30;
+      // Короче 25 минут блок не читается (две строки в 22 px): он рисуется
+      // этой длиной, и по ней же считаются наложения — соседние короткие
+      // записи встают дорожками, а не друг на друга.
+      const to = v.end ? Math.max(toMinutes(v.end), from + MIN_VISIT_MIN) : from + 30;
       return { visit: v, from, to };
     })
     .sort((a, b) => a.from - b.from || a.to - b.to);
@@ -723,6 +737,21 @@ export function offHours(axis: Axis, shift: Shift): Span[] {
     if (span) out.push(span);
   }
   return out;
+}
+
+/**
+ * Где на оси ставить карточку раскрытого окна — доля высоты. Под пальцем,
+ * если известно, куда нажали: у окна 09:00–18:00 карточка в его начале
+ * оказалась бы в полуэкране от нажатия. Не ниже, чем за час до конца окна,
+ * чтобы карточка не уезжала за него.
+ */
+export function cardTop(axis: Axis, window: FreeWindow, anchor: number | null): number {
+  const from = toMinutes(window.start);
+  const last = Math.max(from, toMinutes(window.end) - 60);
+  const at = anchor === null ? from : Math.min(Math.max(anchor, from), last);
+  const total = axis.end - axis.start;
+  if (total <= 0) return 0;
+  return Math.min(1, Math.max(0, (at - axis.start) / total));
 }
 
 /** Минута дня по доле высоты оси — куда человек нажал в колонке. */
@@ -789,21 +818,58 @@ export function closureNotices(frame: SalonDayFrame | null): ClosureNotice[] {
 }
 
 /**
- * Окна, которые экран вправе показать: строки сервера минус те, про которые
- * известно, что они не продаются. Прошедшая дата — окон нет; сегодня — нет
- * окон, кончившихся к «сейчас» салона; салон в этот день закрыт (хоть на
- * часть дня) — окон нет: `build_schedule` закрытий не знает, а каталог при
- * записи их учитывает. Ни одно окно здесь не создаётся и не двигается.
+ * Что известно о закрытии салона в этот день.
+ *
+ * `unknown` — не «открыт»: кадр не прочитан, список закрытий не пришёл или не
+ * разобран. `build_schedule` закрытий не знает, каталог при записи их
+ * учитывает — значит, окно, показанное при неизвестных закрытиях, может быть
+ * окном закрытого салона (заморозка, MUST FIX 5: окно показывается, только
+ * если оно авторитетно).
+ *
+ * Одно исключение — `localSchedule`: салон правит локальные таблицы
+ * (`BOOKING_VIA_AYLA_REST` выключен), кадр каталога к нему не относится и
+ * отвечает названным отказом. Закрытий каталога у такого салона нет вовсе.
+ */
+export type SalonClosure = "open" | "closed" | "unknown";
+
+export function salonClosure(frame: SalonDayFrame | null, localSchedule = false): SalonClosure {
+  if (!frame) return localSchedule ? "open" : "unknown";
+  const closures = frame.closures;
+  if (!closures) return "unknown";
+  if (closures.state === "none") return "open";
+  if (closures.state === "parsed") return closures.rows.length > 0 ? "closed" : "open";
+  return "unknown";
+}
+
+/** Что сказать про окна, когда их не показывают из-за закрытий; `null` — показывают. */
+export function closureWindowsNote(closure: SalonClosure): string | null {
+  if (closure === "closed") return SS_COPY.closedNoWindows;
+  if (closure === "unknown") return SS_COPY.closuresUnknown;
+  return null;
+}
+
+/**
+ * Окна, которые экран вправе показать: строки сервера минус то, про что
+ * известно, что оно не продаётся. Прошедшая дата — окон нет; сегодня — нет
+ * окон, кончившихся к «сейчас» салона, а идущее окно начинается с «сейчас»:
+ * `build_schedule` не знает текущего времени и отдаёт «свободно с 11:30» и в
+ * час дня. Салон закрыт или про закрытия ничего не известно — окон нет.
+ *
+ * Ни одно окно здесь не создаётся: строка сервера либо остаётся, либо
+ * теряет уже прошедшее начало, либо не показывается.
  */
 export function liveWindows(
   windows: readonly FreeWindow[],
   date: string,
   now: { ymd: string; hm: string },
-  salonClosed: boolean,
+  closure: SalonClosure,
 ): FreeWindow[] {
-  if (salonClosed || date < now.ymd) return [];
+  if (closure !== "open" || date < now.ymd) return [];
   if (date > now.ymd) return [...windows];
-  return windows.filter((w) => toMinutes(w.end) > toMinutes(now.hm));
+  const current = toMinutes(now.hm);
+  return windows
+    .filter((w) => toMinutes(w.end) > current)
+    .map((w) => (toMinutes(w.start) < current ? { start: now.hm, end: w.end } : w));
 }
 
 /** Окно сервера, в которое попала минута. Сам экран окон не выводит. */

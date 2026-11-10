@@ -16,6 +16,11 @@ import { dateParam, scheduleMasterPath, schedulePath } from "./salon-schedule";
 /** Id мастера в адресе — то, что бывает первичным ключом, и ничего больше. */
 const MASTER_ID = /^[0-9A-Za-z_-]{1,64}$/;
 
+/** Годится ли строка из адреса как id мастера — в путь запроса идёт только такая. */
+export function isMasterId(value: string): boolean {
+  return MASTER_ID.test(value);
+}
+
 const SCHEDULE = /^\/admin\/schedule(?:\?date=(\d{4}-\d{2}-\d{2}))?$/;
 const SCHEDULE_MASTER = /^\/admin\/schedule\/master\/([0-9A-Za-z_-]{1,64})\?date=(\d{4}-\d{2}-\d{2})$/;
 /**

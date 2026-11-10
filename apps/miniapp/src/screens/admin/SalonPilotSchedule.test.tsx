@@ -247,7 +247,7 @@ function renderAt(entry: string) {
     <MemoryRouter initialEntries={[entry]}>
       <Routes>
         <Route path="/admin/schedule" element={<SalonPilotScheduleScreen me={ME} />} />
-        <Route path="/admin/schedule/master/:masterId" element={<SalonPilotScheduleMasterScreen />} />
+        <Route path="/admin/schedule/master/:masterId" element={<SalonPilotScheduleMasterScreen me={ME} />} />
         <Route path="*" element={<p>другой экран</p>} />
       </Routes>
       <Where />
@@ -292,7 +292,30 @@ beforeEach(() => {
 afterEach(() => {
   window.sessionStorage.clear();
   vi.restoreAllMocks();
+  vi.useRealTimers();
 });
+
+/** «Сейчас» салона (Москва) — подменой одних часов; таймеры остаются настоящими. */
+function salonClockIs(isoMoscow: string) {
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(new Date(`${isoMoscow}:00+03:00`));
+}
+
+function masterDayWith(patch: Partial<MasterDay>) {
+  mocked.masterDay.mockImplementation(async (_id, params) => ({
+    tenant_tz: "Europe/Moscow",
+    from: params?.from ?? DAY,
+    to: params?.to ?? DAY,
+    days: [masterDay({ date: params?.from ?? DAY, ...patch })],
+  }));
+}
+
+function offline() {
+  Object.defineProperty(window.navigator, "onLine", { configurable: true, get: () => false });
+  return () => {
+    delete (window.navigator as { onLine?: boolean }).onLine;
+  };
+}
 
 async function openGrid(entry = `/admin/schedule?date=${DAY}`) {
   renderAt(entry);
@@ -551,6 +574,124 @@ describe("кадр 3 — свободное окно в сетке", () => {
     expect(screen.getByRole("button", { name: "Свободные окна: Мастер Один" })).toBeDisabled();
   });
 
+  it("закрытия салона не прочитаны — окна не продаются: «открыт» сказать нельзя", async () => {
+    mocked.frame.mockImplementation(async () =>
+      salonFrame(4, DAY, { closures: { state: "unreadable", rows: [], seen_fields: ["x"] }, unreadable_lists: ["closures"] }),
+    );
+    await openGrid();
+
+    expect(screen.getByText(/Не удалось проверить закрытия салона/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Свободные окна: Мастер Один" })).toBeDisabled();
+    await settleScenario();
+    expect(mocked.masterDay).not.toHaveBeenCalled();
+  });
+
+  it("кадр не прочитан — закрытия неизвестны, окна не продаются", async () => {
+    mocked.frame.mockImplementation(async () => {
+      throw new ApiError(503, "schedule_unavailable", "");
+    });
+    await openGrid();
+
+    expect(screen.getByText(/Не удалось проверить закрытия салона/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Свободные окна: Мастер Один" })).toBeDisabled();
+  });
+
+  it("салон на локальных таблицах: кадра каталога у него нет по устройству — окна остаются", async () => {
+    mocked.frame.mockImplementation(async () => {
+      throw new ApiError(503, "frame_source_local_unsupported", "");
+    });
+    await openGrid();
+
+    expect(screen.queryByText(/Не удалось проверить закрытия салона/)).toBeNull();
+    tapColumn("Мастер Один", 0.5);
+    expect(await screen.findByRole("button", { name: /^Свободно/ })).toBeInTheDocument();
+  });
+
+  it("окно сервера вне оси не теряется: ось расширяется до него", async () => {
+    // У четвёртого мастера часы неизвестны; ось дня — 09–16, окно — вечером.
+    masterDayWith({ free_windows: [{ start: "17:00", end: "21:00", duration_min: 240 }] });
+    await openGrid();
+
+    fireEvent.click(screen.getByRole("button", { name: "Свободные окна: Мастер Четыре" }));
+
+    expect(await screen.findByRole("button", { name: "Свободно 17:00–21:00" })).toBeInTheDocument();
+  });
+
+  it("сегодня: прошедшее начало окна не показывается свободным, кончившееся окно — тоже", async () => {
+    salonClockIs(`${DAY}T12:40`);
+    masterDayWith({
+      free_windows: [
+        { start: "09:00", end: "10:00", duration_min: 60 },
+        { start: "11:30", end: "16:00", duration_min: 270 },
+      ],
+    });
+    await openGrid();
+
+    fireEvent.click(screen.getByRole("button", { name: "Свободные окна: Мастер Один" }));
+
+    expect(await screen.findByRole("button", { name: "Свободно 12:40–16:00" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Свободно 09:00/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: /Свободно 11:30/ })).toBeNull();
+  });
+
+  it("ответ на прежнюю колонку не ложится поверх открытой из кэша", async () => {
+    await openGrid();
+    tapColumn("Мастер Один", 0.5);
+    await screen.findByRole("group", { name: "Свободно 12:00–13:00" });
+
+    // Вторая колонка: ответ задержан.
+    let release: (() => void) | undefined;
+    mocked.masterDay.mockImplementationOnce(
+      (_id, params) =>
+        new Promise((resolve) => {
+          release = () =>
+            resolve({
+              tenant_tz: "Europe/Moscow",
+              from: params?.from ?? DAY,
+              to: params?.to ?? DAY,
+              days: [masterDay({ free_windows: [{ start: "09:00", end: "10:00", duration_min: 60 }] })],
+            });
+        }),
+    );
+    tapColumn("Мастер Два", 0.5);
+    await waitFor(() => expect(release).toBeDefined());
+    tapColumn("Мастер Один", 0.5);
+    release?.();
+    await settleScenario();
+
+    const first = screen.getByRole("group", { name: "Мастер Один" });
+    expect(within(first).getByRole("group", { name: "Свободно 12:00–13:00" })).toBeInTheDocument();
+    expect(within(screen.getByRole("group", { name: "Мастер Два" })).queryByRole("button", { name: /^Свободно/ })).toBeNull();
+  });
+
+  it("после «могли измениться» новое чтение окон снимает просьбу обновить", async () => {
+    const clock = vi.spyOn(Date, "now");
+    const loaded = 1_800_000_000_000;
+    clock.mockReturnValue(loaded);
+    await openGrid();
+    tapColumn("Мастер Один", 0.5);
+    const card = await screen.findByRole("group", { name: "Свободно 12:00–13:00" });
+    clock.mockReturnValue(loaded + 5 * 60_000 + 1);
+    fireEvent.click(within(card).getByRole("button", { name: /Записать/ }));
+    await screen.findByText("Расписание могло измениться");
+
+    tapColumn("Мастер Один", 0.5);
+
+    await screen.findByRole("group", { name: "Свободно 12:00–13:00" });
+    expect(screen.queryByText("Расписание могло измениться")).toBeNull();
+    expect(mocked.masterDay).toHaveBeenCalledTimes(2);
+  });
+
+  it("окно, выбранное кнопкой, отдаёт фокус «Записать», а не теряет его", async () => {
+    await openGrid();
+    fireEvent.click(screen.getByRole("button", { name: "Свободные окна: Мастер Один" }));
+
+    fireEvent.click(await screen.findByRole("button", { name: "Свободно 12:00–13:00" }));
+
+    const card = await screen.findByRole("group", { name: "Свободно 12:00–13:00" });
+    expect(within(card).getByRole("button", { name: /Записать/ })).toHaveFocus();
+  });
+
   it("окна одной колонки не переживают перечитывание дня", async () => {
     await openGrid();
     tapColumn("Мастер Один", 0.5);
@@ -560,6 +701,11 @@ describe("кадр 3 — свободное окно в сетке", () => {
 
     await waitFor(() => expect(mocked.day).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(screen.queryByRole("group", { name: /^Свободно/ })).toBeNull());
+
+    // И из памяти они тоже ушли: новое нажатие читает окна заново.
+    tapColumn("Мастер Один", 0.5);
+    await screen.findByRole("group", { name: "Свободно 12:00–13:00" });
+    expect(mocked.masterDay).toHaveBeenCalledTimes(2);
   });
 });
 
@@ -739,6 +885,100 @@ describe("один мастер — день списком (кадр 12 на э
     expect(screen.queryByText("Свободных промежутков нет.")).toBeNull();
   });
 
+  it("без сети окно в списке видно, но не нажимается", async () => {
+    const restore = offline();
+    try {
+      await openSingle();
+      expect(screen.getByRole("button", { name: /^Свободно 12:00–13:00/ })).toBeDisabled();
+    } finally {
+      restore();
+    }
+  });
+
+  it("после сбоя обновления окно в списке не действие", async () => {
+    await openSingle();
+    mocked.day.mockImplementationOnce(async () => {
+      throw new ApiError(503, "schedule_unavailable", "");
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Обновить" }));
+
+    await screen.findByText("Не удалось обновить. Показаны последние данные");
+    expect(screen.getByRole("button", { name: /^Свободно 12:00–13:00/ })).toBeDisabled();
+  });
+
+  it("выключенному мастеру окно не предлагается ни строкой, ни «+»", async () => {
+    mocked.day.mockImplementation(async () => {
+      const day = salonDay();
+      day.masters[0]!.is_active = false;
+      return day;
+    });
+    await openSingle();
+
+    expect(screen.getByRole("button", { name: /^Свободно 12:00–13:00/ })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "Новая запись" }));
+    expect(where()).toBe(`/admin/booking/new?return=schedule&date=${DAY}|null`);
+  });
+
+  it("салон закрыт — в дне мастера окон нет, и сказано почему", async () => {
+    mocked.frame.mockImplementation(async () =>
+      salonFrame(4, DAY, {
+        closures: { state: "parsed", rows: [{ start: "10:00", end: "14:00", is_full_day: false, reason: "" }], seen_fields: [] },
+      }),
+    );
+    selectOnly(["m-1"]);
+    renderAt(`/admin/schedule?date=${DAY}`);
+
+    expect(await screen.findByText("Свободные окна на этот день не показываются.")).toBeInTheDocument();
+    expect(screen.getByText("Салон закрыт 10:00–14:00")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^Запись 09:00–10:00/ })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^Свободно/ })).toBeNull();
+  });
+
+  it("закрытия не прочитаны — в дне мастера окон нет", async () => {
+    mocked.frame.mockImplementation(async () => {
+      throw new ApiError(503, "schedule_unavailable", "");
+    });
+    selectOnly(["m-1"]);
+    renderAt(`/admin/schedule?date=${DAY}`);
+
+    expect(await screen.findByText(/Не удалось проверить закрытия салона/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^Свободно/ })).toBeNull();
+  });
+
+  it("сегодня: «сейчас» — по часам салона; идущее окно начинается с него", async () => {
+    salonClockIs(`${DAY}T12:40`);
+    masterDayWith({
+      blocks: [],
+      free_windows: [
+        { start: "09:00", end: "10:00", duration_min: 60 },
+        { start: "11:30", end: "16:00", duration_min: 270 },
+      ],
+    });
+    selectOnly(["m-1"]);
+    renderAt(`/admin/schedule?date=${DAY}`);
+
+    fireEvent.click(await screen.findByRole("button", { name: /^Свободно 12:40–16:00/ }));
+
+    expect(screen.queryByRole("button", { name: /^Свободно 09:00/ })).toBeNull();
+    expect(where()).toBe(
+      `/admin/booking/new?return=schedule&date=${DAY}&master_id=m-1&from=12%3A40&to=16%3A00|null`,
+    );
+  });
+
+  it("вчера по часам салона — прошедшая дата: окон нет, «+» дату не несёт", async () => {
+    // 23:30 UTC 21-го — в Москве уже 22-е: 21-е для салона прошло.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date(`${DAY}T23:30:00Z`));
+    selectOnly(["m-1"]);
+    renderAt(`/admin/schedule?date=${DAY}`);
+
+    expect(await screen.findByText("Расписание не подтверждено — салон его не заверял")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^Свободно/ })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Новая запись" }));
+    expect(where()).toBe("/admin/booking/new?return=schedule&master_id=m-1|null");
+  });
+
   it("окно старше пяти минут в списке — не действие", async () => {
     const clock = vi.spyOn(Date, "now");
     const loaded = 1_800_000_000_000;
@@ -781,6 +1021,28 @@ describe("дата", () => {
     await waitFor(() => expect(mocked.day.mock.calls.at(-1)?.[0]).toBe("2034-08-22"));
     expect(where()).toBe("/admin/schedule?date=2034-08-22|null");
     expect(await screen.findByText("Вт, 22 августа")).toBeInTheDocument();
+  });
+
+  it("ответ на прежнюю дату, пришедший позже, не ложится поверх новой", async () => {
+    let releaseOld: (() => void) | undefined;
+    mocked.day.mockImplementation((date) =>
+      date === DAY
+        ? new Promise((resolve) => {
+            releaseOld = () => resolve(salonDay(4, DAY));
+          })
+        : Promise.resolve(salonDay(4, date ?? DAY)),
+    );
+    renderAt(`/admin/schedule?date=${DAY}`);
+    await waitFor(() => expect(releaseOld).toBeDefined());
+
+    fireEvent.click(screen.getByRole("button", { name: "22 августа, Вт" }));
+    expect(await screen.findByText("Вт, 22 августа")).toBeInTheDocument();
+    await screen.findByRole("region", { name: "Расписание по мастерам" });
+    releaseOld?.();
+    await settleScenario();
+
+    expect(screen.getByText("Вт, 22 августа")).toBeInTheDocument();
+    expect(where()).toBe("/admin/schedule?date=2034-08-22|null");
   });
 
   it("кадр, ответивший про другой день, отбрасывается: смены вторника под записями понедельника не рисуются", async () => {
@@ -971,6 +1233,18 @@ describe("кадр 13 — состояния", () => {
     expect(within(card).getByRole("button", { name: /Записать/ })).toBeDisabled();
   });
 
+  it("возврат на экран перечитывает день, уход с него — нет", async () => {
+    await openGrid();
+    Object.defineProperty(document, "visibilityState", { configurable: true, get: () => "hidden" });
+    fireEvent(document, new Event("visibilitychange"));
+    await settleScenario();
+    expect(mocked.day).toHaveBeenCalledTimes(1);
+
+    Object.defineProperty(document, "visibilityState", { configurable: true, get: () => "visible" });
+    fireEvent(document, new Event("visibilitychange"));
+    await waitFor(() => expect(mocked.day).toHaveBeenCalledTimes(2));
+  });
+
   it("кадр не прочитан, день прочитан — записи показаны, про смены сказано", async () => {
     mocked.frame.mockImplementation(async () => {
       throw new ApiError(503, "schedule_unavailable", "");
@@ -997,16 +1271,6 @@ describe("кадр 13 — состояния", () => {
 
     expect(await screen.findByRole("heading", { name: "Нет мастеров" })).toBeInTheDocument();
     expect(screen.getByText("В салоне нет мастеров — расписание показывать некому.")).toBeInTheDocument();
-  });
-
-  it("возврат на экран перечитывает день", async () => {
-    await openGrid();
-    expect(mocked.day).toHaveBeenCalledTimes(1);
-
-    Object.defineProperty(document, "visibilityState", { configurable: true, get: () => "visible" });
-    fireEvent(document, new Event("visibilitychange"));
-
-    await waitFor(() => expect(mocked.day).toHaveBeenCalledTimes(2));
   });
 });
 
@@ -1080,6 +1344,59 @@ describe("кадр 12 — экран «Мастер»", () => {
     expect(await screen.findByText("Расписание не подтверждено — салон его не заверял")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /^Свободно/ })).toBeNull();
     expect(screen.queryByText("Свободных промежутков нет.")).toBeNull();
+  });
+
+  it("адрес с негодным id мастера не уходит в запросы — возврат в расписание", async () => {
+    renderAt(`/admin/schedule/master/..%2F..%2Fsettings?date=${DAY}`);
+
+    await waitFor(() => expect(where()).toBe(`/admin/schedule?date=${DAY}|null`));
+    expect(mocked.detail).not.toHaveBeenCalled();
+  });
+
+  it("выключенному мастеру окно на экране мастера не действие", async () => {
+    mocked.day.mockImplementation(async () => {
+      const day = salonDay();
+      day.masters[0]!.is_active = false;
+      return day;
+    });
+    await openMaster();
+    expect(screen.getByRole("button", { name: /^Свободно 12:00–13:00/ })).toBeDisabled();
+  });
+
+  it("без сети окно на экране мастера не нажимается", async () => {
+    const restore = offline();
+    try {
+      await openMaster();
+      expect(screen.getByRole("button", { name: /^Свободно 12:00–13:00/ })).toBeDisabled();
+    } finally {
+      restore();
+    }
+  });
+
+  it("салон закрыт — на экране мастера окон нет", async () => {
+    mocked.frame.mockImplementation(async () =>
+      salonFrame(4, DAY, {
+        closures: { state: "parsed", rows: [{ start: null, end: null, is_full_day: true, reason: "" }], seen_fields: [] },
+      }),
+    );
+    renderAt(`/admin/schedule/master/m-1?date=${DAY}`);
+
+    expect(await screen.findByText("Свободные окна на этот день не показываются.")).toBeInTheDocument();
+    expect(screen.getByText("В этот день салон закрыт")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^Свободно/ })).toBeNull();
+  });
+
+  it("вкладки ходят стрелками", async () => {
+    await openMaster();
+    const schedule = screen.getByRole("tab", { name: "Расписание" });
+    schedule.focus();
+
+    fireEvent.keyDown(schedule, { key: "ArrowRight" });
+
+    const about = screen.getByRole("tab", { name: "О мастере" });
+    expect(about).toHaveAttribute("aria-selected", "true");
+    expect(about).toHaveFocus();
+    expect(schedule).toHaveAttribute("tabindex", "-1");
   });
 
   it("выходной назван словом сервера", async () => {

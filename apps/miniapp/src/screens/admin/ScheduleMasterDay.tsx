@@ -31,6 +31,7 @@ import { SYSTEM_STATE_COPY } from "../../components/OperationalSystemState";
 import type { MasterDayPhase } from "../../hooks/useSalonSchedule";
 import {
   SS_COPY,
+  closureWindowsNote,
   freeWindowsOf,
   liveWindows,
   masterDayOff,
@@ -38,6 +39,7 @@ import {
   windowsFresh,
   type ColumnVisit,
   type FreeWindow,
+  type SalonClosure,
 } from "../../lib/salon-schedule";
 import { confirmationLabel, confirmationState } from "../../lib/schedule-confirmation-state";
 import { MasterDayList } from "./ScheduleParts";
@@ -48,8 +50,8 @@ export function MasterDayPanel({
   timezone,
   visits,
   serviceIds,
-  salonClosed,
-  masterActive,
+  closure,
+  canBook,
   online,
   onVisit,
   onBook,
@@ -63,9 +65,10 @@ export function MasterDayPanel({
   timezone: string;
   visits: readonly ColumnVisit[];
   serviceIds: readonly string[];
-  /** В этот день есть закрытие салона — окна не показываются. */
-  salonClosed: boolean;
-  masterActive: boolean;
+  /** Закрыт ли салон в этот день; `unknown` — не «открыт», окна не показываются. */
+  closure: SalonClosure;
+  /** Записать к этому мастеру вообще можно: он включён, и человеку это разрешено. */
+  canBook: boolean;
   online: boolean;
   onVisit: (id: string) => void;
   onBook: (window: FreeWindow) => void;
@@ -77,12 +80,12 @@ export function MasterDayPanel({
   const ready = phase.kind === "ready" ? phase : null;
   const day = ready?.day ?? null;
   const now = salonNow(timezone);
-  const windows = ready ? liveWindows(freeWindowsOf(day), date, now, salonClosed) : [];
+  const windows = ready ? liveWindows(freeWindowsOf(day), date, now, closure) : [];
   const off = day ? masterDayOff(day) : false;
 
   let windowsNote: string | null = null;
   if (ready && day && !off) {
-    if (salonClosed) windowsNote = SS_COPY.closedNoWindows;
+    if (closure !== "open") windowsNote = closureWindowsNote(closure);
     else if (date < now.ymd) windowsNote = null;
     else windowsNote = windows.length > 0 ? SS_COPY.freeNote : SS_COPY.noFreeWindows;
   }
@@ -113,7 +116,7 @@ export function MasterDayPanel({
         windows={windows}
         windowsNote={windowsNote}
         serviceIds={serviceIds}
-        bookable={online && masterActive}
+        bookable={online && canBook}
         onVisit={onVisit}
         onBook={book}
         onBlock={onBlock}

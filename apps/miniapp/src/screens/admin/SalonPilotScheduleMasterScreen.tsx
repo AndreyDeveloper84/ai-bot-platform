@@ -26,7 +26,9 @@ import { SystemState } from "../../components/OperationalSystemState";
 import { useOnline } from "../../hooks/useOnline";
 import { useMasterDay, useSalonDay } from "../../hooks/useSalonSchedule";
 import { useScreenBack } from "../../hooks/useScreenBack";
-import { getMasterDetail, type MasterDetail } from "../../lib/admin-api";
+import { getMasterDetail, type MasterDetail, type MeResponse } from "../../lib/admin-api";
+import { canCreateBooking } from "../../lib/salon-pilot";
+import { isMasterId } from "../../lib/salon-return";
 import { signalReady } from "../../lib/max-sdk";
 import {
   SS_COPY,
@@ -35,6 +37,7 @@ import {
   dateLine,
   dateParam,
   newBookingPath,
+  salonClosure,
   salonNow,
   scheduleMasterPath,
   schedulePath,
@@ -51,8 +54,13 @@ type DetailPhase =
   | { kind: "ready"; detail: MasterDetail }
   | { kind: "error"; err: unknown };
 
-export function SalonPilotScheduleMasterScreen() {
-  const { masterId = "" } = useParams<{ masterId: string }>();
+const TABS = ["schedule", "about"] as const;
+
+export function SalonPilotScheduleMasterScreen({ me }: { me: MeResponse }) {
+  const { masterId: rawMasterId = "" } = useParams<{ masterId: string }>();
+  // В путь запроса идёт только то, что похоже на id: строка из адреса —
+  // чужая, и «..%2F..» в ней стало бы «../..» в пути ручки.
+  const masterId = isMasterId(rawMasterId) ? rawMasterId : "";
   const [params] = useSearchParams();
   const navigate = useNavigate();
   const online = useOnline();
@@ -74,13 +82,19 @@ export function SalonPilotScheduleMasterScreen() {
 
   // День мастера читается ПОСЛЕ дня салона: перечитали день — перечитали и
   // окна, а не два раза подряд на одном открытии.
-  const masterDay = useMasterDay(masterId, data ? date : null, data?.loadedAt ?? 0);
+  const masterDay = useMasterDay(masterId || null, data ? date : null, data?.loadedAt ?? 0);
+
+  // Адрес без мастера — не экран с вечной загрузкой, а возврат в расписание.
+  useEffect(() => {
+    if (!masterId) navigate(schedulePath(wanted), { replace: true });
+  }, [masterId, wanted, navigate]);
 
   useEffect(() => {
     signalReady();
   }, []);
 
   useEffect(() => {
+    if (!masterId) return;
     const controller = new AbortController();
     setAbout({ kind: "loading" });
     getMasterDetail(masterId, { signal: controller.signal }).then(
@@ -136,7 +150,7 @@ export function SalonPilotScheduleMasterScreen() {
         ) : null}
 
         <div className="ss-segment" role="tablist" aria-label={SS_COPY.master.title}>
-          {(["schedule", "about"] as const).map((t) => (
+          {TABS.map((t) => (
             <button
               key={t}
               type="button"
@@ -144,8 +158,16 @@ export function SalonPilotScheduleMasterScreen() {
               id={`ss-tab-${t}`}
               aria-selected={tab === t}
               aria-controls={`ss-tabpanel-${t}`}
+              // Вкладки — один шаг табуляции; между ними ходят стрелками.
+              tabIndex={tab === t ? 0 : -1}
               className={`ss-segment__item${tab === t ? " ss-segment__item--on" : ""}`}
               onClick={() => setTab(t)}
+              onKeyDown={(e) => {
+                if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+                const next = TABS[(TABS.indexOf(t) + 1) % TABS.length] ?? t;
+                setTab(next);
+                document.getElementById(`ss-tab-${next}`)?.focus();
+              }}
             >
               {SS_COPY.master[t]}
             </button>
@@ -200,8 +222,8 @@ export function SalonPilotScheduleMasterScreen() {
                   timezone={data.day.timezone}
                   visits={visits}
                   serviceIds={[]}
-                  salonClosed={closures.length > 0}
-                  masterActive={active}
+                  closure={salonClosure(data.frame, data.localSchedule)}
+                  canBook={active && canCreateBooking(me)}
                   online={online && refreshErr == null}
                   onVisit={(id) =>
                     navigate(`/admin/bookings/${encodeURIComponent(id)}`, {

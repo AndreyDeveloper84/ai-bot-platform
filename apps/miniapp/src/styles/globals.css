@@ -11530,6 +11530,14 @@ a {
   outline: 2px solid var(--c-success);
   outline-offset: -2px;
 }
+/* Раскрытое окно: пунктир на всю длину окна и карточка под пальцем. */
+.ss-free-open {
+  display: contents;
+}
+.ss-free--range {
+  cursor: default;
+  pointer-events: none;
+}
 .ss-free--open {
   z-index: 5;
   flex-direction: column;

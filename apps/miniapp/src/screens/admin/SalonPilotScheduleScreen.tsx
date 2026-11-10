@@ -60,7 +60,7 @@
  * день; таких видов расписания нет ни на одном кадре.
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 
 import { SystemState } from "../../components/OperationalSystemState";
@@ -80,6 +80,7 @@ import {
   SS_COPY,
   buildColumns,
   closureNotices,
+  closureWindowsNote,
   columnVisit,
   dateLine,
   dateParam,
@@ -92,6 +93,7 @@ import {
   loadFilters,
   mastersChip,
   newBookingPath,
+  salonClosure,
   salonNow,
   saveFilters,
   scheduleMasterPath,
@@ -213,7 +215,9 @@ export function SalonPilotScheduleScreen({ me }: { me: MeResponse }) {
 
   // Новый ответ дня, другая дата или сбой обновления — прежние окна не про
   // это состояние: они сняты, а не оставлены «на всякий случай» (MUST FIX 7).
-  useEffect(() => {
+  // Эффект — до отрисовки: отложенный стёр бы и нажатие, сделанное в первые
+  // миллисекунды после прихода данных, и экран молчал бы в ответ.
+  useLayoutEffect(() => {
     freeToken.current += 1;
     freeCache.current.clear();
     setFree(null);
@@ -231,10 +235,13 @@ export function SalonPilotScheduleScreen({ me }: { me: MeResponse }) {
     [data],
   );
   const closures = useMemo(() => closureNotices(data?.frame ?? null), [data]);
-  const salonClosed = closures.length > 0;
+  const closure = data ? salonClosure(data.frame, data.localSchedule) : "unknown";
   const now = data ? salonNow(data.day.timezone) : null;
-  /** Окна на эту дату вообще бывают: не прошлое и салон не закрыт. */
-  const windowsPossible = Boolean(date && now && date >= now.ymd && !salonClosed);
+  const past = Boolean(date && now && date < now.ymd);
+  /** Окна на эту дату вообще бывают: не прошлое, и салон заведомо открыт. */
+  const windowsPossible = Boolean(date && now) && !past && closure === "open";
+  /** Записать человеку вообще разрешено — то же правило, что у «+». */
+  const mayBook = canCreateBooking(me);
 
   const masterDay = useMasterDay(single?.master.id ?? null, single ? date : null, loadedAt);
 
@@ -249,22 +256,27 @@ export function SalonPilotScheduleScreen({ me }: { me: MeResponse }) {
     async (masterId: string, minute: number | null) => {
       if (!data || !date || !windowsPossible) return;
       const reveal = (windows: FreeWindow[]) => {
-        const live = liveWindows(windows, date, salonNow(data.day.timezone), false);
+        const live = liveWindows(windows, date, salonNow(data.day.timezone), "open");
         setFree({
           masterId,
           status: "ready",
           windows: live,
           selected: minute === null ? null : windowAt(live, minute),
+          anchor: minute,
         });
+        // Окна только что прочитаны — просьба «обновите» больше не про них.
+        setStale(false);
       };
+      // Любое новое нажатие отменяет ответ, летящий на прежнее: иначе окна
+      // другой колонки легли бы поверх открытой из кэша.
+      freeToken.current += 1;
+      const token = freeToken.current;
       const cached = freeCache.current.get(masterId);
       if (cached && windowsFresh(cached.fetchedAt)) {
         reveal(cached.windows);
         return;
       }
-      freeToken.current += 1;
-      const token = freeToken.current;
-      setFree({ masterId, status: "loading", windows: [], selected: null });
+      setFree({ masterId, status: "loading", windows: [], selected: null, anchor: minute });
       try {
         const res = await getMasterDaySchedule(masterId, { from: date, to: date });
         if (token !== freeToken.current) return;
@@ -273,7 +285,7 @@ export function SalonPilotScheduleScreen({ me }: { me: MeResponse }) {
         reveal(windows);
       } catch {
         if (token !== freeToken.current) return;
-        setFree({ masterId, status: "error", windows: [], selected: null });
+        setFree({ masterId, status: "error", windows: [], selected: null, anchor: null });
       }
     },
     [data, date, windowsPossible],
@@ -409,7 +421,9 @@ export function SalonPilotScheduleScreen({ me }: { me: MeResponse }) {
                 </p>
               </div>
             ))}
-            {salonClosed ? <p className="ss-note">{SS_COPY.closedNoWindows}</p> : null}
+            {!past && layout === "grid" && closure !== "open" ? (
+              <p className="ss-note">{closureWindowsNote(closure)}</p>
+            ) : null}
 
             {data.frameFailed ? (
               <div className="callout" role="status">
@@ -443,7 +457,7 @@ export function SalonPilotScheduleScreen({ me }: { me: MeResponse }) {
                   serviceIds={active.serviceIds}
                   free={free}
                   tappable={windowsPossible}
-                  bookable={online && refreshErr == null}
+                  bookable={online && refreshErr == null && mayBook}
                   onVisit={openVisit}
                   onMaster={openMaster}
                   onBlock={openWorkingTime}
@@ -499,8 +513,8 @@ export function SalonPilotScheduleScreen({ me }: { me: MeResponse }) {
                   timezone={data.day.timezone}
                   visits={single.visits}
                   serviceIds={active.serviceIds}
-                  salonClosed={salonClosed}
-                  masterActive={single.master.isActive}
+                  closure={closure}
+                  canBook={single.master.isActive && mayBook}
                   online={online && refreshErr == null}
                   onVisit={openVisit}
                   onBook={(window) => book(single.master.id, window)}
@@ -532,13 +546,19 @@ export function SalonPilotScheduleScreen({ me }: { me: MeResponse }) {
         ) : null}
       </div>
 
-      {data && canCreateBooking(me) ? (
+      {data && mayBook ? (
         <button
           type="button"
           className="ss-fab"
           aria-label={SS_COPY.newBooking}
           onClick={() =>
-            navigate(newBookingPath({ date, masterId: single?.master.isActive ? single.master.id : null }))
+            navigate(
+              newBookingPath({
+                // Прошедшую дату в форму не несём: записать на неё нельзя.
+                date: past ? null : date,
+                masterId: single?.master.isActive ? single.master.id : null,
+              }),
+            )
           }
         >
           <IconPlus />

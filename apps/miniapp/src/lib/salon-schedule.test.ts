@@ -25,6 +25,7 @@ import {
   axisFor,
   axisHours,
   buildColumns,
+  cardTop,
   clientLabel,
   closureNotices,
   conflictItems,
@@ -46,6 +47,7 @@ import {
   newBookingPath,
   offHours,
   placeVisits,
+  salonClosure,
   salonNow,
   saveFilters,
   scheduleMasterPath,
@@ -384,6 +386,31 @@ describe("сетка: ось и место блока", () => {
     expect(axisHours(axis).at(-1)).toBe("21:00");
   });
 
+  it("отсутствие ось не двигает: отпуск «00:00–24:00» не растягивает сетку на сутки", () => {
+    const cols = buildColumns(
+      salonDay([{ id: "a" }, { id: "b" }]),
+      frame([frameRow("a", { absences: rows(["00:00", "24:00"]) }), frameRow("b", { absences: rows(["16:00", "24:00"]) })]),
+      [],
+    );
+    expect(axisFor(cols)).toEqual({ start: 10 * 60, end: 19 * 60 });
+  });
+
+  it("окна открытой колонки ось расширяют: окно сервера вне оси иначе не нарисовать", () => {
+    const cols = buildColumns(salonDay([{ id: "a", visits: [visit("v", "09:00", "10:00")] }]), null, []);
+    expect(axisFor(cols)).toEqual({ start: 9 * 60, end: 10 * 60 });
+    expect(axisFor(cols, [{ start: "17:00", end: "21:00" }])).toEqual({ start: 9 * 60, end: 21 * 60 });
+  });
+
+  it("карточка окна встаёт под палец, но не дальше часа до конца окна", () => {
+    const axis = { start: 540, end: 1140 };
+    const long = { start: "09:00", end: "18:00" };
+    expect(cardTop(axis, long, null)).toBe(0);
+    expect(cardTop(axis, long, 14 * 60)).toBe(0.5);
+    expect(cardTop(axis, long, 17 * 60 + 50)).toBe((17 * 60 - 540) / 600);
+    // Нажали выше окна — карточка в его начале.
+    expect(cardTop(axis, { start: "12:00", end: "13:00" }, 10 * 60)).toBe(0.3);
+  });
+
   it("ничего не известно — 09–19, а не пустая ось", () => {
     expect(axisFor(buildColumns(salonDay([{ id: "a" }]), null, []))).toEqual({ start: 540, end: 1140 });
   });
@@ -406,6 +433,16 @@ describe("сетка: ось и место блока", () => {
       ["a", 0, 2],
       ["b", 1, 2],
       ["c", 0, 1],
+    ]);
+  });
+
+  it("короткие соседние записи встают дорожками, а не наезжают друг на друга", () => {
+    // 15 минут на оси — 14 px, блок ниже 22 px не читается: он рисуется на
+    // 25 минут, и по этой же длине считается наложение.
+    const placed = placeVisits({ start: 600, end: 1200 }, [cv("a", "10:00", "10:15"), cv("b", "10:15", "10:30")]);
+    expect(placed.map((p) => [p.lane, p.lanes])).toEqual([
+      [0, 2],
+      [1, 2],
     ]);
   });
 
@@ -463,21 +500,48 @@ describe("свободное окно — строка сервера, толь�
   });
 
   it("прошедшая дата — окон нет: сервер не знает «сейчас» и отдаёт их поверх состоявшихся визитов", () => {
-    expect(liveWindows(windows, DAY, { ymd: "2031-01-10", hm: "09:00" }, false)).toEqual([]);
+    expect(liveWindows(windows, DAY, { ymd: "2031-01-10", hm: "09:00" }, "open")).toEqual([]);
   });
 
-  it("сегодня — нет окон, кончившихся к «сейчас» салона; идущее и будущее остаются как прислал сервер", () => {
-    expect(liveWindows(windows, DAY, { ymd: DAY, hm: "11:00" }, false)).toEqual([windows[1]]);
-    expect(liveWindows(windows, DAY, { ymd: DAY, hm: "12:40" }, false)).toEqual([windows[1]]);
-    expect(liveWindows(windows, DAY, { ymd: DAY, hm: "13:30" }, false)).toEqual([]);
+  it("сегодня — нет окон, кончившихся к «сейчас» салона; идущее окно начинается с «сейчас»", () => {
+    expect(liveWindows(windows, DAY, { ymd: DAY, hm: "11:00" }, "open")).toEqual([windows[1]]);
+    // 12:40: «свободно с 12:00» — уже неправда; с 12:40 — правда.
+    expect(liveWindows(windows, DAY, { ymd: DAY, hm: "12:40" }, "open")).toEqual([{ start: "12:40", end: "13:30" }]);
+    expect(liveWindows(windows, DAY, { ymd: DAY, hm: "13:30" }, "open")).toEqual([]);
+    // Окно на весь день за десять минут до конца смены — десять минут, а не день.
+    expect(liveWindows([{ start: "09:00", end: "18:00" }], DAY, { ymd: DAY, hm: "17:50" }, "open")).toEqual([
+      { start: "17:50", end: "18:00" },
+    ]);
   });
 
   it("будущая дата — все окна сервера", () => {
-    expect(liveWindows(windows, DAY, { ymd: "2031-01-08", hm: "23:00" }, false)).toEqual(windows);
+    expect(liveWindows(windows, DAY, { ymd: "2031-01-08", hm: "23:00" }, "open")).toEqual(windows);
   });
 
-  it("салон в этот день закрыт — окон нет: сервер закрытий не знает, каталог при записи их учитывает", () => {
-    expect(liveWindows(windows, DAY, { ymd: "2031-01-08", hm: "09:00" }, true)).toEqual([]);
+  it("салон закрыт или про закрытия ничего не известно — окон нет", () => {
+    const future = { ymd: "2031-01-08", hm: "09:00" };
+    expect(liveWindows(windows, DAY, future, "closed")).toEqual([]);
+    expect(liveWindows(windows, DAY, future, "unknown")).toEqual([]);
+  });
+
+  it("закрытия салона: прочитаны и пусты — открыт; не прочитаны — неизвестно, а не «открыт»", () => {
+    const closures = (state: "none" | "parsed" | "unreadable" | "absent", n = 0) => ({
+      ...frame([]),
+      closures: {
+        state,
+        rows: Array.from({ length: n }, () => ({ start: null, end: null, is_full_day: true, reason: "" })),
+        seen_fields: [],
+      },
+    });
+    expect(salonClosure(closures("none"))).toBe("open");
+    expect(salonClosure(closures("parsed", 1))).toBe("closed");
+    expect(salonClosure(closures("unreadable"))).toBe("unknown");
+    expect(salonClosure(closures("absent"))).toBe("unknown");
+    // Кадр не прочитан; прежний сервер поля не отдаёт.
+    expect(salonClosure(null)).toBe("unknown");
+    expect(salonClosure(frame([]))).toBe("unknown");
+    // Салон на локальных таблицах: закрытий каталога у него нет вовсе.
+    expect(salonClosure(null, true)).toBe("open");
   });
 
   it("«сейчас» — по часам салона, а не устройства", () => {

@@ -62,6 +62,13 @@ const RETURN_TARGETS: Readonly<Record<string, ReturnTarget>> = {
     back: "← Расписание",
     open: "Открыть расписание",
   },
+  // DRF-2933 — с дня мастера (кадр 12 «Расписания»): подпись называет то
+  // место, куда кнопка ведёт на самом деле.
+  "schedule-master": {
+    path: "/admin/schedule",
+    back: "← Мастер",
+    open: "Открыть расписание мастера",
+  },
 };
 
 /** Возврат по умолчанию — тот, что был до появления пилота. */
@@ -111,7 +118,12 @@ export function AdminNewBookingScreen() {
     // с мастером: возврат ведёт на тот же день (и к тому же мастеру), а не в
     // «сегодня». Адрес собирается из проверенных частей (`salon-return`).
     const schedule = scheduleReturnPath(searchParams);
-    if (schedule && RETURN_TARGETS.schedule) return { ...RETURN_TARGETS.schedule, path: schedule };
+    if (schedule) {
+      const target = schedule.startsWith("/admin/schedule/master/")
+        ? RETURN_TARGETS["schedule-master"]
+        : RETURN_TARGETS.schedule;
+      if (target) return { ...target, path: schedule };
+    }
     return RETURN_TARGETS[searchParams.get("return") ?? ""] ?? RETURN_DEFAULT;
   }, [searchParams]);
   // DRF-2368 — возврат объявлен ЗДЕСЬ, а не только нарисован формой:

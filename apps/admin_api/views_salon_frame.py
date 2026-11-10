@@ -116,7 +116,7 @@ from django.views.decorators.http import require_http_methods
 
 from apps.admin_api.auth import require_admin_or_reception_read
 from apps.admin_api.services.salon_day import masters_by_specialist_key, salon_roster
-from apps.admin_api.services.wire_lists import NONE, PARSED, UNREADABLE, read_list
+from apps.admin_api.services.wire_lists import ABSENT, NONE, PARSED, UNREADABLE, read_list
 from apps.integrations.ayla.salon_client import (
     SalonAPIError,
     SalonForbidden,
@@ -214,14 +214,20 @@ def _local_wall_clock(value: Any) -> datetime | None:
     return parsed.replace(tzinfo=None)
 
 
+#: Опознанная строка, которая суток дня не касается, — не строка ответа и не
+#: «не понял». Отдельное значение, а не ``None``: эти два исхода разные.
+_OUTSIDE: dict[str, Any] = {}
+
+
 def _absence_row(item: dict[str, Any], day: date_cls | None) -> dict[str, Any] | None:
     """Отсутствие мастера внутри суток ``day`` — «ЧЧ:ММ»–«ЧЧ:ММ» / «24:00».
 
     ``None`` — строка не опознана. Опознанная строка, которая этих суток не
     касается (каталог режет отсутствия своим окном, и на стыке поясов оно
-    шире суток), возвращается с пометкой ``outside`` и в ответ не идёт:
+    шире суток), возвращается как :data:`_OUTSIDE` и в ответ не идёт:
     «не понял» и «не сегодня» — разные исходы, и второй не должен красить
-    список в ``unreadable``.
+    список в ``unreadable``. Туда же — отсутствие, которое после обрезки до
+    минут стало пустым («18:00–18:00»): события длиной ноль экрану незачем.
 
     Прежняя форма «время суток» (``start_local`` / ``end_local``) принимается
     тоже: её ждали тесты и ждал экран, и она никому не мешает.
@@ -238,24 +244,49 @@ def _absence_row(item: dict[str, Any], day: date_cls | None) -> dict[str, Any] |
     clipped_start = max(start, day_start)
     clipped_end = min(end, day_end)
     if clipped_end <= clipped_start:
-        return {"outside": True}
-    return {
-        "start": f"{clipped_start.hour:02d}:{clipped_start.minute:02d}",
-        "end": (
-            END_OF_DAY
-            if clipped_end == day_end
-            else f"{clipped_end.hour:02d}:{clipped_end.minute:02d}"
-        ),
-    }
+        return _OUTSIDE
+    start_hm = f"{clipped_start.hour:02d}:{clipped_start.minute:02d}"
+    end_hm = (
+        END_OF_DAY if clipped_end == day_end else f"{clipped_end.hour:02d}:{clipped_end.minute:02d}"
+    )
+    if start_hm == end_hm:
+        return _OUTSIDE
+    return {"start": start_hm, "end": end_hm}
 
 
 def _read_absences(row: dict[str, Any], day: date_cls | None) -> dict[str, Any]:
-    parsed = read_list(row, "absences", lambda item: _absence_row(item, day))
-    if parsed["state"] != PARSED:
-        return parsed
-    rows = [r for r in parsed["rows"] if not r.get("outside")]
-    # Все опознанные строки оказались не про эти сутки — отсутствий сегодня нет.
-    return {**parsed, "state": PARSED if rows else NONE, "rows": rows}
+    """Список отсутствий с тем же правилом четырёх состояний, что у остальных.
+
+    Своя петля, а не ``read_list``: тому «опознана, но не про эти сутки»
+    неизвестно, и неопознанная строка рядом с такой пропала бы молча —
+    список ответил бы «отсутствий нет».
+    """
+
+    if "absences" not in row:
+        return {"state": ABSENT, "rows": [], "seen_fields": []}
+    raw = row.get("absences")
+    if not isinstance(raw, list) or not raw:
+        return {"state": NONE, "rows": [], "seen_fields": []}
+
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    unrecognised = 0
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        seen |= set(item)
+        parsed = _absence_row(item, day)
+        if parsed is None:
+            unrecognised += 1
+        elif parsed is not _OUTSIDE:
+            rows.append(parsed)
+
+    if rows:
+        return {"state": PARSED, "rows": rows, "seen_fields": sorted(seen)}
+    if unrecognised:
+        # Строки БЫЛИ, и хотя бы одну мы не поняли: «отсутствий нет» сказать нельзя.
+        return {"state": UNREADABLE, "rows": [], "seen_fields": sorted(seen)}
+    return {"state": NONE, "rows": [], "seen_fields": sorted(seen)}
 
 
 def _closure_row(item: dict[str, Any]) -> dict[str, Any] | None:

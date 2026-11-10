@@ -345,7 +345,7 @@ function adminRouteElements(me: MeResponse): React.ReactNode {
         path="/admin/schedule/master/:masterId"
         element={
           canOpenSalonPilot(me) ? (
-            <SalonPilotScheduleMasterScreen />
+            <SalonPilotScheduleMasterScreen me={me} />
           ) : (
             <AdminSectionDeniedScreen me={me} section="Расписание" />
           )
