@@ -79,6 +79,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import re
 import struct
 from dataclasses import dataclass
 from enum import Enum
@@ -248,6 +249,12 @@ def _slug_hash(channel: str, channel_user_id: str) -> str:
     return hashlib.sha256(raw).hexdigest()[:8]
 
 
+#: ``Tenant.slug`` is ``SlugField(max_length=50)``.
+SOLO_SLUG_MAX_LEN = 50
+#: The suffix ``_next_solo_slug`` writes: ASCII digits, no leading zero.
+_SUFFIX_RE = re.compile(r"[1-9][0-9]*")
+
+
 def _solo_tenant_slug(channel: str, channel_user_id: str) -> str:
     """Solo tenant slug shape: `solo-{channel-trimmed}-{8-hex}`.
 
@@ -282,7 +289,9 @@ def is_own_solo_slug(slug: str, channel: str, channel_user_id: str) -> bool:
         return True
     prefix = f"{base}-"
     tail = slug[len(prefix) :]
-    return slug.startswith(prefix) and tail.isdigit() and int(tail) >= 2
+    # ASCII digits, no leading zero: ``-02`` and ``-²`` are not what
+    # ``_next_solo_slug`` writes, so they are not one's own either.
+    return slug.startswith(prefix) and _SUFFIX_RE.fullmatch(tail) is not None and int(tail) >= 2
 
 
 def solo_tenant_family(channel: str, channel_user_id: str) -> list[Tenant]:
@@ -312,14 +321,21 @@ def _next_solo_slug(base: str, taken: set[str]) -> str:
 
     Length stays within ``SlugField(max_length=50)`` for every real channel
     (``solo-max-`` + 8 hex = 17 chars; the longest, ``telegram``/``whatsapp``,
-    gives 22) — a dozen digits of headroom.
+    gives 22) — a dozen digits of headroom. A channel name long enough to use
+    the base's whole 50 is refused by name here rather than as a database
+    error later.
     """
     if base not in taken:
         return base
     n = 2
     while f"{base}-{n}" in taken:
         n += 1
-    return f"{base}-{n}"
+    slug = f"{base}-{n}"
+    if len(slug) > SOLO_SLUG_MAX_LEN:
+        raise SoloOnboardingError(
+            f"next solo slug would be {len(slug)} chars, over {SOLO_SLUG_MAX_LEN}"
+        )
+    return slug
 
 
 def _advisory_lock_key(channel: str, channel_user_id: str) -> int:

@@ -47,7 +47,8 @@
 * **роль владельца салона** не снимается: у салона один владелец, и только
   он выдаёт код владельца; снять её — оставить салон, в который никто не
   войдёт. Шаг называет это в ``detail`` (``owner_role_kept``) и пишет в лог;
-  передача салона — отдельная операция, которой ещё нет.
+  передача салона — отдельная операция, которой ещё нет. Исключение — свой
+  соло-кабинет, где человек один: он закрывается целиком, см. ниже.
 
 «Удалить мои данные» (отзыв хранения) этот шаг не зовёт: там человек остаётся
 сотрудником, и роль — доступ, а не память (решение владельца 20.09, §58).
@@ -55,9 +56,10 @@
 # Свой соло-кабинет: карточка — не запись салона (решение владельца 09.11.2026)
 
 У соло-мастера «салон» — он сам: карточка мастера и название кабинета
-«Студия {имя}» говорят о нём, а не о чьём-то сотруднике. Роль владельца
-каскад не снимает, связь с карточкой остаётся — и до правки карточка
-пропускалась целиком: аккаунт удалён, а имя, фото и описание лежат дальше.
+«Студия {имя}» говорят о нём, а не о чьём-то сотруднике. До 09.11.2026
+карточка пропускалась целиком (роль владельца не снималась, связь
+оставалась, и карточка шла по правилу салона): аккаунт удалён, а имя, фото
+и описание лежали дальше.
 
 Каталог свою половину уже стёр (``users/deletion_executor.py``): профиль —
 ``display_name`` «Удалён», аватар и описание убраны, приём записей выключен;
@@ -68,8 +70,8 @@
 
 «Свой соло-кабинет» — два локальных факта, без похода в сеть (шаг идёт
 внутри запроса каталога): слаг кабинета выведен из личности этой оболочки
-(``_solo_tenant_slug`` — так кабинет заводит саморегистрация) и в кабинете
-больше никого нет. «Никого» — то же правило состава, что у проверки
+(``solo_onboarding.is_own_solo_slug`` — база саморегистрации или она же с
+суффиксом ``-N`` повторного кабинета) и в кабинете больше никого нет. «Никого» — то же правило состава, что у проверки
 допустимости (``deletion_eligibility._scan_cabinet``): нет чужой действующей
 роли и нет живой карточки, привязанной к другому человеку. Неотвеченное
 приглашение — не человек, а вторая оболочка того же человека — не «другой».
@@ -92,6 +94,18 @@
 человеку саморегистрация заводит НОВЫЙ кабинет под следующим суффиксом
 слага (``solo_onboarding.is_own_solo_slug``) — закрытый остаётся надгробием.
 Половина каталога (архив соло-workspace, снятие публикации) — его правка.
+
+Кандидаты на закрытие и своя карточка ищутся по тому, что переживает сбой:
+по ОБОЛОЧКАМ человека (их тенанты) и по стабильному ключу карточки
+(``external_id`` саморегистрации), а не по живым ролям и связям. Отзыв
+ролей — своя транзакция на пару; упади стирание после него, повтор застал
+бы роли снятыми, карточку отвязанной и без ключа личности — и по ним
+кабинет было бы уже не найти, а шаг отчитался бы «готово» с именем на
+карточке и открытым кабинетом. Закрытие пишет строку аудита
+(``SOLO_CABINET_CLOSED``) в той же транзакции. Саморегистрация и закрытие
+не берут общий замок: нажатие «завести кабинет» наперегонки с удалением
+аккаунта может получить ``PartialStateError`` — на масштабе пилота это
+названо, а не устранено.
 """
 
 from __future__ import annotations
@@ -201,12 +215,14 @@ def remove_staff_access(shells: list[BotUser], ayla_user_id: uuid.UUID, *, reque
                     card.linked_bot_user,
                 )
 
-        # Свои соло-кабинеты, где человек один: закрываются целиком (см. докстринг).
+        # Свои соло-кабинеты, где человек один: закрываются целиком. Кандидаты —
+        # по оболочкам, не по живым ролям: повтор после сбоя застаёт роли уже
+        # снятыми (см. докстринг), оболочка же остаётся.
         closing: dict[Any, Tenant] = {
-            tenant.id: tenant
-            for tenant, _bot_user in pairs.values()
-            if _is_own_solo_cabinet(tenant.slug, shells)
-            and _nobody_else_in_cabinet(tenant.id, shell_ids)
+            shell.tenant_id: shell.tenant
+            for shell in shells
+            if _is_own_solo_cabinet(shell.tenant.slug, shells)
+            and _nobody_else_in_cabinet(shell.tenant_id, shell_ids)
         }
 
         for tenant, bot_user in pairs.values():
@@ -229,12 +245,18 @@ def remove_staff_access(shells: list[BotUser], ayla_user_id: uuid.UUID, *, reque
                 continue
             roles += len(result.roles_revoked)
 
-        # Карточки человека: те, что были привязаны к его оболочкам, и те, что
+        # Карточки человека: те, что были привязаны к его оболочкам, те, что
         # несут его ``ayla_user_id`` (связь могла быть снята раньше, а ключ
-        # личности — остаться).
+        # личности — остаться), и своя карточка в закрываемом кабинете по
+        # ключу саморегистрации — она переживает и снятую связь, и стёртый ключ.
+        from apps.identity.services.solo_onboarding import _solo_external_id
+
+        own_card_keys = [_solo_external_id(shell.id) for shell in shells]
         with transaction.atomic():
             mine = CatalogMaster.all_tenants.select_for_update().filter(
-                Q(pk__in=[card.pk for card in linked]) | Q(ayla_user_id=ayla_user_id)
+                Q(pk__in=[card.pk for card in linked])
+                | Q(ayla_user_id=ayla_user_id)
+                | Q(tenant_id__in=list(closing), external_id__in=own_card_keys)
             )
             for card in mine:
                 if _is_own_solo_cabinet(card.tenant.slug, shells):
@@ -261,7 +283,7 @@ def remove_staff_access(shells: list[BotUser], ayla_user_id: uuid.UUID, *, reque
                 card.save(update_fields=["ayla_user_id", "max_handle", "raw"])
                 cards += 1
             for tenant in closing.values():
-                solo_closed += _close_solo_cabinet(tenant, shell_ids)
+                solo_closed += _close_solo_cabinet(tenant, shell_ids, request_id=request_id)
     except Exception:  # noqa: BLE001 — шаг называет сбой, а не роняет каскад
         logger.exception(
             "identity.account_deletion.staff_access_revoke_failed request_id=%s", request_id
@@ -291,26 +313,47 @@ def _is_own_solo_cabinet(slug: str, shells: list[BotUser]) -> bool:
     )
 
 
-def _close_solo_cabinet(tenant: Tenant, shell_ids: list[Any]) -> int:
+def _close_solo_cabinet(tenant: Tenant, shell_ids: list[Any], *, request_id: str) -> int:
     """Закрыть свой соло-кабинет; ``1`` — что-то изменилось. Идемпотентно.
 
     Роли человека в кабинете снимает отзыв выше (``allow_owner``); здесь
-    добираются те, что он мог не застать (повтор шага после сбоя, когда
-    карточка уже отвязана и пара в отзыв не попала), и выключается сам
-    тенант. Зовётся внутри транзакции шага.
+    добираются те, что он мог не застать (повтор шага после сбоя: отзыв
+    своей транзакцией уже прошёл, а пара в него больше не попадает), и
+    выключается сам тенант. Зовётся внутри транзакции шага; строка аудита
+    пишется там же — аудит об откатившемся закрытии был бы ложью.
     """
+    from apps.audit.services import write_audit
+    from apps.events.vocabulary import SOLO_CABINET_CLOSED
+    from apps.tenancy.context import tenant_scope
     from apps.tenancy.models import TenantStaff
 
-    changed = TenantStaff.all_tenants.filter(
+    roles_deactivated = TenantStaff.all_tenants.filter(
         tenant_id=tenant.id, bot_user_id__in=shell_ids, deactivated_at__isnull=True
     ).update(deactivated_at=timezone.now())
-    if tenant.is_active:
+    tenant_closed = bool(tenant.is_active)
+    if tenant_closed:
         tenant.is_active = False
         tenant.save(update_fields=["is_active", "updated_at"])
-        changed += 1
-    if changed:
-        logger.info("identity.account_deletion.solo_cabinet_closed tenant=%s", tenant.id)
-    return 1 if changed else 0
+    if not roles_deactivated and not tenant_closed:
+        return 0
+    with tenant_scope(tenant):
+        write_audit(
+            SOLO_CABINET_CLOSED,
+            target="tenancy.Tenant",
+            target_id=tenant.id,
+            payload={
+                "request_id": request_id,
+                "roles_deactivated": roles_deactivated,
+                "surface": REVOKE_SURFACE,
+            },
+        )
+    logger.info(
+        "identity.account_deletion.solo_cabinet_closed request_id=%s tenant=%s roles=%s",
+        request_id,
+        tenant.id,
+        roles_deactivated,
+    )
+    return 1
 
 
 def _nobody_else_in_cabinet(tenant_id: Any, shell_ids: list[Any]) -> bool:

@@ -28,7 +28,14 @@
 * c9 — два открытых кабинета одной личности — ``PartialStateError``, не третий;
 * c10 — дверь салон-бота: удалённому владельцу предлагают кабинет, а не «уже есть»;
   регистрация даёт ``base-2`` и текст «кабинет заведён»;
-* c11 — в журнале шага нет имени человека.
+* c11 — в журнале шага нет имени человека;
+* c12 — сбой внутри транзакции шага после отзыва ролей: повтор находит кабинет и
+  карточку (по оболочкам и ключу саморегистрации, не по снятым ролям и связям),
+  закрывает и стирает; до правки повтор отчитывался «готово» с именем на карточке;
+* c13 — отклонённая оператором личность (§6): «удалить и вернуться» дверь не
+  открывает — тот же текст с путём в поддержку;
+* c14 — закрытие пишет строку аудита в тенанте кабинета;
+* c15 — следующий суффикс длиннее 50 знаков — отказ по имени, не ошибка базы.
 """
 
 from __future__ import annotations
@@ -41,11 +48,15 @@ import pytest
 from apps.catalog.models import CatalogMaster
 from apps.channels.max import salon_handler
 from apps.channels.max.parser import CanonicalEvent
-from apps.identity.models import BotUser
+from apps.audit.models import AuditLog
+from apps.events.vocabulary import SOLO_CABINET_CLOSED
+from apps.identity.models import BotUser, SoloIdentityLink
 from apps.identity.services import account_deletion
 from apps.identity.services.account_deletion import STAFF_ACCESS_STEP, execute_bot_half
 from apps.identity.services.solo_onboarding import (
+    SoloOnboardingError,
     SoloOnboardingPartialStateError,
+    _next_solo_slug,
     _solo_tenant_slug,
     active_solo_tenant,
     create_solo_provider,
@@ -199,10 +210,19 @@ def test_c6_which_slugs_are_ones_own() -> None:
     stranger = _solo_tenant_slug(channel, "somebody-else")
 
     mine = [base, f"{base}-2", f"{base}-10"]
-    not_mine = [f"{base}-1", f"{base}-0", f"{base}-x", f"{base}-", f"{base}-2-3", stranger]
+    not_mine = [
+        f"{base}-1",
+        f"{base}-0",
+        f"{base}-02",
+        f"{base}-²",
+        f"{base}-x",
+        f"{base}-",
+        f"{base}-2-3",
+        stranger,
+    ]
 
     assert [is_own_solo_slug(s, channel, channel_user_id) for s in mine] == [True] * 3
-    assert [is_own_solo_slug(s, channel, channel_user_id) for s in not_mine] == [False] * 6
+    assert [is_own_solo_slug(s, channel, channel_user_id) for s in not_mine] == [False] * 8
 
 
 # ─── возврат ─────────────────────────────────────────────────────────────────
@@ -348,3 +368,96 @@ def test_c11_the_log_carries_no_name(quiet_cascade: None, caplog: pytest.LogCapt
     assert closed, "закрытие кабинета должно попасть в журнал"
     assert all(PERSON_NAME not in r.getMessage() for r in caplog.records)
     assert all("Ольга" not in r.getMessage() for r in caplog.records)
+
+
+def test_c12_a_retry_after_a_failure_still_finds_and_closes_the_cabinet(
+    quiet_cascade: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Красный до правки: повтор отчитывался «roles=0 cards=0», кабинет открыт, имя на карточке."""
+    made = _register(*_identity("c12"))
+    real_erase = account_deletion._erase_solo_card
+    blown = {"once": False}
+
+    def erase_once_failing(card: Any) -> int:
+        if not blown["once"]:
+            blown["once"] = True
+            raise RuntimeError("database down")
+        return real_erase(card)
+
+    monkeypatch.setattr(account_deletion, "_erase_solo_card", erase_once_failing)
+
+    first = _delete(made.bot_user)
+
+    assert first.all_ok is False
+    # Отзыв ролей прошёл своей транзакцией (строки — история, активных нет);
+    # стирание и закрытие откатились.
+    rows = TenantStaff.all_tenants.filter(bot_user=made.bot_user)
+    assert sorted(rows.values_list("role", flat=True)) == ["admin", "owner"]
+    assert rows.filter(deactivated_at__isnull=True).count() == 0
+    assert _tenant(made.tenant.pk).is_active is True
+    assert CatalogMaster.all_tenants.get(pk=made.master.pk).name == PERSON_NAME
+
+    second = _delete(made.bot_user)
+
+    assert second.all_ok is True
+    assert _detail(second) == "roles=0 cards=0 solo_cards_erased=1 solo_cabinets_closed=1"
+    assert _tenant(made.tenant.pk).is_active is False
+    card = CatalogMaster.all_tenants.get(pk=made.master.pk)
+    assert card.archived_at is not None
+    assert card.name != PERSON_NAME
+    # И возврат после этого — новый кабинет, а не ``PartialStateError``.
+    channel, channel_user_id = made.bot_user.channel, made.bot_user.channel_user_id
+    assert _register(channel, channel_user_id).tenant.slug == f"{made.tenant.slug}-2"
+
+
+def test_c13_a_rejected_identity_cannot_return_through_deletion(
+    quiet_cascade: None, said: list[dict]
+) -> None:
+    """Красный до правки: после закрытия кабинета отклонённому снова предлагали завести его."""
+    from django.contrib.auth import get_user_model
+
+    from apps.identity.services.solo_identity_link import (
+        REJECTED_RECOVERY_TEXT,
+        reject_by_operator,
+    )
+
+    channel, channel_user_id = _identity("c13")
+    salon_handler._register_solo_provider(
+        _event(salon_handler.SOLO_REGISTER_CALLBACK, channel_user_id), entry=None
+    )
+    link = SoloIdentityLink.objects.get(channel=channel, channel_user_id=channel_user_id)
+    operator = get_user_model().objects.create_user(username="op-c13", password="x")  # noqa: S106
+    reject_by_operator(link, operator=operator, reason="identity_unverifiable")
+    opened = active_solo_tenant(channel, channel_user_id)
+    assert opened is not None
+    shell = BotUser.all_tenants.get(tenant=opened, channel=channel, channel_user_id=channel_user_id)
+    _delete(shell)
+    assert active_solo_tenant(channel, channel_user_id) is None  # кабинет закрыт
+    said.clear()
+
+    salon_handler._ask_for_code_with_solo_offer(_event("привет", channel_user_id), entry=None)
+
+    assert len(said) == 1
+    assert said[0]["text"] == REJECTED_RECOVERY_TEXT
+    assert salon_handler.SOLO_OFFER.strip() not in said[0]["text"]
+
+
+def test_c14_the_closure_is_audited_in_the_cabinets_tenant(quiet_cascade: None) -> None:
+    made = _register(*_identity("c14"))
+
+    _delete(made.bot_user)
+
+    rows = list(AuditLog.objects.filter(tenant=made.tenant, action=SOLO_CABINET_CLOSED))
+    assert len(rows) == 1
+    assert rows[0].target_id == made.tenant.id
+    assert rows[0].payload["request_id"] == "cabinet-closure"
+    assert rows[0].payload["surface"] == "account_deletion"
+    assert PERSON_NAME not in str(rows[0].payload)
+
+
+def test_c15_a_suffix_over_the_slug_limit_is_refused_by_name() -> None:
+    base_48 = "x" * 48
+
+    assert _next_solo_slug(base_48, {base_48}) == f"{base_48}-2"
+    with pytest.raises(SoloOnboardingError):
+        _next_solo_slug("x" * 49, {"x" * 49})

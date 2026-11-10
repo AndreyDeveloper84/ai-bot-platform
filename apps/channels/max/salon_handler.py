@@ -1454,6 +1454,15 @@ def _greet_stranger(event: CanonicalEvent, *, entry=None) -> None:
         _reply(event, SOLO_ALREADY_REGISTERED, attachments=_open_cabinet_attachments(entry))
         return
 
+    if _solo_identity_rejected(identity):
+        # Отказ оператора — о ЛИЧНОСТИ, а не о кабинете: закрытый удалением
+        # кабинет не открывает дверь заново (иначе «удалить и вернуться»
+        # обходило бы §6). Тот же безопасный текст с путём в поддержку.
+        from apps.identity.services.solo_identity_link import REJECTED_RECOVERY_TEXT
+
+        _reply(event, REJECTED_RECOVERY_TEXT)
+        return
+
     if not _stranger_may_be_answered(event):
         return
     buttons: list[dict[str, str]] = []
@@ -1576,6 +1585,12 @@ def _start_solo_registration(event: CanonicalEvent, identity: "_Identity", *, en
             _reply(event, REJECTED_RECOVERY_TEXT)
             return
         _reply(event, SOLO_ALREADY_REGISTERED, attachments=_open_cabinet_attachments(entry))
+        return
+    if _solo_identity_rejected(identity):
+        # Отказ — о личности; после закрытия кабинета он в силе (см. дверь).
+        from apps.identity.services.solo_identity_link import REJECTED_RECOVERY_TEXT
+
+        _reply(event, REJECTED_RECOVERY_TEXT)
         return
 
     draft = drafts.start_draft(

@@ -148,6 +148,13 @@ STAFF_INVITE_ISSUED = "staff.invite_issued"
 # describing a rollback would be a lie.
 STAFF_ACCESS_REVOKED = "staff.access_revoked"
 
+# --- Solo cabinet closed with the account (owner's decision 2026-11-10) ----
+# Emitted from apps.identity.services.account_deletion when the deletion
+# cascade closes a one-person solo cabinet: Tenant.is_active=False, the
+# person's remaining roles deactivated. Written inside the step's
+# transaction. Payload: {request_id, roles_deactivated, surface}. No names.
+SOLO_CABINET_CLOSED = "staff.solo_cabinet_closed"
+
 # --- Staff role management from Django Admin (DRF-2082) -------------------
 # Emitted from apps.identity.services.staff_roles when a platform operator
 # grants or changes a salon role by hand (no invite code). One row per
@@ -477,6 +484,7 @@ CANONICAL_EVENTS: frozenset[str] = frozenset(
         MASTER_INVITE_DISPATCHED,
         STAFF_INVITE_ISSUED,
         STAFF_ACCESS_REVOKED,
+        SOLO_CABINET_CLOSED,
         STAFF_SPECIALIST_ONBOARDED,
         STAFF_ROLE_GRANTED,
         STAFF_ROLE_CHANGED,
