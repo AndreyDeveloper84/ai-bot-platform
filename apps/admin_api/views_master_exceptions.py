@@ -141,7 +141,11 @@ def _exception_row(item: dict[str, Any]) -> dict[str, Any] | None:
         # обеда» повтором шаблона и сняло бы изменение вместе с заметкой.
         "break_start": _hhmm(item.get("break_start")) if working else None,
         "break_end": _hhmm(item.get("break_end")) if working else None,
-        "note": str(item.get("note") or ""),
+        # Только факт: экрану нужно знать, что заметка есть, а не что в ней
+        # написано. Текст заметки — свободная запись салона о дне мастера, и
+        # этот ответ читает ресепшн; сама заметка при правке даты сохраняется
+        # сервером из его собственного чтения (_prepare_date_exception).
+        "has_note": bool(str(item.get("note") or "").strip()),
     }
 
 

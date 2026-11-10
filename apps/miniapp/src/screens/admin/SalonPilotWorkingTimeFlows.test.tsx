@@ -156,7 +156,7 @@ function exceptionsNow(): MasterExceptions {
               end: date.is_working_day ? date.end : null,
               break_start: date.is_working_day ? date.break_start : null,
               break_end: date.is_working_day ? date.break_end : null,
-              note: date.note,
+              has_note: date.note.trim() !== "",
             },
           ],
           seen_fields: [],
