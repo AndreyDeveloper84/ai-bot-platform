@@ -291,6 +291,12 @@ const EXPECTED_ADMIN_SCREENS = [
   "AdminMasterDetailScreen",
   "AdminNewBookingScreen",
   "AdminReadinessScreen",
+  // DRF-2936 — «Рабочее время»: список и неделя держат панель пилота сами
+  // (`<SalonPilotTabBar active="schedule">`), не через рамку, — и корнями не
+  // являются: вход из «Расписания», возврат объявлен.
+  "SalonPilotWorkingTimeDayScreen",
+  "SalonPilotWorkingTimeScreen",
+  "SalonPilotWorkingTimeWeekScreen",
 ];
 
 describe("DRF-2368 · экран кабинета без нижней навигации объявляет возврат", () => {

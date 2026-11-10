@@ -25,12 +25,13 @@ from django.test import Client
 from django.urls import reverse
 
 from apps.catalog.models import CatalogMaster
+from apps.channels.bot_registry import SALON_STREAM, BotEntry
 from apps.identity.models import BotUser
 from apps.integrations.ayla.salon_client import SalonUnavailable, SalonValidationError
 from apps.tenancy.models import Tenant
 from tests.support.catalog_mirror import sync_shaped
 
-from .conftest import init_data_header
+from .conftest import BOT_TOKEN, init_data_header
 
 pytestmark = pytest.mark.django_db
 
@@ -124,6 +125,21 @@ def _get(client: Client, master: CatalogMaster, *, user_id: str = "5001", **para
     return client.get(_url(master), query, HTTP_AUTHORIZATION=init_data_header(user_id))
 
 
+@pytest.fixture
+def salon_bot_signs(settings, tenant: Tenant) -> None:
+    """The test initData signed by the SALON bot (DRF-2936: ``writable``)."""
+
+    settings.MAX_BOT_REGISTRY = (
+        BotEntry(
+            slug="signer",
+            webhook_secret="",
+            api_token=BOT_TOKEN,
+            tenant_slug=tenant.slug,
+            stream=SALON_STREAM,
+        ),
+    )
+
+
 class TestTheSalonSeesWhatTheBlockWouldDisplace:
     def test_the_affected_bookings_come_back_parsed(
         self, client: Client, owner_bot_user: BotUser, synced_master: CatalogMaster, ayla
@@ -160,13 +176,56 @@ class TestTheSalonSeesWhatTheBlockWouldDisplace:
         assert "impact_token" not in body
         assert "tok-should-not-leak" not in resp_text(body)
 
-    def test_the_view_says_it_cannot_write_and_where_to_go(
+    def test_decisions_per_booking_stay_in_pro_app_whoever_asks(
         self, client: Client, owner_bot_user: BotUser, synced_master: CatalogMaster, ayla
     ) -> None:
         ayla()
         body = _get(client, synced_master).json()
         assert body["writable"] is False
         assert body["next_step"] == "pro_app"
+
+    def test_the_owner_from_the_salon_bot_may_close_time_but_not_decide_bookings(
+        self,
+        client: Client,
+        owner_bot_user: BotUser,
+        synced_master: CatalogMaster,
+        ayla,
+        salon_bot_signs,
+    ) -> None:
+        # DRF-2936: ``writable`` — может ли этот человек отсюда менять время
+        # мастера (тот же ответ, что у записи); ``next_step`` — где решать по
+        # каждой записи, и это по-прежнему Pro App.
+        ayla()
+        body = _get(client, synced_master).json()
+        assert body["writable"] is True
+        assert body["next_step"] == "pro_app"
+
+    def test_seconds_in_the_window_still_parse(
+        self, client: Client, owner_bot_user: BotUser, synced_master: CatalogMaster, ayla
+    ) -> None:
+        # Прежний разбор (time.fromisoformat) принимал секунды — контракт не сужен.
+        fake = ayla()
+
+        resp = _get(client, synced_master, **{"from": "10:00:00", "to": "14:00:00"})
+
+        assert resp.status_code == 200, resp.content
+        (call,) = fake.calls
+        assert call["start_at"] == "2026-09-15T10:00:00+03:00"
+
+    def test_end_of_day_reaches_the_next_midnight(
+        self, client: Client, owner_bot_user: BotUser, synced_master: CatalogMaster, ayla
+    ) -> None:
+        # Выходной на дату закрывает сутки целиком: ``to=24:00``.
+        fake = ayla()
+
+        resp = _get(client, synced_master, **{"from": "00:00", "to": "24:00"})
+
+        assert resp.status_code == 200, resp.content
+        (call,) = fake.calls
+        assert (call["start_at"], call["end_at"]) == (
+            "2026-09-15T00:00:00+03:00",
+            "2026-09-16T00:00:00+03:00",
+        )
 
     def test_no_bookings_is_a_named_empty_not_a_silence(
         self, client: Client, owner_bot_user: BotUser, synced_master: CatalogMaster, ayla

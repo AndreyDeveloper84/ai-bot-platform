@@ -103,6 +103,10 @@ class _Wire:
     ):
         self.exchanged: list[tuple[str, str]] = []
         self.sent: list[httpx.Request] = []
+        #: DRF-2936 — reads before a write (a duplicate time off, the weekday's
+        #: break, the date's note) ride the service key like every read; kept
+        #: apart so «the write rides the person's token» still counts writes.
+        self.read: list[httpx.Request] = []
         self.refuse = refuse
         self.catalog_status = catalog_status
 
@@ -113,6 +117,9 @@ class _Wire:
             return PersonToken(access_token=PERSON_TOKEN, tenant_slug=tenant_slug, expires_in=600)
 
         def handler(request: httpx.Request) -> httpx.Response:
+            if request.method == "GET":
+                self.read.append(request)
+                return httpx.Response(200, json={"data": []})
             self.sent.append(request)
             if self.catalog_status == 204:
                 return httpx.Response(204)

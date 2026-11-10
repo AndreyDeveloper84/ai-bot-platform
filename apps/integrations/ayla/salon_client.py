@@ -439,12 +439,18 @@ class AylaSalonClient:
         is_working_day: bool,
         start_time: str | None = None,
         end_time: str | None = None,
+        break_start: str | None = None,
+        break_end: str | None = None,
         note: str = "",
     ) -> dict[str, Any]:
         """``PUT tenants/me/masters/{specialist_id}/schedule-exceptions/`` as the person.
 
         One row per (master, date): «не работаю» on a date, or other hours on
         it. Ayla refuses a shrink that would strand a booking (409).
+
+        The PUT replaces the date's row whole: a break not sent is a break
+        erased. ``break_start``/``break_end`` go out only on a working day and
+        only as a pair (DRF-2936: the caller carries the weekday's break).
         """
 
         _require_id(specialist_id, field="specialist_id")
@@ -456,6 +462,9 @@ class AylaSalonClient:
         if is_working_day:
             body["start_time"] = start_time
             body["end_time"] = end_time
+            if break_start is not None and break_end is not None:
+                body["break_start"] = break_start
+                body["break_end"] = break_end
         return self._send_as_person(
             "PUT",
             f"masters/{specialist_id}/schedule-exceptions/",

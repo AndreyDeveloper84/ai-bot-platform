@@ -10367,3 +10367,745 @@ a {
   color: var(--c-text-secondary);
   font-size: var(--font-size-100);
 }
+
+/* ==========================================================================
+   DRF-2936 — «Рабочее время мастеров» салона (макет DRF-2865 FROZEN v1.0).
+   Карточки на светлом фоне, акцент — фиолетовый токен, мягкие фоны —
+   color-mix от токенов: своих цветов у раздела нет.
+   ========================================================================== */
+
+/* Шапка «Расписания»: «⋮» слева от аватара. */
+.salon-pilot__actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+}
+
+.wt-screen {
+  background: var(--c-bg);
+  padding-bottom: calc(var(--tabbar-height) + var(--safe-bottom) + var(--s-4));
+}
+.wt-screen--nested {
+  padding-bottom: calc(var(--safe-bottom) + var(--s-5));
+}
+.wt-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+  padding: var(--s-3) var(--s-4);
+}
+
+/* Шапка: «‹», заголовок по центру. */
+.wt-header {
+  display: grid;
+  grid-template-columns: 44px 1fr 44px;
+  align-items: center;
+  min-height: 56px;
+  padding: 0 var(--s-2);
+  background: var(--c-surface-1);
+  border-bottom: 1px solid var(--c-divider);
+}
+.wt-header__back {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 44px;
+  min-height: 44px;
+  background: transparent;
+  border: none;
+  color: var(--c-text-primary);
+  cursor: pointer;
+}
+.wt-header__back:focus-visible {
+  outline: 2px solid var(--c-accent);
+  outline-offset: 2px;
+  border-radius: var(--r-sm);
+}
+.wt-header__side {
+  width: 44px;
+}
+.wt-header__center {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  min-width: 0;
+}
+.wt-header__master {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  min-width: 0;
+}
+.wt-header__master-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.wt-header__title {
+  margin: 0;
+  font-size: var(--font-size-300);
+  font-weight: 600;
+  color: var(--c-text-primary);
+  text-align: center;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.wt-header__title--start {
+  text-align: start;
+}
+.wt-header__subtitle {
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Аватар: фото или инициалы. */
+.wt-avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  overflow: hidden;
+  border-radius: 50%;
+  background: var(--c-accent-subtle);
+  color: var(--c-accent);
+  font-weight: 600;
+}
+.wt-avatar--md {
+  width: 44px;
+  height: 44px;
+  font-size: var(--font-size-200);
+}
+.wt-avatar--sm {
+  width: 36px;
+  height: 36px;
+  font-size: var(--font-size-100);
+}
+.wt-avatar__img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.wt-avatar__initials {
+  line-height: 1;
+}
+
+/* Карточки состояний (кадры 4, 7–10): значок в круге, текст по центру. */
+.wt-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--s-2);
+  padding: var(--s-5) var(--s-4);
+  background: var(--c-surface-1);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-lg);
+  text-align: center;
+}
+.wt-state--page {
+  margin-top: calc(var(--s-6) * 3);
+}
+.wt-state__icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 64px;
+  height: 64px;
+  border-radius: 50%;
+}
+.wt-state--neutral .wt-state__icon,
+.wt-state--accent .wt-state__icon {
+  color: var(--c-accent);
+  background: var(--c-accent-subtle);
+}
+.wt-state--neutral {
+  background: color-mix(in srgb, var(--c-accent) 4%, var(--c-surface-1));
+}
+.wt-state--success .wt-state__icon {
+  color: var(--c-success);
+  background: color-mix(in srgb, var(--c-success) 12%, var(--c-surface-1));
+}
+.wt-state--warning .wt-state__icon {
+  color: var(--c-warning);
+  background: color-mix(in srgb, var(--c-warning) 14%, var(--c-surface-1));
+}
+.wt-state--danger .wt-state__icon {
+  color: var(--c-danger);
+  background: color-mix(in srgb, var(--c-danger) 10%, var(--c-surface-1));
+}
+.wt-state__title {
+  margin: 0;
+  font-size: var(--font-size-300);
+  font-weight: 600;
+  color: var(--c-text-primary);
+}
+.wt-state__body {
+  margin: 0;
+  font-size: var(--font-size-100);
+  line-height: var(--leading-base);
+  color: var(--c-text-secondary);
+}
+.wt-state__actions {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  align-self: stretch;
+  margin-top: var(--s-2);
+}
+.wt-btn {
+  width: 100%;
+  min-height: 48px;
+  border-radius: var(--r-md);
+  text-align: center;
+}
+
+/* Кадр 1 — поиск и список мастеров. */
+.wt-search {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  min-height: 44px;
+  padding: 0 var(--s-3);
+  background: var(--c-surface-2);
+  border-radius: var(--r-md);
+  color: var(--c-text-secondary);
+}
+.wt-search__icon {
+  display: inline-flex;
+}
+.wt-search__input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  background: transparent;
+  font-size: var(--font-size-200);
+  color: var(--c-text-primary);
+  outline: none;
+}
+.wt-masters {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+}
+.wt-master {
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+  width: 100%;
+  min-height: 60px;
+  padding: var(--s-2) var(--s-3);
+  background: var(--c-surface-1);
+  border: 1px solid transparent;
+  border-radius: var(--r-md);
+  text-align: start;
+  cursor: pointer;
+}
+.wt-master--selected {
+  background: var(--c-accent-subtle);
+  border-color: var(--c-accent);
+}
+.wt-master__text {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+}
+.wt-master__name {
+  font-size: var(--font-size-200);
+  font-weight: 600;
+  color: var(--c-text-primary);
+}
+.wt-master__spec {
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+.wt-master__mark {
+  display: inline-flex;
+  color: var(--c-text-secondary);
+}
+.wt-master--selected .wt-master__mark {
+  color: var(--c-accent);
+}
+
+/* Кадр 2 — неделя. */
+.wt-note {
+  margin: 0;
+  padding: var(--s-2) var(--s-3);
+  font-size: var(--font-size-100);
+  line-height: var(--leading-base);
+  color: var(--c-text-secondary);
+  background: var(--c-surface-1);
+  border-radius: var(--r-md);
+}
+.wt-note--warn {
+  color: var(--c-warning);
+  background: color-mix(in srgb, var(--c-warning) 10%, var(--c-surface-1));
+}
+.wt-weeknav {
+  display: grid;
+  grid-template-columns: 44px 1fr 44px;
+  align-items: center;
+  background: var(--c-surface-1);
+  border-radius: var(--r-md);
+}
+.wt-weeknav__btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 44px;
+  min-height: 44px;
+  background: transparent;
+  border: none;
+  color: var(--c-text-primary);
+  cursor: pointer;
+}
+.wt-weeknav__arrow {
+  display: inline-flex;
+}
+.wt-weeknav__arrow--prev {
+  transform: scaleX(-1);
+}
+.wt-weeknav__label {
+  text-align: center;
+  font-size: var(--font-size-200);
+  font-weight: 600;
+  color: var(--c-text-primary);
+}
+.wt-week {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  background: var(--c-surface-1);
+  border-radius: var(--r-lg);
+  overflow: hidden;
+}
+.wt-day {
+  display: grid;
+  grid-template-columns: 52px 1fr 24px;
+  align-items: center;
+  gap: var(--s-2);
+  width: 100%;
+  min-height: 56px;
+  padding: var(--s-2) var(--s-3);
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid var(--c-divider);
+  text-align: start;
+  cursor: pointer;
+}
+.wt-week li:last-child .wt-day {
+  border-bottom: none;
+}
+.wt-day--past {
+  cursor: default;
+  opacity: 0.6;
+}
+.wt-day__label {
+  display: flex;
+  flex-direction: column;
+}
+.wt-day__weekday {
+  font-size: var(--font-size-200);
+  font-weight: 600;
+  color: var(--c-text-primary);
+}
+.wt-day__date {
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+.wt-day__value {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  min-width: 0;
+}
+.wt-day__hours {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-2);
+}
+.wt-day__note {
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+.wt-day__chevron {
+  display: inline-flex;
+  color: var(--c-text-secondary);
+}
+.wt-pill {
+  display: inline-block;
+  padding: 6px var(--s-3);
+  font-size: var(--font-size-200);
+  color: var(--c-text-primary);
+  background: var(--c-surface-2);
+  border-radius: var(--r-sm);
+}
+.wt-pill--off {
+  color: var(--c-danger);
+  background: color-mix(in srgb, var(--c-danger) 10%, var(--c-surface-1));
+}
+.wt-pill--warn {
+  color: var(--c-warning);
+  background: color-mix(in srgb, var(--c-warning) 12%, var(--c-surface-1));
+}
+.wt-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--c-success);
+}
+
+/* Кадры 3–6 — день. */
+.wt-editor {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+}
+.wt-card {
+  background: var(--c-surface-1);
+  border-radius: var(--r-md);
+}
+.wt-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-3);
+  min-height: 52px;
+  padding: var(--s-2) var(--s-3);
+}
+.wt-row .profile-toggle--on .profile-toggle__track {
+  background: var(--c-accent);
+}
+.wt-row--plain {
+  padding: var(--s-2) 0;
+}
+.wt-row--field {
+  padding: var(--s-1) 0;
+}
+.wt-row__label {
+  font-size: var(--font-size-200);
+  color: var(--c-text-primary);
+}
+.wt-row__label--muted {
+  color: var(--c-text-secondary);
+}
+.wt-row__value {
+  font-size: var(--font-size-200);
+  color: var(--c-text-primary);
+}
+.wt-scope {
+  margin: calc(-1 * var(--s-2)) 0 0;
+  padding: 0 var(--s-1);
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+.wt-section {
+  display: flex;
+  flex-direction: column;
+  padding: var(--s-3);
+  background: var(--c-surface-1);
+  border-radius: var(--r-md);
+}
+.wt-section__title {
+  margin: 0 0 var(--s-1);
+  font-size: var(--font-size-200);
+  font-weight: 600;
+  color: var(--c-text-primary);
+}
+.wt-select {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+.wt-select__input {
+  appearance: none;
+  min-width: 96px;
+  min-height: 40px;
+  padding: 0 32px 0 var(--s-3);
+  font-size: var(--font-size-200);
+  color: var(--c-text-primary);
+  background: var(--c-surface-2);
+  border: none;
+  border-radius: var(--r-sm);
+  cursor: pointer;
+}
+.wt-select__input:disabled {
+  cursor: default;
+  color: var(--c-text-secondary);
+}
+.wt-select__icon {
+  position: absolute;
+  right: var(--s-2);
+  display: inline-flex;
+  color: var(--c-text-secondary);
+  pointer-events: none;
+}
+.wt-offs {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+.wt-off {
+  display: flex;
+  align-items: center;
+  gap: var(--s-1);
+  padding: var(--s-2) var(--s-2) var(--s-2) var(--s-3);
+  background: color-mix(in srgb, var(--c-warning) 6%, var(--c-surface-1));
+  border-left: 3px solid var(--c-warning);
+  border-radius: var(--r-sm);
+}
+.wt-off--readonly {
+  border-left-color: var(--c-divider);
+  background: var(--c-surface-2);
+}
+.wt-off__text {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+}
+.wt-off__time {
+  font-size: var(--font-size-200);
+  font-weight: 600;
+  color: var(--c-text-primary);
+}
+.wt-off__reason {
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+.wt-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 44px;
+  min-height: 44px;
+  background: transparent;
+  border: none;
+  color: var(--c-accent);
+  cursor: pointer;
+}
+.wt-icon-btn--danger {
+  color: var(--c-danger);
+}
+.wt-add {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  min-height: 48px;
+  margin-top: var(--s-2);
+  padding: 0 var(--s-3);
+  font-size: var(--font-size-200);
+  font-weight: 500;
+  color: var(--c-accent);
+  background: var(--c-accent-subtle);
+  border: none;
+  border-radius: var(--r-md);
+  cursor: pointer;
+}
+.wt-add__icon {
+  display: inline-flex;
+}
+.wt-message {
+  margin: 0;
+  font-size: var(--font-size-100);
+  color: var(--c-danger);
+}
+.wt-actions {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+.wt-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+  margin: var(--s-2) 0;
+}
+.wt-field__label {
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+.wt-input {
+  min-height: 44px;
+  padding: 0 var(--s-3);
+  font-size: var(--font-size-200);
+  color: var(--c-text-primary);
+  background: var(--c-surface-2);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-sm);
+}
+
+/* Кадр 9 — карточка-пояснение под «Проверяем результат». */
+.wt-info {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s-2);
+  margin: 0;
+  padding: var(--s-3);
+  font-size: var(--font-size-100);
+  line-height: var(--leading-base);
+  text-align: start;
+  color: var(--c-text-secondary);
+  background: var(--c-accent-subtle);
+  border-radius: var(--r-md);
+}
+.wt-info__icon {
+  display: inline-flex;
+  flex: none;
+  color: var(--c-accent);
+}
+
+/* Кадр 7 — записи, мешающие правке. */
+.wt-conflicts {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  align-self: stretch;
+}
+.wt-conflict {
+  display: grid;
+  grid-template-columns: auto auto 1fr auto;
+  align-items: center;
+  gap: var(--s-2);
+  width: 100%;
+  min-height: 56px;
+  padding: var(--s-2) var(--s-3);
+  background: var(--c-surface-1);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-md);
+  text-align: start;
+  cursor: pointer;
+}
+.wt-conflict__time {
+  font-size: var(--font-size-200);
+  font-weight: 600;
+  color: var(--c-text-primary);
+}
+.wt-conflict__who {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.wt-conflict__name {
+  font-size: var(--font-size-100);
+  color: var(--c-text-primary);
+}
+.wt-conflict__service {
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+.wt-conflict__chevron {
+  display: inline-flex;
+  color: var(--c-text-secondary);
+}
+
+/* Кадр 8 — что сохранено. */
+.wt-summary {
+  align-self: stretch;
+  background: var(--c-surface-1);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-md);
+  text-align: start;
+}
+.wt-summary__row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-2);
+  width: 100%;
+  min-height: 56px;
+  padding: var(--s-2) var(--s-3);
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid var(--c-divider);
+  text-align: start;
+  cursor: pointer;
+}
+.wt-summary__row--static {
+  border-bottom: none;
+  cursor: default;
+}
+.wt-summary__text {
+  display: flex;
+  flex-direction: column;
+}
+.wt-summary__label {
+  font-size: var(--font-size-100);
+  font-weight: 600;
+  color: var(--c-text-primary);
+}
+.wt-summary__value {
+  font-size: var(--font-size-200);
+  color: var(--c-text-secondary);
+  white-space: pre;
+}
+.wt-summary__chevron {
+  display: inline-flex;
+  color: var(--c-text-secondary);
+}
+
+/* Меню «⋮» «Расписания». */
+.wt-menu {
+  position: relative;
+}
+.wt-menu__trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  background: var(--c-surface-2);
+  border: none;
+  border-radius: 50%;
+  color: var(--c-text-primary);
+  cursor: pointer;
+}
+.wt-menu__list {
+  position: absolute;
+  top: calc(100% + var(--s-1));
+  right: 0;
+  z-index: 20;
+  min-width: 200px;
+  padding: var(--s-1);
+  background: var(--c-surface-1);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-md);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.18);
+}
+.wt-menu__item {
+  display: block;
+  width: 100%;
+  min-height: 44px;
+  padding: 0 var(--s-3);
+  font-size: var(--font-size-200);
+  text-align: start;
+  color: var(--c-text-primary);
+  background: transparent;
+  border: none;
+  border-radius: var(--r-sm);
+  cursor: pointer;
+}
+
+/* «Сбросить» в строке восстановленного черновика. */
+.wt-link {
+  padding: 0;
+  font: inherit;
+  color: var(--c-accent);
+  background: transparent;
+  border: none;
+  text-decoration: underline;
+  cursor: pointer;
+}

@@ -10,15 +10,13 @@
 смены, а перечня «что уже назначено на ближайшие дни» нет ни на одном
 экране.
 
-**Записи здесь нет, и это не задел на будущее, а граница по факту.** Все
-восемь записывающих маршрутов салонной поверхности объявлены
-``SERVICE_READ_ONLY`` (``apps/integrations/ayla/salon_surface.py``). Из них
-weekly-шаблон закрыт **дважды** — сервисным креденшелом и открытым пробелом
-weekly-guard (В-4 row D), — а остальные шесть только креденшелом. По §117
-владелец разрешил использовать credential path **условно**: сначала три
-проверки (object authorization, tenant scope, audit attribution), потом
-использование, «иначе мы просто обменяем 8 SP разработки на скрытую
-privilege escalation». Проверки не сделаны, значит записи нет.
+**Сам вид только читает.** Отгул и изменение на дату пишутся соседним
+модулем ``views_salon_schedule_writes`` от имени человека (DRF-2607: токен
+администратора в каталоге, служебный ключ в записи не участвует — три
+проверки §117 у каталога). Недельный шаблон и закрытия салона не пишутся
+нигде (DRF-2605). Поле ``writable`` говорит экрану «Рабочее время»
+(DRF-2936), рисовать ли правку: тот же ответ, что у записи
+(``services.salon_write_access.schedule_writable``).
 
 # Почему мягкий разбор, а не строгий как в кадре
 
@@ -51,8 +49,8 @@ privilege escalation». Проверки не сделаны, значит за�
 что отдаёт этот вид.
 
 На чтение и только: декоратор пускает ресепшн лишь на безопасном методе, и
-вид отдельно объявлен GET-only. Записи здесь нет вовсе (см. ``writable``
-ниже), так что расширение прав на чтение не открывает ничего, кроме чтения.
+вид отдельно объявлен GET-only. Ей ``writable`` всегда ``false``: запись
+отгулов и изменений — ``require_admin_role``.
 """
 
 from __future__ import annotations
@@ -70,6 +68,7 @@ from django.views.decorators.http import require_http_methods
 
 from apps.catalog.specialist_ref import CatalogSpecialistUnresolved, catalog_specialist_id
 from apps.admin_api.auth import require_admin_or_reception_read
+from apps.admin_api.services.salon_write_access import schedule_writable
 from apps.admin_api.services.wire_lists import UNREADABLE, read_rows
 from apps.catalog.models import CatalogMaster
 from apps.tenancy.timezones import salon_zone
@@ -137,6 +136,12 @@ def _exception_row(item: dict[str, Any]) -> dict[str, Any] | None:
         # тем же ответом объявлено нерабочим.
         "start": _hhmm(item.get("start_time")) if working else None,
         "end": _hhmm(item.get("end_time")) if working else None,
+        # DRF-2936: перерыв и заметка даты — чем изменение отличается от
+        # шаблона кроме часов. Без них «Рабочее время» сочло бы «10–19 без
+        # обеда» повтором шаблона и сняло бы изменение вместе с заметкой.
+        "break_start": _hhmm(item.get("break_start")) if working else None,
+        "break_end": _hhmm(item.get("break_end")) if working else None,
+        "note": str(item.get("note") or ""),
     }
 
 
@@ -354,10 +359,10 @@ def master_exceptions(request: HttpRequest, master_id: str) -> HttpResponse:
         )
     payload["unreadable_lists"] = unreadable
 
-    # Записи здесь нет по факту границы, а не по забывчивости — см. докстринг
-    # модуля. Поле говорит это экрану, чтобы он не рисовал действий, которых
-    # сервер не примет.
-    payload["writable"] = False
+    # Рисовать ли правку — тот же ответ, что даст запись (роль + салонный
+    # бот), см. докстринг модуля. Экран не рисует действий, которых сервер не
+    # примет.
+    payload["writable"] = schedule_writable(request)
     return JsonResponse(payload)
 
 

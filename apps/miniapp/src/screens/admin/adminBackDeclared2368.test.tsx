@@ -39,6 +39,8 @@ const BACK_TARGETS: ReadonlyArray<readonly [string, string]> = [
   // Новая запись открывается и с «Сегодня», и с «Дня салона»: адрес берётся
   // из закрытого списка возвратов, а не из параметра ссылки.
   ["AdminNewBookingScreen", "returnTo.path"],
+  // DRF-2936: в список «Рабочего времени» входят из «Расписания».
+  ["SalonPilotWorkingTimeScreen", '"/admin/schedule"'],
 ];
 
 describe("Возврат объявлен адресом, и адрес тот самый", () => {
@@ -70,6 +72,19 @@ describe("Поток деактивации объявляет шаг, а не �
   });
 });
 
+describe("«Рабочее время»: неделя и день объявляют шаг, а не адрес (DRF-2936)", () => {
+  it.each(["SalonPilotWorkingTimeWeekScreen", "SalonPilotWorkingTimeDayScreen"])(
+    "%s возвращает действием",
+    (screen) => {
+      // Неделя ведёт в список с отмеченным мастером (адрес без состояния
+      // потерял бы отметку); день — по фазе: из конфликта к правке, из
+      // правки к неделе.
+      expect(source(screen)).toContain("backByAction(");
+      expect(source(screen)).toContain("useScreenBack(");
+    },
+  );
+});
+
 describe("Возврат в кабинете — адрес, а не история", () => {
   it.each([
     "AdminDeactivationFlowScreen",
@@ -78,6 +93,9 @@ describe("Возврат в кабинете — адрес, а не истор�
     "AdminMasterDetailScreen",
     "AdminNewBookingScreen",
     "AdminReadinessScreen",
+    "SalonPilotWorkingTimeScreen",
+    "SalonPilotWorkingTimeWeekScreen",
+    "SalonPilotWorkingTimeDayScreen",
   ])("%s не ходит по истории", (screen) => {
     // `navigate(-1)` в кабинете не встречался ни разу — пусть так и
     // останется: в приложение заходят по ссылке из бота, истории может не

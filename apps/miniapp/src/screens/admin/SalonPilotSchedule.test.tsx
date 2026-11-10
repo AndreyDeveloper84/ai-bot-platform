@@ -14,8 +14,8 @@
  *   и запись такое время отклонит. Подпись — то немногое, что экран вправе
  *   сделать, не заводя четвёртого вычислителя доступности.
  */
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { MemoryRouter } from "react-router-dom";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../../lib/admin-api", async (importOriginal) => {
@@ -148,6 +148,11 @@ function assignedNothing(
     writable: false,
     ...patch,
   };
+}
+
+function WorkingTimeProbe() {
+  const location = useLocation();
+  return <output data-testid="working-time-probe">{JSON.stringify(location.state ?? null)}</output>;
 }
 
 function renderScreen() {
@@ -985,6 +990,38 @@ describe("Закрыть время — кого затронет (§142, сре
     // Присутствие впереди отсутствия: ответ показан, значит и подсказка при нём.
     expect(await screen.findByText(/Pro App под своим именем/)).toBeTruthy();
     expect(screen.queryByRole("button", { name: /^Закрыть/ })).toBeNull();
+  });
+
+  it("подсказка не зависит от writable: закрывать время — в «Рабочем времени» (DRF-2936)", async () => {
+    // С DRF-2936 сервер говорит writable: true владельцу из салонного бота.
+    // Этот экран время всё равно не закрывает — кнопки нет и тогда.
+    mockedImpact.mockResolvedValue(impactOf({ writable: true }));
+    renderScreen();
+    await askForImpact();
+
+    expect(await screen.findByText(/можно в «Рабочем времени»/)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /^Закрыть/ })).toBeNull();
+  });
+
+  it("меню «⋮» — один пункт, «Рабочее время», и мастер уходит туда отмеченным", async () => {
+    render(
+      <MemoryRouter initialEntries={["/admin/schedule"]}>
+        <Routes>
+          <Route path="/admin/schedule" element={<SalonPilotScheduleScreen me={ME} />} />
+          <Route path="/admin/working-time" element={<WorkingTimeProbe />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    await screen.findByLabelText("Дата закрытия");
+
+    fireEvent.click(screen.getByRole("button", { name: "Ещё" }));
+    const menu = screen.getByRole("menu");
+    expect(within(menu).getAllByRole("menuitem").map((i) => i.textContent)).toEqual([
+      "Рабочее время",
+    ]);
+    fireEvent.click(within(menu).getByRole("menuitem", { name: "Рабочее время" }));
+
+    expect(await screen.findByTestId("working-time-probe")).toHaveTextContent('{"masterId":"m-1"}');
   });
 
   it("никого не затронет — сказано словами, а не пустотой", async () => {

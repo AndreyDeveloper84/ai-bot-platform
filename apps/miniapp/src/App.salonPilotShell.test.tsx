@@ -235,6 +235,18 @@ describe("нижняя навигация пилота (DRF-1235)", () => {
   });
 });
 
+describe("«Рабочее время» — раздел «Расписания» (DRF-2936)", () => {
+  it("открывается по своему адресу, и панель отмечает «Расписание»", async () => {
+    mockedGetMe.mockResolvedValue(OWNER_ME);
+    renderAppAt("/admin/working-time");
+    await screen.findByRole("heading", { name: "Рабочее время" });
+    const bar = screen.getByRole("navigation", { name: "Основная навигация" });
+    const current = Array.from(bar.querySelectorAll("[aria-current]"));
+    expect(current).toHaveLength(1);
+    expect(current[0]?.getAttribute("aria-label")).toBe("Расписание");
+  });
+});
+
 describe("права на пилот повторяют бэкенд (DRF-1235)", () => {
   it("администратор входит так же, как владелец", async () => {
     mockedGetMe.mockResolvedValue(ADMIN_ME);
@@ -289,6 +301,18 @@ describe("права на пилот повторяют бэкенд (DRF-1235)"
     renderAppAt("/admin/ayla");
     expect(await screen.findByRole("alert")).toHaveTextContent(
       /Раздел «Ayla» открыт владельцу и администратору/,
+    );
+  });
+
+  it.each([
+    "/admin/working-time",
+    "/admin/working-time/m-1",
+    "/admin/working-time/m-1/2031-01-10",
+  ])("ресепшн «Рабочее время» (%s) закрыто: график меняют владелец и администратор (DRF-2936)", async (path) => {
+    mockedGetMe.mockResolvedValue(RECEPTION_ME);
+    renderAppAt(path);
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      /Раздел «Рабочее время» открыт владельцу и администратору/,
     );
   });
 

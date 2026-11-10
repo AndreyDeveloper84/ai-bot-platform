@@ -25,10 +25,20 @@ type Phase =
 
 type Mode = "idle" | "cancel" | "reschedule" | "pending" | "conflict";
 
+/**
+ * День «Рабочего времени» (DRF-2936): из конфликта с записями человек уходит
+ * в карточку записи и возвращается к своему дню, где ждёт черновик. Адрес
+ * закрытого вида, а не любой: состояние маршрута приходит снаружи.
+ */
+const WORKING_TIME_DAY = /^\/admin\/working-time\/[0-9A-Za-z%_-]+\/\d{4}-\d{2}-\d{2}$/;
+
 function safeBack(state: unknown): string {
   if (state && typeof state === "object" && "from" in state) {
     const from = (state as { from?: unknown }).from;
-    if (typeof from === "string" && (from === "/admin/today" || from === "/admin/schedule")) {
+    if (
+      typeof from === "string" &&
+      (from === "/admin/today" || from === "/admin/schedule" || WORKING_TIME_DAY.test(from))
+    ) {
       return from;
     }
   }

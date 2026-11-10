@@ -31,6 +31,26 @@
 
 Недельный шаблон и закрытия салона здесь НЕ пишутся: шаблон ждёт сторожа
 сжатия, закрытия не открывались.
+
+# Экран «Рабочее время» салона (DRF-2936)
+
+* **Отгул в местной форме.** ``POST time-off/`` принимает и ``date`` +
+  ``from`` + ``to`` в часах салона (``to=24:00`` — конец суток); смещение
+  прикладывает сервер по поясу салона, как у предпросмотра
+  (``services.salon_window``). Прежняя форма ``start_at``/``end_at``
+  осталась; обе сразу — отказ. Ответ — в поясе салона, как у чтения.
+* **Повтор не ставит второй отгул.** Перед созданием бот читает отгулы
+  мастера; тот же интервал уже есть — ``200`` с ним и ``"existing": true``,
+  без записи. Повтор после потерянного ответа (``salon_write_outcome_unknown``)
+  иначе закрывал время дважды, а каталог сверяет новый отгул только с
+  записями клиентов.
+* **Изменение даты не стирает чужое.** PUT каталога заменяет строку даты
+  целиком; бот дописывает перерыв (самой даты, а если изменения на неё нет —
+  дня недели из шаблона) и прежнюю заметку даты (:func:`_prepare_date_exception`).
+* **Повтор — тот же интервал И та же причина.** Отгул с другой причиной —
+  новая строка, а не «такой уже есть».
+* **Можно ли писать** — один ответ с чтениями
+  (``services.salon_write_access.schedule_writable``).
 """
 
 from __future__ import annotations
@@ -39,6 +59,8 @@ import json
 import logging
 import re
 import uuid
+from datetime import date as date_cls
+from datetime import datetime, timedelta
 from typing import Any, Callable
 
 from django.http import HttpRequest, HttpResponse, JsonResponse
@@ -46,7 +68,9 @@ from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 
 from apps.admin_api.auth import require_admin_role
-from apps.channels.bot_registry import SALON_STREAM, effective_registry, resolve_by_slug
+from apps.admin_api.services.salon_window import WindowRefusal, parse_local_window
+from apps.admin_api.services.salon_write_access import signed_by_the_salon_bot
+from apps.admin_api.views_master_exceptions import _time_off_row
 from apps.catalog.models import CatalogMaster
 from apps.catalog.specialist_ref import CatalogSpecialistUnresolved, catalog_specialist_id
 from apps.integrations.ayla.person_token import (
@@ -66,7 +90,10 @@ from apps.integrations.ayla.salon_client import (
     SalonValidationError,
     get_salon_client,
 )
+from apps.integrations.ayla.user_proxy import external_user_id_for
+from apps.master_api.services.schedule_frame import _ayla_read_actor
 from apps.miniapp_api.auth import InitDataError, extract_init_data
+from apps.tenancy.timezones import salon_zone
 
 logger = logging.getLogger(__name__)
 
@@ -83,15 +110,6 @@ OUTCOME_UNKNOWN = "salon_write_outcome_unknown"
 
 def _refused() -> JsonResponse:
     return JsonResponse({"error": REFUSED}, status=403)
-
-
-def _signed_by_the_salon_bot(request: HttpRequest) -> bool:
-    """The catalog accepts only the salon-master bot's signature. The bot's own
-    gate accepts any registered bot — refuse here, before spending an exchange,
-    when the person opened the Mini App from another bot."""
-    verified = getattr(request, "verified_init_data", None)
-    entry = resolve_by_slug(getattr(verified, "bot_slug", "") or "", effective_registry())
-    return entry is not None and entry.stream == SALON_STREAM
 
 
 def _is_uuid(value: str) -> bool:
@@ -142,12 +160,18 @@ def salon_person_write(
     *,
     success_status: int,
     on_success: Callable[[CatalogMaster, dict[str, Any]], HttpResponse] | None = None,
+    precheck: Callable[[Any, CatalogMaster], HttpResponse | None] | None = None,
 ) -> HttpResponse:
     """Token → write → journal. Every refusal of the person answers the same.
 
     ``on_success`` — for a write whose answer the bot must mirror before
     replying (DRF-2619: the master's photo address). Without it the catalog's
     ``data`` goes back as is.
+
+    ``precheck`` — reads the write needs before it is sent (DRF-2936: a
+    duplicate time off, the weekday's break). Runs after every check of the
+    person and BEFORE the token exchange: an answer it returns ends the
+    request without spending an exchange, and nothing is written.
     """
 
     tenant = request.tenant  # type: ignore[attr-defined]
@@ -168,7 +192,7 @@ def salon_person_write(
             status=409,
         )
 
-    if not _signed_by_the_salon_bot(request):
+    if not signed_by_the_salon_bot(request):
         logger.info(
             "admin_api.salon_write.refused op=%s actor=%s tenant=%s reason=WRONG_BOT ours=no",
             op,
@@ -186,6 +210,11 @@ def salon_person_write(
             tenant.slug,
         )
         return _refused()
+
+    if precheck is not None:
+        early = precheck(client, master)
+        if early is not None:
+            return early
 
     verified = request.verified_init_data  # type: ignore[attr-defined]
     cache_key = (str(actor), tenant.slug, str(getattr(verified, "auth_date", "")))
@@ -295,18 +324,132 @@ def salon_person_write(
     return JsonResponse({"data": data}, status=success_status)
 
 
+_LOCAL_WINDOW_KEYS = ("date", "from", "to")
+_MOMENT_KEYS = ("start_at", "end_at")
+
+
+def _time_off_window(body: dict[str, Any], tenant: Any) -> tuple[str, str] | JsonResponse:
+    """Окно отгула из тела: моменты ``start_at``/``end_at`` или местная форма.
+
+    Местная форма (DRF-2936) — дата и часы САЛОНА, смещение прикладывает
+    сервер (``services.salon_window``): экран смещение не считает.
+    """
+
+    local = any(key in body for key in _LOCAL_WINDOW_KEYS)
+    moments = any(key in body for key in _MOMENT_KEYS)
+    if local and moments:
+        return JsonResponse(
+            {
+                "error": "validation",
+                "detail": "send either start_at/end_at or date/from/to, not both",
+            },
+            status=400,
+        )
+    if local:
+        parsed = parse_local_window(
+            body.get("date"), body.get("from"), body.get("to"), salon_zone(tenant)
+        )
+        if isinstance(parsed, WindowRefusal):
+            return JsonResponse({"error": "validation", "detail": parsed.detail}, status=400)
+        return parsed
+    if not body.get("start_at") or not body.get("end_at"):
+        return JsonResponse(
+            {"error": "validation", "detail": "start_at and end_at are required"}, status=400
+        )
+    return str(body["start_at"]), str(body["end_at"])
+
+
+def _same_window_time_off(
+    client: Any, master: CatalogMaster, start_at: str, end_at: str, reason: str
+) -> dict[str, Any] | None:
+    """Ровно такой отгул у мастера уже есть — его строка.
+
+    «Такой» — тот же интервал И та же причина. Только интервал был бы
+    ловушкой: правка причины («Личные дела» → «Врач») — это новая строка и
+    снятие старой; ответ «такой уже есть» со старой строкой и следом её
+    снятие оставили бы мастера без отгула вовсе.
+
+    Страховка от дубля, а не условие записи: не прочиталось — дубля не знаем,
+    и запись идёт. Окно чтения — сутки до и после по поясу салона: каталог
+    режет диапазон по датам в СВОЁМ поясе, и отгул у полуночи салона иначе
+    выпал бы из него.
+    """
+
+    try:
+        start = datetime.fromisoformat(start_at)
+        end = datetime.fromisoformat(end_at)
+    except ValueError:
+        return None
+    if start.tzinfo is None or end.tzinfo is None:
+        return None
+    tenant = master.tenant
+    actor_user = _ayla_read_actor(tenant)
+    if actor_user is None:
+        return None
+    zone = salon_zone(tenant)
+    try:
+        rows = client.list_time_off(
+            actor_external_id=external_user_id_for(actor_user),
+            tenant_slug=tenant.slug,
+            specialist_id=catalog_specialist_id(master),
+            date_from=(start.astimezone(zone).date() - timedelta(days=1)).isoformat(),
+            date_to=(end.astimezone(zone).date() + timedelta(days=1)).isoformat(),
+        )
+    except SalonAPIError as exc:
+        logger.warning(
+            "admin_api.salon_write.dedupe_unread tenant=%s err=%s", tenant.slug, type(exc).__name__
+        )
+        return None
+    for row in rows:
+        try:
+            same = (
+                datetime.fromisoformat(str(row.get("start_at"))) == start
+                and datetime.fromisoformat(str(row.get("end_at"))) == end
+            )
+        except (TypeError, ValueError):
+            continue
+        if same and str(row.get("reason") or "").strip() == reason.strip():
+            return row
+    return None
+
+
 @csrf_exempt
 @require_http_methods(["POST"])
 @require_admin_role
 def master_time_off(request: HttpRequest, master_id: str) -> HttpResponse:
     body = _body(request)
-    if body is None or not body.get("start_at") or not body.get("end_at"):
+    if body is None:
         return JsonResponse(
-            {"error": "validation", "detail": "start_at and end_at are required"}, status=400
+            {"error": "validation", "detail": "a JSON object is required"}, status=400
         )
     refused = _text_fields_refusal(body, "reason")
     if refused is not None:
         return refused
+    window = _time_off_window(body, request.tenant)  # type: ignore[attr-defined]
+    if isinstance(window, JsonResponse):
+        return window
+    start_at, end_at = window
+
+    reason = str(body.get("reason") or "")
+
+    def existing(client: Any, master: CatalogMaster) -> HttpResponse | None:
+        row = _same_window_time_off(client, master, start_at, end_at, reason)
+        if row is None:
+            return None
+        logger.info(
+            "admin_api.salon_write.deduplicated op=time_off_create actor=%s tenant=%s",
+            request.bot_user.pk,  # type: ignore[attr-defined]
+            master.tenant.slug,
+        )
+        mirrored = _time_off_row(row, salon_zone(master.tenant))
+        return JsonResponse({"data": {**row, **(mirrored or {})}, "existing": True}, status=200)
+
+    def in_salon_zone(master: CatalogMaster, data: dict[str, Any]) -> HttpResponse:
+        # The catalog answers in UTC; the screen reads the salon's clock (the
+        # same rule as the read, ``views_master_exceptions._in_zone``).
+        mirrored = _time_off_row(data, salon_zone(master.tenant))
+        return JsonResponse({"data": {**data, **(mirrored or {})}}, status=201)
+
     return salon_person_write(
         request,
         master_id,
@@ -315,11 +458,13 @@ def master_time_off(request: HttpRequest, master_id: str) -> HttpResponse:
             person_token=token,
             tenant_slug=slug,
             specialist_id=catalog_specialist_id(master),
-            start_at=str(body["start_at"]),
-            end_at=str(body["end_at"]),
-            reason=str(body.get("reason") or ""),
+            start_at=start_at,
+            end_at=end_at,
+            reason=reason,
         ),
         success_status=201,
+        on_success=in_salon_zone,
+        precheck=existing,
     )
 
 
@@ -356,6 +501,7 @@ def master_date_exception(request: HttpRequest, master_id: str) -> HttpResponse:
     refused = _text_fields_refusal(body, "note")
     if refused is not None:
         return refused
+    kept: dict[str, Any] = {"break_start": None, "break_end": None, "note": body.get("note")}
     return salon_person_write(
         request,
         master_id,
@@ -368,9 +514,187 @@ def master_date_exception(request: HttpRequest, master_id: str) -> HttpResponse:
             is_working_day=body["is_working_day"],
             start_time=body.get("start_time"),
             end_time=body.get("end_time"),
-            note=str(body.get("note") or ""),
+            break_start=kept["break_start"],
+            break_end=kept["break_end"],
+            note=str(kept["note"] or ""),
         ),
         success_status=200,
+        precheck=lambda client, master: _prepare_date_exception(client, master, body, kept),
+    )
+
+
+_HHMM_WIRE = re.compile(r"([01][0-9]|2[0-3]):[0-5][0-9](:[0-5][0-9])?")
+
+
+def _hhmm(value: Any) -> str | None:
+    """``"HH:MM"`` / ``"HH:MM:SS"`` → ``"HH:MM"``; иначе ``None``."""
+
+    if isinstance(value, str) and _HHMM_WIRE.fullmatch(value):
+        return value[:5]
+    return None
+
+
+def _break_of(row: dict[str, Any]) -> tuple[str, str] | None:
+    """Перерыв строки каталога (даты или дня недели); неполный — ``None``."""
+
+    start = _hhmm(row.get("break_start"))
+    end = _hhmm(row.get("break_end"))
+    return (start, end) if start is not None and end is not None else None
+
+
+def _break_inside(brk: tuple[str, str], start: str | None, end: str | None) -> bool:
+    """Перерыв целиком внутри часов ``start``–``end`` (часы неизвестны — нет)."""
+
+    return start is not None and end is not None and start <= brk[0] and brk[1] <= end
+
+
+def _prepare_date_exception(
+    client: Any, master: CatalogMaster, body: dict[str, Any], kept: dict[str, Any]
+) -> HttpResponse | None:
+    """Что сохранить вместе с изменением даты, чтобы не стереть чужое (DRF-2936).
+
+    PUT каталога заменяет строку даты целиком: всё, чего нет в теле, станет
+    пустым. Поэтому бот сначала читает строку этой даты и дописывает в ``kept``
+    то, чего экран не правит.
+
+    * **Перерыв.** Рабочий день без перерыва — это обед, ставший временем для
+      записи. Источник — сама дата, если у её рабочего изменения есть свой
+      перерыв: он правда о ней. Рабочее изменение БЕЗ перерыва читается по
+      его прежним часам. Обед дня недели в них помещался — «без обеда»
+      поставлено намеренно (Pro App «10–19 без обеда»), и правка часов его не
+      возвращает. Не помещался — обед выпал из-за часов (дату сужали до
+      10–13), и при расширении действует обед шаблона: иначе «сузил, потом
+      вернул» молча отдал бы обед под запись. Изменения на дату нет или оно
+      выходной — перерыв дня недели из шаблона. Перерыв переносится, если он
+      целиком внутри новых часов; целиком снаружи — не нужен; поперёк — отказ
+      с названной причиной: обрезать или выбросить его значило бы решить за
+      салон. Строка даты или шаблон не прочитаны — не пишем: неизвестный
+      перерыв не то же, что «перерыва нет».
+    * **Заметка даты.** Экран её не правит; тело без ``note`` сохраняет
+      прежнюю. У выходного (часов нет) строка не прочиталась — пишется пустая
+      заметка: заметка не время, и запрет записи из-за неё был бы хуже её
+      потери.
+    """
+
+    tenant = master.tenant
+    actor_user = _ayla_read_actor(tenant)
+    actor = external_user_id_for(actor_user) if actor_user is not None else None
+    day = str(body["date"])
+    start = _hhmm(body.get("start_time"))
+    end = _hhmm(body.get("end_time"))
+    with_hours = bool(body["is_working_day"]) and start is not None and end is not None
+
+    current: dict[str, Any] | None = None
+    current_known = False
+    if actor is not None:
+        try:
+            rows = client.list_schedule_exceptions(
+                actor_external_id=actor,
+                tenant_slug=tenant.slug,
+                specialist_id=catalog_specialist_id(master),
+                date_from=day,
+                date_to=day,
+            )
+        except (SalonAPIError, ValueError) as exc:
+            logger.warning(
+                "admin_api.salon_write.date_row_unread tenant=%s err=%s",
+                tenant.slug,
+                type(exc).__name__,
+            )
+        else:
+            current_known = True
+            current = next((r for r in rows if str(r.get("date")) == day), None)
+    if "note" not in body and current is not None:
+        kept["note"] = current.get("note") or ""
+
+    if not with_hours or start is None or end is None:
+        # Выходной перерыва не несёт; кривые часы отклонит каталог (400).
+        return None
+    try:
+        weekday = date_cls.fromisoformat(day).weekday()
+    except ValueError:
+        return None
+    if actor is None:
+        return JsonResponse(
+            {
+                "error": "schedule_source_not_configured",
+                "detail": f"no active owner/admin staff to read the schedule for {tenant.slug}; nothing was written",
+            },
+            status=503,
+        )
+    if not current_known:
+        return JsonResponse(
+            {
+                "error": "schedule_unavailable",
+                "detail": "could not read the date's row to keep its break; nothing was written",
+            },
+            status=503,
+        )
+
+    working_row = current if current is not None and current.get("is_working_day") else None
+    own_break = _break_of(working_row) if working_row is not None else None
+    if own_break is not None:
+        break_start, break_end = own_break
+    else:
+        try:
+            template = client.get_master_schedule(
+                actor_external_id=actor,
+                tenant_slug=tenant.slug,
+                specialist_id=catalog_specialist_id(master),
+            )
+        except SalonAPIError as exc:
+            logger.warning(
+                "admin_api.salon_write.template_unread tenant=%s err=%s",
+                tenant.slug,
+                type(exc).__name__,
+            )
+            return JsonResponse(
+                {
+                    "error": "schedule_unavailable",
+                    "detail": "could not read the weekly template to keep its break; nothing was written",
+                },
+                status=503,
+            )
+        row = next((r for r in template if r.get("day_of_week") == weekday), None)
+        if row is None:
+            return JsonResponse(
+                {
+                    "error": "schedule_unavailable",
+                    "detail": f"the weekly template has no row for weekday {weekday}; nothing was written",
+                },
+                status=503,
+            )
+        if not row.get("is_working_day"):
+            return None
+        weekday_break = _break_of(row)
+        if weekday_break is None:
+            return None
+        break_start, break_end = weekday_break
+        if working_row is not None and _break_inside(
+            weekday_break, _hhmm(working_row.get("start_time")), _hhmm(working_row.get("end_time"))
+        ):
+            # Обед дня недели помещался в прежние часы даты, а у даты его нет:
+            # «без обеда» поставлено намеренно, правка часов его не отменяет.
+            return None
+
+    if _break_inside((break_start, break_end), start, end):
+        kept["break_start"], kept["break_end"] = break_start, break_end
+        return None
+    if break_end <= start or break_start >= end:
+        return None
+    return JsonResponse(
+        {
+            "error": "validation",
+            "detail": "the day's break crosses the new hours",
+            "details": {
+                # Имя причины прежнее: экран уже его знает. Перерыв — даты или
+                # дня недели, смысл для человека один.
+                "reason": "template_break_crosses_hours",
+                "break_start": break_start,
+                "break_end": break_end,
+            },
+        },
+        status=400,
     )
 
 
