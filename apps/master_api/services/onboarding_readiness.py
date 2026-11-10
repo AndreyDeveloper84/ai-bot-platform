@@ -10,8 +10,9 @@
 ===============  ==========================================================  ==========================
 пункт            факт                                                        когда ``unknown``
 ===============  ==========================================================  ==========================
-``services``     выбор услуг мастера в каталоге (``services/selection``);    каталог молчит, а зеркало
-                 без субъекта — строки ``MasterService`` зеркала             «настроено» не говорит
+``services``     выбор услуг мастера в каталоге (``services/selection``);    каталог молчит или нет
+                 без субъекта — строки ``MasterService`` зеркала             субъекта у соло, а зеркало
+                                                                             «настроено» не говорит
 ``hours``        недельный шаблон из ``load_day_frame`` (Ayla при флаге)     канон не читается (DRF-1111)
 ``profile``      ``name`` и ``photo_url`` у ``CatalogMaster``                —
 ``location``     своё место мастера в каталоге (``service-locations``)       нет субъекта / каталог молчит
@@ -185,17 +186,22 @@ def build_readiness(master: CatalogMaster, *, actor: str | None = None) -> Readi
     ``actor`` — внешний идентификатор мастера (``external_user_id_for``): место
     работы и выбор услуг каталог отдаёт только под субъектом. Без него пункт
     ``location`` — ``unknown`` с причиной ``no_subject`` (карточка в админке
-    оператора), а не догадка; пункт ``services`` отвечает по зеркалу.
+    оператора), а не догадка; пункт ``services`` отвечает по зеркалу — кроме
+    соло-кабинета, где зеркало «нет» не видит: ответ тот же, ``no_subject``,
+    если зеркало само не говорит «настроено».
 
     DRF-2254: вид рабочего пространства — из каталога (``workspace_kind``).
     ``salon`` — место и услуги ведутся вне приложения; ``solo`` и «не знаю» —
     как прежде.
     """
 
-    salon_managed = workspace_kind(master.tenant_id) == "salon"
+    kind = workspace_kind(master.tenant_id)
+    salon_managed = kind == "salon"
     return Readiness(
         items=(
-            _managed_outside("services") if salon_managed else _services_item(master, actor),
+            _managed_outside("services")
+            if salon_managed
+            else _services_item(master, actor, solo=kind == "solo"),
             _managed_outside("location") if salon_managed else _location_item(master, actor),
             _hours_item(master),
             _profile_item(master),
@@ -208,7 +214,7 @@ def build_readiness(master: CatalogMaster, *, actor: str | None = None) -> Readi
 # ─── пункты ──────────────────────────────────────────────────────────────────
 
 
-def _services_item(master: CatalogMaster, actor: str | None) -> ReadinessItem:
+def _services_item(master: CatalogMaster, actor: str | None, *, solo: bool) -> ReadinessItem:
     """Услуги — по правилу каталога для отправки профиля, как и место.
 
     Живой прогон регистрации соло-мастера (09.11.2026) нашёл разрыв: каталог
@@ -228,14 +234,27 @@ def _services_item(master: CatalogMaster, actor: str | None) -> ReadinessItem:
     DRF-1989 остаётся: предложение дешевле 1 ₽ настроенным не считается.
 
     Правило зеркала остаётся там, где каталог на этот вопрос не отвечает:
-    без субъекта (карточка в админке), без настроенного клиента, при отказе
+    без субъекта (карточка в админке; у соло — см. ниже), без настроенного
+    клиента, при отказе
     «выбор услуг не для этого кабинета» (``SERVICE_SELECTION_REFUSED`` — он
     есть только у соло) и при ответе не той формы. Каталог молчит или
     отказывает по другой причине — ``unknown``, а не ``missing`` («незнание —
     не „нет“»); но положительный факт зеркала это не отменяет.
+
+    Без субъекта у соло-кабинета (``solo`` — вид из каталога, DRF-2254) зеркало
+    «нет» сказать не вправе: цена у соло живёт на предложении, которого в
+    зеркале нет, — так на карточке оператора у готового к отправке мастера
+    стояло «Услуги: нет» (прогон 09.11.2026). Ответ тот же, что у места:
+    ``unknown`` / ``no_subject`` — «не спрошено». Положительный факт зеркала
+    и здесь остаётся. Причина зеркала (``offer_not_sellable``) не переносится:
+    она — часть ответа «нет», которого без субъекта у соло не бывает; как и в
+    ветке отказа каталога, причиной ``unknown`` остаётся то, почему не спросили.
     """
     if actor is None:
-        return _services_from_mirror(master)
+        mirror = _services_from_mirror(master)
+        if solo and mirror.state != "done":
+            return ReadinessItem("services", "unknown", dict(mirror.detail), reason=NO_SUBJECT)
+        return mirror
     try:
         client = get_ayla_booking_client()
     except ValueError:

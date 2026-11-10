@@ -24,6 +24,9 @@
   или ответ не той формы → правило зеркала, как раньше;
 * у строки зеркала нет id каталога → ``unknown``, каталог не спрошен;
 * каталог спрошен под этим мастером и этим субъектом; без субъекта не спрошен;
+* без субъекта у соло-кабинета (карточка оператора) — ``unknown`` / ``no_subject``,
+  как у места: зеркало цен соло не видит и «нет» сказать не вправе; положительный
+  факт зеркала остаётся; у кабинета неизвестного вида — зеркало, как раньше;
 * вся проекция с формой пилота → ``ready`` истинно; ручка отдаёт счётчики каталога.
 """
 
@@ -47,6 +50,7 @@ from apps.master_api.tests.conftest import init_data_header
 pytestmark = pytest.mark.django_db
 
 CLIENT = "apps.master_api.services.onboarding_readiness.get_ayla_booking_client"
+KIND = "apps.master_api.services.onboarding_readiness.workspace_kind"
 ACTOR = "bot:max:12345"
 
 
@@ -93,9 +97,9 @@ def _catalog(*, selection: Any = None, error: Exception | None = None) -> MagicM
 
 
 def _services(
-    master: CatalogMaster, fake: MagicMock, *, actor: str | None = ACTOR
+    master: CatalogMaster, fake: MagicMock, *, actor: str | None = ACTOR, kind: str | None = None
 ) -> ReadinessItem:
-    with patch(CLIENT, return_value=fake):
+    with patch(CLIENT, return_value=fake), patch(KIND, return_value=kind):
         readiness = build_readiness(master, actor=actor)
     return next(item for item in readiness.items if item.key == "services")
 
@@ -115,7 +119,7 @@ def test_a_solo_offer_configured_in_the_catalog_closes_services(accepted_master)
 
 
 def test_the_same_master_without_a_subject_still_reads_the_mirror(accepted_master):
-    """Пара: без субъекта каталог не спросить — ответ прежний, по зеркалу."""
+    """Пара: без субъекта каталог не спросить — вид кабинета неизвестен, ответ по зеркалу."""
     _mirror_service(accepted_master, ext=9102, price=None, duration=None)
     fake = _catalog(selection=_selection(_row(configured=True)))
 
@@ -124,6 +128,44 @@ def test_the_same_master_without_a_subject_still_reads_the_mirror(accepted_maste
     assert item.state == "missing"
     assert item.detail == {"selected": 1, "configured": 0}
     fake.get_service_selection.assert_not_called()
+
+
+def test_a_solo_workspace_without_a_subject_is_not_asked_not_missing(accepted_master):
+    """Красный до правки: карточка оператора показывала «Услуги: нет» у готового соло-мастера.
+
+    Зеркало у соло цен не видит (они на предложении) — «нет» оно сказать не
+    вправе. Ответ тот же, что у места без субъекта: «не спрошено».
+    """
+    _mirror_service(accepted_master, ext=9112, price=None, duration=None)
+    fake = _catalog(selection=_selection(_row(configured=True)))
+
+    item = _services(accepted_master, fake, actor=None, kind="solo")
+
+    assert (item.state, item.reason) == ("unknown", "no_subject")
+    assert item.detail == {"selected": 1, "configured": 0}
+    fake.get_service_selection.assert_not_called()
+
+
+def test_a_solo_workspace_without_a_subject_keeps_what_the_mirror_knows(accepted_master):
+    """Положительный факт зеркала остаётся и без субъекта (как при молчании каталога)."""
+    _mirror_service(accepted_master, ext=9113, price=Decimal("1500.00"), duration=60)
+    fake = _catalog(selection=_selection(_row(configured=True)))
+
+    item = _services(accepted_master, fake, actor=None, kind="solo")
+
+    assert (item.state, item.reason) == ("done", None)
+    assert item.detail == {"selected": 1, "configured": 1}
+    fake.get_service_selection.assert_not_called()
+
+
+def test_a_solo_workspace_with_a_subject_still_asks_the_catalog(accepted_master):
+    """Вид кабинета меняет только ответ без субъекта; с субъектом спрашивается каталог."""
+    fake = _catalog(selection=_selection(_row(configured=True)))
+
+    item = _services(accepted_master, fake, kind="solo")
+
+    assert item.state == "done"
+    fake.get_service_selection.assert_called_once()
 
 
 def test_the_catalog_is_ahead_of_the_mirror(accepted_master):
