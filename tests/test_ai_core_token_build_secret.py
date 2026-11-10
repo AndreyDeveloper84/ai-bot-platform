@@ -141,6 +141,7 @@ def test_token_is_never_a_build_arg_or_written_to_disk():
     assert any(i.startswith("FROM ") for i in instructions), "Dockerfile не разобран"
     _uv_sync_runs()
     for instruction in instructions:
+        # empty-assert-ok: наличие инструкций доказано выше — FROM найден
         assert not re.match(rf"ARG\s+{TOKEN_VAR}\b", instruction), (
             f"`ARG {TOKEN_VAR}` вернулся: значение build-arg видно в `docker "
             "history` и в истории BuildKit."
@@ -160,6 +161,7 @@ def test_secret_runs_neither_print_nor_persist_the_token(forbidden: str):
 
     for run in _uv_sync_runs():
         assert forbidden not in run, f"`{forbidden}` в RUN с секретом токена: {run[:120]!r}"
+        # empty-assert-ok: _uv_sync_runs сам падает, если RUN с uv sync меньше двух
         assert not re.search(r"(^|[;&|]\s*)env\s*($|[;&|])", run), (
             "Голый `env` в RUN с секретом печатает GIT_CONFIG_KEY_0 вместе с токеном."
         )
@@ -235,6 +237,7 @@ def test_no_workflow_passes_the_token_as_a_build_arg():
     assert files, "workflow-файлы не найдены"
     for path in files:
         text = path.read_text(encoding="utf-8")
+        assert text.strip(), f"{path.name} пуст"
         assert not re.search(rf"--build-arg\s+{TOKEN_VAR}", text), (
             f"{path.name}: `--build-arg {TOKEN_VAR}` — значение уйдёт в историю BuildKit."
         )
