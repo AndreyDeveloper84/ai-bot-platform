@@ -23,15 +23,19 @@
 from __future__ import annotations
 
 import json
+import uuid
+from datetime import datetime
+from datetime import timezone as dt_timezone
 
 import pytest
 from django.test import Client
 from django.urls import reverse
 
+from apps.catalog.models import CatalogMaster
 from apps.identity.models import BotUser
 from apps.integrations.ayla.salon_client import SalonUnavailable
 
-from .conftest import init_data_header
+from .conftest import init_data_header, make_master
 
 pytestmark = pytest.mark.django_db
 
@@ -336,3 +340,321 @@ class TestWhoMayReadTheSalonsDay:
         ayla(_day_payload())
 
         assert _get(client, user_id=str(master_only_bot_user.channel_user_id)).status_code == 403
+
+
+# ─── DRF-2933: отсутствия, закрытия салона и мастер зеркала ──────────────────
+
+
+def _absence(start_local: str, end_local: str, **extra) -> dict:
+    """Отсутствие в форме каталога (``tenant_day_service.DayAbsence``).
+
+    Моменты — полные ISO: ``start_at`` / ``end_at`` в UTC, ``*_local`` — в
+    поясе мастера. Времени суток («ЧЧ:ММ») в строке нет.
+    """
+
+    return {
+        "id": "off-1",
+        "start_at": "2026-09-10T00:00:00+00:00",
+        "end_at": "2026-09-10T01:00:00+00:00",
+        "start_at_local": start_local,
+        "end_at_local": end_local,
+        "reason": "Больничный",
+        **extra,
+    }
+
+
+class TestAbsencesComeAsMomentsNotHours:
+    """Каталог шлёт отсутствие моментами, а не временем суток.
+
+    Общий разбор интервала их не узнавал: любое непустое ``absences``
+    отвечало ``unreadable``, и «Расписание» не могло нарисовать ни одного
+    блока. Пилот этого не показал только потому, что отгулов в нём не было.
+    """
+
+    def test_an_absence_inside_the_day_reads_as_the_masters_hours(
+        self, client: Client, owner_bot_user: BotUser, ayla
+    ) -> None:
+        ayla(
+            _day_payload(
+                _master_row(
+                    absences=[_absence("2026-09-10T14:00:00+03:00", "2026-09-10T16:00:00+03:00")]
+                )
+            )
+        )
+
+        body = _get(client, date="2026-09-10").json()
+
+        assert body["masters"][0]["absences"]["state"] == "parsed"
+        assert body["masters"][0]["absences"]["rows"] == [{"start": "14:00", "end": "16:00"}]
+        assert body["unreadable_lists"] == []
+
+    def test_the_offset_is_the_masters_and_is_not_converted(
+        self, client: Client, owner_bot_user: BotUser, ayla
+    ) -> None:
+        # «10:00+10:00» — десять утра у мастера во Владивостоке. Перевод в
+        # пояс сервера дал бы полночь.
+        ayla(
+            _day_payload(
+                _master_row(
+                    absences=[_absence("2026-09-10T10:00:00+10:00", "2026-09-10T12:30:00+10:00")]
+                )
+            )
+        )
+
+        rows = _get(client, date="2026-09-10").json()["masters"][0]["absences"]["rows"]
+
+        assert rows == [{"start": "10:00", "end": "12:30"}]
+
+    def test_a_vacation_over_the_day_is_cut_to_the_day_and_ends_at_24(
+        self, client: Client, owner_bot_user: BotUser, ayla
+    ) -> None:
+        ayla(
+            _day_payload(
+                _master_row(
+                    absences=[_absence("2026-09-05T00:00:00+03:00", "2026-09-14T00:00:00+03:00")]
+                )
+            )
+        )
+
+        master = _get(client, date="2026-09-10").json()["masters"][0]
+
+        assert master["absences"]["rows"] == [{"start": "00:00", "end": "24:00"}]
+        # Флаг считает каталог по шаблону и изменению на дату; отгул его не
+        # меняет, и вид не решает за каталог, что день нерабочий.
+        assert master["is_working_day"] is True
+
+    def test_the_day_of_the_answer_cuts_when_no_date_was_asked(
+        self, client: Client, owner_bot_user: BotUser, ayla
+    ) -> None:
+        ayla(
+            _day_payload(
+                _master_row(
+                    absences=[_absence("2026-09-09T22:00:00+03:00", "2026-09-10T02:00:00+03:00")]
+                ),
+                date="2026-09-10",
+            )
+        )
+
+        rows = _get(client).json()["masters"][0]["absences"]["rows"]
+
+        assert rows == [{"start": "00:00", "end": "02:00"}]
+
+    def test_an_absence_that_does_not_touch_the_day_is_no_absence_not_unreadable(
+        self, client: Client, owner_bot_user: BotUser, ayla
+    ) -> None:
+        # Каталог режет отсутствия своим окном; строка, кончившаяся ровно в
+        # полночь этого дня, опознана — просто не про сегодня.
+        ayla(
+            _day_payload(
+                _master_row(
+                    absences=[_absence("2026-09-09T18:00:00+03:00", "2026-09-10T00:00:00+03:00")]
+                )
+            )
+        )
+
+        body = _get(client, date="2026-09-10").json()
+
+        assert body["masters"][0]["absences"]["state"] == "none"
+        assert body["masters"][0]["absences"]["rows"] == []
+        assert body["unreadable_lists"] == []
+
+    def test_an_unreadable_row_is_not_hidden_by_a_neighbour_from_another_day(
+        self, client: Client, owner_bot_user: BotUser, ayla
+    ) -> None:
+        # Одна строка опознана и не про эти сутки, другая не опознана вовсе.
+        # «Отсутствий нет» здесь — неправда: одну строку мы не поняли.
+        ayla(
+            _day_payload(
+                _master_row(
+                    absences=[
+                        _absence("2026-09-09T18:00:00+03:00", "2026-09-10T00:00:00+03:00"),
+                        {"unknown": 1},
+                    ]
+                )
+            )
+        )
+
+        body = _get(client, date="2026-09-10").json()
+
+        assert body["masters"][0]["absences"]["state"] == "unreadable"
+        assert body["unreadable_lists"] == ["absences"]
+
+    def test_an_absence_shorter_than_a_minute_is_not_an_event(
+        self, client: Client, owner_bot_user: BotUser, ayla
+    ) -> None:
+        # После обрезки до минут «18:00:10–18:00:40» и «…–00:00:30 этого дня»
+        # стали бы событиями нулевой длины.
+        ayla(
+            _day_payload(
+                _master_row(
+                    absences=[
+                        _absence("2026-09-10T18:00:10+03:00", "2026-09-10T18:00:40+03:00"),
+                        _absence("2026-09-09T20:00:00+03:00", "2026-09-10T00:00:30+03:00"),
+                        _absence("2026-09-10T14:00:00+03:00", "2026-09-10T16:00:00+03:00"),
+                    ]
+                )
+            )
+        )
+
+        rows = _get(client, date="2026-09-10").json()["masters"][0]["absences"]["rows"]
+
+        assert rows == [{"start": "14:00", "end": "16:00"}]
+
+    def test_the_reason_stays_behind(self, client: Client, owner_bot_user: BotUser, ayla) -> None:
+        # «Больничный» — сведения о человеке; кадр читает и ресепшн.
+        ayla(
+            _day_payload(
+                _master_row(
+                    absences=[_absence("2026-09-10T14:00:00+03:00", "2026-09-10T16:00:00+03:00")]
+                )
+            )
+        )
+
+        body = _get(client, date="2026-09-10").json()
+
+        assert body["masters"][0]["absences"]["rows"], "отсутствие не разобрано — проверять нечего"
+        assert "Больничный" not in resp_text(body)
+        assert "reason" not in body["masters"][0]["absences"]["rows"][0]
+
+    def test_moments_that_do_not_parse_are_unreadable(
+        self, client: Client, owner_bot_user: BotUser, ayla
+    ) -> None:
+        ayla(_day_payload(_master_row(absences=[_absence("вчера", "завтра")])))
+
+        body = _get(client, date="2026-09-10").json()
+
+        assert body["masters"][0]["absences"]["state"] == "unreadable"
+        assert body["unreadable_lists"] == ["absences"]
+
+    def test_the_hours_form_is_still_read(
+        self, client: Client, owner_bot_user: BotUser, ayla
+    ) -> None:
+        ayla(_day_payload(_master_row(absences=[{"start_local": "13:00", "end_local": "15:00"}])))
+
+        rows = _get(client, date="2026-09-10").json()["masters"][0]["absences"]["rows"]
+
+        assert rows == [{"start": "13:00", "end": "15:00"}]
+
+
+class TestTheSalonsClosuresAreNotDropped:
+    def test_a_full_day_and_a_partial_closure_come_through(
+        self, client: Client, owner_bot_user: BotUser, ayla
+    ) -> None:
+        payload = _day_payload()
+        payload["closures"] = [
+            {
+                "id": "c-1",
+                "start_local": None,
+                "end_local": None,
+                "is_full_day": True,
+                "reason": "Санитарный день",
+            },
+            {
+                "id": "c-2",
+                "start_local": "10:00",
+                "end_local": "14:00",
+                "is_full_day": False,
+                "reason": "",
+            },
+        ]
+        ayla(payload)
+
+        closures = _get(client).json()["closures"]
+
+        assert closures["state"] == "parsed"
+        assert closures["rows"] == [
+            {"start": None, "end": None, "is_full_day": True, "reason": "Санитарный день"},
+            {"start": "10:00", "end": "14:00", "is_full_day": False, "reason": ""},
+        ]
+
+    def test_no_closures_says_none_and_a_missing_key_says_absent(
+        self, client: Client, owner_bot_user: BotUser, ayla
+    ) -> None:
+        ayla(_day_payload())
+        assert _get(client).json()["closures"]["state"] == "none"
+
+        payload = _day_payload()
+        del payload["closures"]
+        ayla(payload)
+        assert _get(client).json()["closures"]["state"] == "absent"
+
+    def test_a_closure_with_a_garbled_bound_is_unreadable_not_a_full_day(
+        self, client: Client, owner_bot_user: BotUser, ayla
+    ) -> None:
+        # Опечатка в одной границе не должна закрыть салон на весь день.
+        payload = _day_payload()
+        payload["closures"] = [{"id": "c-1", "start_local": "десять", "end_local": "14:00"}]
+        ayla(payload)
+
+        body = _get(client).json()
+
+        assert body["closures"]["state"] == "unreadable"
+        assert body["unreadable_lists"] == ["closures"]
+
+
+class TestTheFrameNamesTheMirrorMaster:
+    """``master_id`` — под каким id того же мастера знает день салона.
+
+    ``specialist_id`` кадра — id каталога; день салона (``admin/day/``)
+    отдаёт id строки зеркала. У строки синка они равны, у соло-мастера и
+    склеенного приглашения — нет (DRF-1933), и без пары экран не может
+    приложить смену к записям.
+    """
+
+    def test_a_synced_row_and_a_solo_row_both_resolve(
+        self, client: Client, owner_bot_user: BotUser, tenant, ayla
+    ) -> None:
+        synced = make_master(tenant, name="Синк")
+        solo = make_master(tenant, name="Соло")
+        catalog_id = uuid.uuid4()
+        CatalogMaster.all_tenants.filter(pk=solo.pk).update(catalog_specialist_id=catalog_id)
+        ayla(
+            _day_payload(
+                _master_row(specialist_id=str(synced.pk), display_name="Синк"),
+                _master_row(specialist_id=str(catalog_id), display_name="Соло"),
+            )
+        )
+
+        masters = _get(client).json()["masters"]
+
+        assert [m["master_id"] for m in masters] == [str(synced.pk), str(solo.pk)]
+        # Id каталога остаётся как был: им пользуются те, кто говорит с каталогом.
+        assert masters[1]["specialist_id"] == str(catalog_id)
+
+    def test_a_row_the_mirror_does_not_know_is_null_not_guessed_by_name(
+        self, client: Client, owner_bot_user: BotUser, tenant, ayla
+    ) -> None:
+        make_master(tenant, name="Ольга")
+        ayla(
+            _day_payload(
+                _master_row(specialist_id=str(uuid.uuid4()), display_name="Ольга"),
+                _master_row(specialist_id="sp-1", display_name="Не uuid"),
+            )
+        )
+
+        masters = _get(client).json()["masters"]
+
+        assert [m["display_name"] for m in masters] == ["Ольга", "Не uuid"]
+        assert [m["master_id"] for m in masters] == [None, None]
+
+    def test_an_archived_master_is_not_a_pair_the_day_does_not_show_him(
+        self, client: Client, owner_bot_user: BotUser, tenant, ayla
+    ) -> None:
+        archived = make_master(tenant, name="Архив", archived_at=datetime.now(tz=dt_timezone.utc))
+        ayla(_day_payload(_master_row(specialist_id=str(archived.pk), display_name="Архив")))
+
+        masters = _get(client).json()["masters"]
+
+        assert masters[0]["display_name"] == "Архив"
+        assert masters[0]["master_id"] is None
+
+    def test_another_salons_master_is_not_a_pair(
+        self, client: Client, owner_bot_user: BotUser, other_tenant, ayla
+    ) -> None:
+        foreign = make_master(other_tenant, name="Чужой")
+        ayla(_day_payload(_master_row(specialist_id=str(foreign.pk), display_name="Чужой")))
+
+        masters = _get(client).json()["masters"]
+
+        assert masters[0]["display_name"] == "Чужой"
+        assert masters[0]["master_id"] is None

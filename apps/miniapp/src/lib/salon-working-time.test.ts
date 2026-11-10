@@ -447,7 +447,10 @@ describe("строки недели — часами сервера", () => {
 });
 
 describe("записи из предпросмотра", () => {
-  function impact(rows: Array<{ id: string; start: string; end: string }>, patch = {}): ScheduleImpact {
+  function impact(
+    rows: Array<{ id: string; start: string; end: string; refund?: number | null }>,
+    patch = {},
+  ): ScheduleImpact {
     return {
       start_at: "",
       end_at: "",
@@ -461,7 +464,7 @@ describe("записи из предпросмотра", () => {
           service_name: "Маникюр",
           status: "confirmed",
           payment_status: null,
-          refund_percent_if_cancelled: null,
+          refund_percent_if_cancelled: r.refund ?? null,
         })),
         seen_fields: [],
         unreadable_rows: 0,
@@ -486,9 +489,24 @@ describe("записи из предпросмотра", () => {
     const one = { id: "a-1", start: "2031-01-10T13:00:00+03:00", end: "2031-01-10T14:00:00+03:00" };
     const other = { id: "a-2", start: "2031-01-10T14:30:00+03:00", end: "2031-01-10T15:30:00+03:00" };
     expect(conflictRows([impact([one]), impact([one, other])], [booking])).toEqual([
-      { appointmentId: "a-1", from: "13:00", to: "14:00", service: "Маникюр", client: "Анна К.", linkable: true },
-      { appointmentId: "a-2", from: "14:30", to: "15:30", service: "Маникюр", client: null, linkable: false },
+      { appointmentId: "a-1", from: "13:00", to: "14:00", service: "Маникюр", client: "Анна К.", linkable: true, refundPercent: null },
+      { appointmentId: "a-2", from: "14:30", to: "15:30", service: "Маникюр", client: null, linkable: false, refundPercent: null },
     ]);
+  });
+
+  it("сколько вернётся при отмене — из того же предпросмотра; ноль — это ответ, а не «не сказано»", () => {
+    // DRF-2933: строка жила в блоке «Закрыть время — кого затронет» на
+    // «Расписании»; блок переехал сюда, и возможность не должна пропасть.
+    const rowsOf = conflictRows(
+      [
+        impact([
+          { id: "a-1", start: "2031-01-10T13:00:00+03:00", end: "2031-01-10T14:00:00+03:00", refund: 50 },
+          { id: "a-2", start: "2031-01-10T15:00:00+03:00", end: "2031-01-10T16:00:00+03:00", refund: 0 },
+        ]),
+      ],
+      [booking],
+    );
+    expect(rowsOf?.map((r) => r.refundPercent)).toEqual([50, 0]);
   });
 
   it("неразобранная строка — не «записей нет», а отказ", () => {

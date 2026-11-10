@@ -291,6 +291,9 @@ const EXPECTED_ADMIN_SCREENS = [
   "AdminMasterDetailScreen",
   "AdminNewBookingScreen",
   "AdminReadinessScreen",
+  // DRF-2933 — день одного мастера из «Расписания» (кадр 12 макета DRF-2854):
+  // вложенный экран без панели, возврат — в расписание той же даты.
+  "SalonPilotScheduleMasterScreen",
   // DRF-2936 — «Рабочее время»: список и неделя держат панель пилота сами
   // (`<SalonPilotTabBar active="schedule">`), не через рамку, — и корнями не
   // являются: вход из «Расписания», возврат объявлен.

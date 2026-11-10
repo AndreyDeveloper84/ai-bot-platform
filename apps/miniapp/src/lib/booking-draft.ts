@@ -152,6 +152,12 @@ export interface DraftTransition {
   draft: BookingDraft;
   /** Set when this action dropped a previously selected start. */
   slotInvalidatedBy?: SlotInvalidationReason;
+  /**
+   * Set when this action dropped «Выбранное окно» (DRF-2933). On the salon
+   * surface the window is ONE master's free range, passed in from the
+   * schedule; under another master it would describe time nobody offered.
+   */
+  windowDropped?: true;
 }
 
 function sameService(a: DraftService | null, b: DraftService): boolean {
@@ -208,9 +214,18 @@ export function applyDraftAction(
         return { draft: { ...draft, master: action.master } };
       }
       const hadSlot = draft.slot !== null;
+      // DRF-2933: the window came with the PREVIOUS master. The first
+      // assignment (no master yet) keeps it — that is the prefill itself.
+      const dropsWindow = draft.window !== null && draft.master !== null;
       return {
-        draft: { ...draft, master: action.master, slot: null },
+        draft: {
+          ...draft,
+          master: action.master,
+          slot: null,
+          window: dropsWindow ? null : draft.window,
+        },
         ...(hadSlot ? { slotInvalidatedBy: "master_changed" as const } : {}),
+        ...(dropsWindow ? { windowDropped: true as const } : {}),
       };
     }
 

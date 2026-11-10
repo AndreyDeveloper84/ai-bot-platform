@@ -85,11 +85,17 @@ ADMIN_ROUTES: dict[str, Entry] = {
     "salon_day_frame": third_party(
         "masters[].display_name",
         "masters[].schedule_note",
+        "closures[].reason",
         via=A + "views_salon_frame:_master_frame",
         whose="the salon's masters",
         why=(
             "the frame draws each master's working intervals for the date; the note is the "
-            "master's own schedule remark as Ayla returns it, no customer row is in this body"
+            "master's own schedule remark as Ayla returns it, no customer row is in this body. "
+            "DRF-2933: an absence is returned as hours only — its reason (vacation, sick leave) "
+            "is dropped in _absence_row because the front desk reads this frame too; a salon "
+            "closure keeps its reason (_closure_row): it is the salon's own notice about the "
+            "salon, the same text master_exceptions already returns; master_id is the mirror "
+            "row id of the same master, not a person field"
         ),
     ),
     # --- salon subscription (DRF-2988 B3) -----------------------------------

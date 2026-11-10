@@ -44,11 +44,14 @@ export function WtHeader({
   title,
   subtitle,
   onBack,
+  onClose,
   master,
 }: {
   title?: string;
   subtitle?: string | null;
   onBack?: () => void;
+  /** «✕» справа — кадр 12 «Расписания» (DRF-2933): вложенный экран закрывается и так. */
+  onClose?: () => void;
   master?: { name: string; specialization: string; photoUrl: string | null } | null;
 }) {
   return (
@@ -76,7 +79,13 @@ export function WtHeader({
           {subtitle ? <span className="wt-header__subtitle">{subtitle}</span> : null}
         </span>
       )}
-      <span className="wt-header__side" aria-hidden="true" />
+      {onClose ? (
+        <button type="button" className="wt-header__back" aria-label="Закрыть" onClick={onClose}>
+          <IconCross />
+        </button>
+      ) : (
+        <span className="wt-header__side" aria-hidden="true" />
+      )}
     </header>
   );
 }
@@ -123,18 +132,21 @@ export function WtLoadError({
   err,
   busy = false,
   page = false,
+  what = "workingHours",
   onRetry,
 }: {
   err: unknown;
   busy?: boolean;
   page?: boolean;
+  /** Предмет экрана: «рабочие часы» (по умолчанию) или «расписание» (DRF-2933). */
+  what?: "workingHours" | "schedule";
   onRetry: () => void;
 }) {
   if (
     err instanceof ApiError &&
     (isTransportRefusalSlug(err.slug) || isAuthRefusalSlug(err.slug) || err.status === 403)
   ) {
-    return <SystemState kind="load_error" what="workingHours" err={err} busy={busy} onRetry={onRetry} />;
+    return <SystemState kind="load_error" what={what} err={err} busy={busy} onRetry={onRetry} />;
   }
   const { initial, subjects } = SYSTEM_STATE_COPY.load_error;
   return (
@@ -143,7 +155,7 @@ export function WtLoadError({
       role="alert"
       page={page}
       icon={<IconAlert />}
-      title={`${initial.title} ${subjects.workingHours}`}
+      title={`${initial.title} ${subjects[what]}`}
     >
       <button type="button" className="btn-secondary wt-btn" disabled={busy} onClick={onRetry}>
         {initial.retry}
@@ -170,6 +182,14 @@ function Svg({ size = 24, children }: { size?: number; children: ReactNode }) {
     >
       {children}
     </svg>
+  );
+}
+
+export function IconCross() {
+  return (
+    <Svg>
+      <path d="M6 6l12 12M18 6L6 18" />
+    </Svg>
   );
 }
 

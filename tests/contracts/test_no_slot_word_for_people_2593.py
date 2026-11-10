@@ -75,7 +75,9 @@ AWAITING_OWNER: tuple[tuple[str, str, str], ...] = (
         "готового слова у владельца нет — вопрос",
     ),
     (
-        "apps/miniapp/src/screens/admin/SalonPilotScheduleScreen.tsx",
+        # DRF-2933: фраза переехала дословно — слова «Расписания» салона v2
+        # живут в словаре экрана, а не в его разметке. Вопрос владельцу тот же.
+        "apps/miniapp/src/lib/salon-schedule.ts",
         "а не готовый слот",
         "готового слова у владельца нет — вопрос",
     ),

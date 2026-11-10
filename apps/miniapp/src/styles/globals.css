@@ -11109,3 +11109,984 @@ a {
   text-decoration: underline;
   cursor: pointer;
 }
+
+/* ==========================================================================
+   «Расписание» салона v2 (DRF-2933, макет DRF-2854 FROZEN v1.0).
+   Только токены; ни одного своего цвета — палитру держит miniapp_token_contrast.
+   ========================================================================== */
+
+/* Шапка рамки: дата над заголовком, кнопки справа в строке заголовка (кадр 1). */
+.salon-pilot__titlerow {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: var(--s-3);
+  margin: var(--s-3) 0;
+}
+.salon-pilot__titles {
+  min-width: 0;
+}
+.salon-pilot__overline {
+  margin: 0 0 var(--s-1);
+  font-size: var(--font-size-200);
+  color: var(--c-text-secondary);
+}
+.salon-pilot__title {
+  margin: 0;
+  color: var(--c-accent);
+}
+.salon-pilot__title-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  flex: none;
+}
+
+.ss-screen {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+  /* Место под «+»: последняя строка не должна прятаться под кнопкой. */
+  padding-bottom: calc(56px + var(--s-4));
+}
+.ss-screen .callout {
+  margin: 0;
+}
+.ss-callout__text {
+  margin: 0;
+}
+.ss-iconbtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  flex: none;
+  background: var(--c-accent-subtle);
+  border: none;
+  border-radius: 50%;
+  color: var(--c-accent);
+  cursor: pointer;
+}
+.ss-iconbtn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.ss-iconbtn:focus-visible,
+.ss-chip:focus-visible,
+.ss-strip__day:focus-visible,
+.ss-fab:focus-visible {
+  outline: 2px solid var(--c-accent);
+  outline-offset: 2px;
+}
+
+/* Полоса недели. */
+.ss-strip {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: var(--s-1);
+}
+.ss-strip__day {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  min-height: 56px;
+  padding: var(--s-1) 0;
+  background: transparent;
+  border: none;
+  border-radius: var(--r-md);
+  color: var(--c-text-primary);
+  cursor: pointer;
+}
+.ss-strip__weekday {
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+.ss-strip__number {
+  font-size: var(--font-size-300);
+  font-weight: 600;
+}
+.ss-strip__day--on {
+  background: var(--c-accent);
+  color: var(--c-text-on-accent);
+}
+.ss-strip__day--on .ss-strip__weekday {
+  color: var(--c-text-on-accent);
+}
+/* Выбранный день, сегмент и число месяца — кнопки, и на нажатие отзываются. */
+.ss-strip__day--on:active,
+.ss-segment__item--on:active,
+.ss-month__day--on:active {
+  background: var(--c-accent-pressed);
+}
+
+/* Чипы фильтров. */
+.ss-chips {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+}
+.ss-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-1);
+  flex: 1;
+  min-width: 0;
+  min-height: 44px;
+  padding: 0 var(--s-3);
+  background: var(--c-surface-1);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-md);
+  font-size: var(--font-size-200);
+  color: var(--c-text-primary);
+  cursor: pointer;
+}
+.ss-chip__text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Пометка актуальности и «Обновить». */
+.ss-asof {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-2);
+  margin: 0;
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+.ss-asof__refresh {
+  min-height: 32px;
+  padding: 0 var(--s-2);
+  font: inherit;
+  font-weight: 600;
+  color: var(--c-accent);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+}
+.ss-asof__refresh:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.ss-stale,
+.ss-inline-error {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+.ss-note {
+  margin: 0;
+  font-size: var(--font-size-100);
+  line-height: var(--leading-base);
+  color: var(--c-text-secondary);
+}
+.ss-note:empty {
+  display: none;
+}
+.ss-heading {
+  margin: 0 0 var(--s-2);
+  font-size: var(--font-size-200);
+  font-weight: 600;
+  color: var(--c-text-primary);
+}
+
+/* «+» — новая запись (кадр 1). */
+.ss-fab {
+  position: fixed;
+  right: var(--s-4);
+  bottom: calc(var(--tabbar-height) + var(--safe-bottom) + var(--s-4));
+  z-index: 30;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 56px;
+  height: 56px;
+  background: var(--c-accent);
+  border: none;
+  border-radius: 50%;
+  color: var(--c-text-on-accent);
+  box-shadow: 0 6px 16px color-mix(in srgb, var(--c-accent) 35%, transparent);
+  cursor: pointer;
+}
+.ss-fab:active {
+  background: var(--c-accent-pressed);
+}
+
+/* ---- Сетка (кадры 1 и 3) ------------------------------------------------ */
+/* Размеры сетки. Высота часа и ширина оси — постоянные; число колонок и
+   часов сетка ставит сама (инлайном, по данным дня) — здесь значения, с
+   которыми правило читается и без неё. */
+:root {
+  --ss-hour-h: 56px;
+  --ss-axis-w: 44px;
+  --ss-cols: 4;
+  --ss-hours: 10;
+}
+.ss-grid {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+.ss-grid__head,
+.ss-grid__body {
+  display: grid;
+  grid-template-columns: var(--ss-axis-w) repeat(var(--ss-cols), minmax(0, 1fr));
+}
+.ss-grid__corner {
+  display: block;
+}
+.ss-grid__master {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+  padding: var(--s-1) 2px;
+  background: transparent;
+  border: none;
+  border-radius: var(--r-md);
+  cursor: pointer;
+}
+.ss-grid__master:focus-visible {
+  outline: 2px solid var(--c-accent);
+  outline-offset: -2px;
+}
+.ss-grid__name,
+.ss-grid__spec {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ss-grid__name {
+  font-size: var(--font-size-100);
+  font-weight: 600;
+  color: var(--c-text-primary);
+}
+.ss-grid__spec {
+  font-size: 11px;
+  color: var(--c-text-secondary);
+}
+.ss-grid__body {
+  position: relative;
+  height: calc(var(--ss-hours) * var(--ss-hour-h));
+  /* Подпись первого и последнего часа стоит на линии — ей нужно место. */
+  margin: var(--s-2) 0;
+}
+.ss-grid__axis {
+  position: relative;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.ss-grid__hour {
+  position: absolute;
+  left: 0;
+  transform: translateY(-50%);
+  font-size: 11px;
+  color: var(--c-text-secondary);
+}
+.ss-col {
+  position: relative;
+  min-width: 0;
+  border-left: 1px solid var(--c-divider);
+  background-image: linear-gradient(to bottom, var(--c-divider) 1px, transparent 1px);
+  background-size: 100% var(--ss-hour-h);
+}
+.ss-col--off {
+  background-color: var(--c-surface-2);
+}
+.ss-col__tap {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  width: 100%;
+  padding: 0;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+}
+.ss-col__tap:disabled {
+  cursor: default;
+}
+.ss-col__tap:focus-visible {
+  outline: 2px solid var(--c-accent);
+  outline-offset: -2px;
+}
+.ss-col__offhours {
+  position: absolute;
+  left: 0;
+  right: 0;
+  background: color-mix(in srgb, var(--c-surface-2) 70%, transparent);
+  pointer-events: none;
+}
+.ss-col__label {
+  position: absolute;
+  top: var(--s-2);
+  left: 2px;
+  right: 2px;
+  z-index: 1;
+  font-size: 11px;
+  font-weight: 600;
+  text-align: center;
+  color: var(--c-text-primary);
+  pointer-events: none;
+}
+.ss-col__label--muted {
+  font-weight: 400;
+  color: var(--c-text-secondary);
+}
+.ss-col[aria-busy="true"] {
+  opacity: 0.7;
+}
+.ss-block {
+  position: absolute;
+  left: 0;
+  width: 100%;
+  z-index: 2;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  min-height: 22px;
+  padding: 2px var(--s-1);
+  overflow: hidden;
+  border: 1px solid var(--c-surface-1);
+  border-radius: var(--r-sm);
+  text-align: start;
+  cursor: pointer;
+}
+.ss-block:focus-visible {
+  outline: 2px solid var(--c-accent);
+  outline-offset: -2px;
+}
+.ss-block__time,
+.ss-block__title {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  line-height: var(--leading-tight);
+}
+.ss-block__time {
+  font-size: 11px;
+  font-weight: 600;
+}
+.ss-block__title {
+  font-size: 12px;
+}
+.ss-block--visit {
+  background: var(--c-accent-subtle);
+  color: var(--c-text-primary);
+}
+.ss-block--visit .ss-block__time {
+  color: var(--c-accent);
+}
+.ss-block--gray {
+  background: var(--c-surface-2);
+  color: var(--c-text-secondary);
+}
+/* «Сейчас по плану»: плановый интервал накрывает текущее время (DRF-1237). */
+.ss-block--now {
+  box-shadow: inset 3px 0 0 var(--c-success);
+}
+.ss-block--released {
+  background: transparent;
+  border: 1px dashed var(--c-divider);
+  color: var(--c-text-secondary);
+  text-decoration: line-through;
+}
+.ss-block--released .ss-block__time {
+  color: var(--c-text-secondary);
+}
+.ss-block--dim {
+  opacity: 0.45;
+}
+/* Свободное окно сервера: пунктир; раскрытое — карточка кадра 3. */
+.ss-free {
+  position: absolute;
+  left: 0;
+  width: 100%;
+  z-index: 1;
+  box-sizing: border-box;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 2px;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--c-success) 8%, var(--c-surface-1));
+  border: 1.5px dashed var(--c-success);
+  border-radius: var(--r-sm);
+  color: var(--c-success);
+  cursor: pointer;
+}
+.ss-free:focus-visible {
+  outline: 2px solid var(--c-success);
+  outline-offset: -2px;
+}
+/* Раскрытое окно: пунктир на всю длину окна и карточка под пальцем. */
+.ss-free-open {
+  display: contents;
+}
+.ss-free--range {
+  cursor: default;
+  pointer-events: none;
+}
+.ss-free--open {
+  z-index: 5;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--s-1);
+  width: max-content;
+  min-width: 100%;
+  padding: var(--s-2);
+  overflow: visible;
+  background: color-mix(in srgb, var(--c-success) 10%, var(--c-surface-1));
+  cursor: default;
+}
+/* В правых колонках карточка растёт влево — иначе уедет за экран. */
+.ss-col:nth-last-child(-n + 2) .ss-free--open {
+  left: auto;
+  right: 0;
+}
+.ss-free__time {
+  font-size: var(--font-size-100);
+  font-weight: 600;
+  white-space: nowrap;
+}
+.ss-free__badge {
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.ss-free__cta {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-1);
+  min-height: 36px;
+  padding: 0 var(--s-2);
+  font-size: var(--font-size-100);
+  font-weight: 600;
+  white-space: nowrap;
+  color: var(--c-success);
+  background: color-mix(in srgb, var(--c-success) 16%, var(--c-surface-1));
+  border: none;
+  border-radius: var(--r-pill);
+  cursor: pointer;
+}
+.ss-free__cta:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* ---- Карточки записей: лента, без времени, без мастера ------------------- */
+.ss-cards,
+.ss-timeline,
+.ss-timeline__group,
+.ss-rows,
+.ss-people__list,
+.ss-attention__list,
+.ss-options {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.ss-cards {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+.ss-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  box-sizing: border-box;
+  padding: var(--s-2) var(--s-3);
+  background: var(--c-surface-1);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-md);
+  text-align: start;
+  color: var(--c-text-primary);
+}
+button.ss-card {
+  cursor: pointer;
+}
+.ss-card__title {
+  font-size: var(--font-size-200);
+  font-weight: 600;
+}
+.ss-card__meta,
+.ss-card__master,
+.ss-card__now {
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+.ss-card__master--unknown {
+  color: var(--c-warning);
+}
+.ss-card--now {
+  box-shadow: inset 3px 0 0 var(--c-success);
+}
+.ss-card__now {
+  color: var(--c-success);
+}
+.ss-card--released {
+  background: transparent;
+  border-style: dashed;
+}
+.ss-card--released .ss-card__title,
+.ss-card--released .ss-card__meta {
+  text-decoration: line-through;
+  color: var(--c-text-secondary);
+}
+.ss-card--block {
+  background: var(--c-surface-2);
+  border-color: transparent;
+}
+
+/* ---- Лента по времени (больше четырёх мастеров) -------------------------- */
+.ss-feed {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+}
+.ss-people {
+  background: var(--c-surface-1);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-md);
+}
+.ss-people__toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  min-height: 48px;
+  padding: 0 var(--s-3);
+  font-size: var(--font-size-200);
+  font-weight: 600;
+  color: var(--c-text-primary);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+}
+.ss-people__toggle[aria-expanded="true"] svg {
+  transform: rotate(180deg);
+}
+.ss-person {
+  display: grid;
+  grid-template-columns: 36px minmax(0, 1fr) auto 20px;
+  align-items: center;
+  gap: var(--s-2);
+  width: 100%;
+  min-height: 52px;
+  padding: var(--s-1) var(--s-3);
+  background: transparent;
+  border: none;
+  border-top: 1px solid var(--c-divider);
+  text-align: start;
+  cursor: pointer;
+}
+.ss-person__name {
+  font-size: var(--font-size-200);
+  color: var(--c-text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ss-person__shift {
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+  white-space: nowrap;
+}
+.ss-person__chevron {
+  display: inline-flex;
+  color: var(--c-text-secondary);
+}
+.ss-timeline {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+}
+.ss-timeline__time {
+  margin: 0 0 var(--s-1);
+  font-size: var(--font-size-100);
+  font-weight: 600;
+  color: var(--c-text-secondary);
+}
+
+/* ---- День одного мастера (кадр 12) --------------------------------------- */
+.ss-single,
+.ss-panel,
+.ss-day,
+.ss-tabpanel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+}
+.ss-single__master {
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr) 20px;
+  align-items: center;
+  gap: var(--s-3);
+  width: 100%;
+  padding: var(--s-2) var(--s-3);
+  background: var(--c-surface-1);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-md);
+  text-align: start;
+  cursor: pointer;
+}
+.ss-single__text,
+.ss-who__text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.ss-single__name,
+.ss-who__name {
+  font-size: var(--font-size-300);
+  font-weight: 600;
+  color: var(--c-text-primary);
+}
+.ss-single__spec,
+.ss-who__spec {
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+.ss-single__chevron {
+  display: inline-flex;
+  color: var(--c-text-secondary);
+}
+.ss-who {
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+}
+.ss-day-title {
+  margin: 0;
+  font-size: var(--font-size-300);
+  font-weight: 600;
+  color: var(--c-text-primary);
+}
+.ss-confirmation {
+  margin: 0;
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+.ss-dayoff {
+  margin: 0;
+  padding: var(--s-3);
+  font-size: var(--font-size-200);
+  font-weight: 600;
+  text-align: center;
+  color: var(--c-text-primary);
+  background: var(--c-surface-2);
+  border-radius: var(--r-md);
+}
+.ss-rows {
+  overflow: hidden;
+  background: var(--c-surface-1);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-lg);
+}
+.ss-rows li + li .ss-row {
+  border-top: 1px solid var(--c-divider);
+}
+.ss-row {
+  display: grid;
+  grid-template-columns: 112px minmax(0, 1fr) 24px;
+  align-items: center;
+  gap: var(--s-2);
+  width: 100%;
+  min-height: 52px;
+  box-sizing: border-box;
+  padding: var(--s-2) var(--s-3);
+  background: transparent;
+  border: none;
+  text-align: start;
+  color: var(--c-text-primary);
+  cursor: pointer;
+}
+.ss-row:focus-visible {
+  outline: 2px solid var(--c-accent);
+  outline-offset: -2px;
+}
+.ss-row__time {
+  font-size: var(--font-size-200);
+  color: var(--c-text-secondary);
+  white-space: nowrap;
+}
+.ss-row__text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.ss-row__title {
+  font-size: var(--font-size-200);
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ss-row__now {
+  font-size: var(--font-size-100);
+  color: var(--c-success);
+}
+.ss-row--now {
+  box-shadow: inset 3px 0 0 var(--c-success);
+}
+.ss-row--released .ss-row__title,
+.ss-row--released .ss-row__time {
+  font-weight: 400;
+  text-decoration: line-through;
+  color: var(--c-text-secondary);
+}
+.ss-row--dim {
+  opacity: 0.45;
+}
+.ss-row--free {
+  background: color-mix(in srgb, var(--c-success) 10%, var(--c-surface-1));
+}
+.ss-row--free .ss-row__time,
+.ss-row--free .ss-row__title,
+.ss-row__plus {
+  color: var(--c-success);
+}
+.ss-row__plus {
+  display: inline-flex;
+}
+.ss-row--free:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+.ss-row--block {
+  background: var(--c-surface-2);
+}
+.ss-row--block .ss-row__title {
+  font-weight: 400;
+  color: var(--c-text-secondary);
+}
+.ss-attention {
+  display: flex;
+  flex-direction: column;
+}
+.ss-attention__list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+.ss-attention__item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  padding: var(--s-2) var(--s-3);
+  background: color-mix(in srgb, var(--c-warning) 10%, var(--c-surface-1));
+  border: none;
+  border-radius: var(--r-md);
+  text-align: start;
+  cursor: pointer;
+}
+.ss-attention__label {
+  font-size: var(--font-size-200);
+  font-weight: 600;
+  color: var(--c-warning);
+}
+.ss-attention__detail {
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+
+/* ---- «О мастере» ---------------------------------------------------------- */
+.ss-about {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+}
+.ss-about__list {
+  margin: 0;
+  background: var(--c-surface-1);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-lg);
+}
+.ss-about__row {
+  padding: var(--s-2) var(--s-3);
+}
+.ss-about__row + .ss-about__row {
+  border-top: 1px solid var(--c-divider);
+}
+.ss-about__term {
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+.ss-about__value {
+  margin: 0;
+  font-size: var(--font-size-200);
+  color: var(--c-text-primary);
+}
+
+/* ---- Шторка «Фильтры» (кадр 2) и переключатели ---------------------------- */
+.ss-sheet__close {
+  align-self: flex-end;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  /* Крестик стоит в строке заголовка шторки, а не под ним. */
+  margin: calc(-44px - var(--s-3) + var(--s-1)) 0 calc(var(--s-1) * -1);
+  background: var(--c-surface-2);
+  border: none;
+  border-radius: 50%;
+  color: var(--c-text-primary);
+  cursor: pointer;
+}
+.ss-sheet__scroll {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-4);
+  max-height: 62dvh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.ss-sheet__section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+.ss-sheet__heading {
+  margin: 0;
+  font-size: var(--font-size-200);
+  font-weight: 600;
+  color: var(--c-text-primary);
+}
+.ss-sheet__footer {
+  display: grid;
+  grid-template-columns: 1fr 1.4fr;
+  gap: var(--s-2);
+}
+.ss-segment {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: 1fr;
+  gap: var(--s-1);
+  padding: var(--s-1);
+  background: var(--c-surface-2);
+  border-radius: var(--r-md);
+}
+.ss-segment__item {
+  min-height: 40px;
+  font-size: var(--font-size-200);
+  font-weight: 600;
+  color: var(--c-text-primary);
+  background: transparent;
+  border: none;
+  border-radius: var(--r-sm);
+  cursor: pointer;
+}
+.ss-segment__item--on {
+  background: var(--c-accent);
+  color: var(--c-text-on-accent);
+}
+.ss-segment__item:focus-visible,
+.ss-pager__btn:focus-visible,
+.ss-month__day:focus-visible {
+  outline: 2px solid var(--c-accent);
+  outline-offset: 2px;
+}
+.ss-pager {
+  display: grid;
+  grid-template-columns: 44px 1fr 44px;
+  align-items: center;
+}
+.ss-pager__btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  background: transparent;
+  border: none;
+  color: var(--c-text-primary);
+  cursor: pointer;
+}
+.ss-pager__label {
+  text-align: center;
+  font-size: var(--font-size-200);
+  font-weight: 600;
+  color: var(--c-text-primary);
+}
+.ss-month {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+}
+.ss-month__week {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: var(--s-1);
+}
+.ss-month__day,
+.ss-month__gap {
+  min-height: 40px;
+}
+.ss-month__day {
+  font-size: var(--font-size-200);
+  color: var(--c-text-primary);
+  background: transparent;
+  border: none;
+  border-radius: var(--r-sm);
+  cursor: pointer;
+}
+.ss-month__day--on {
+  background: var(--c-accent);
+  color: var(--c-text-on-accent);
+  font-weight: 600;
+}
+.ss-options {
+  display: flex;
+  flex-direction: column;
+}
+.ss-option {
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+  min-height: 52px;
+  padding: var(--s-1) var(--s-3);
+  border-radius: var(--r-md);
+  cursor: pointer;
+}
+.ss-option--on {
+  background: var(--c-accent-subtle);
+}
+.ss-option__text {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+}
+.ss-option__title {
+  font-size: var(--font-size-200);
+  color: var(--c-text-primary);
+}
+.ss-option--all .ss-option__title {
+  font-weight: 600;
+}
+.ss-option__sub {
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+.ss-check {
+  width: 22px;
+  height: 22px;
+  flex: none;
+  accent-color: var(--c-accent);
+}

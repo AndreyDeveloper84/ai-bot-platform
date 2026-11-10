@@ -230,6 +230,38 @@ def _build_visit(proxy: RemoteBookingProxy, *, service_names, client_names, now)
     )
 
 
+def salon_roster(tenant) -> list[CatalogMaster]:
+    """Мастера дня салона: все неархивные, по имени.
+
+    Один ростер на день (:func:`build_salon_day`) и на кадр
+    (``views_salon_frame``, DRF-2933): экран складывает два ответа по мастеру,
+    и два разных списка мастеров разошлись бы молча.
+    """
+
+    with tenant_scope(tenant):
+        return list(
+            CatalogMaster.objects.filter(tenant_id=tenant.id, archived_at__isnull=True).order_by(
+                "name"
+            )
+        )
+
+
+def masters_by_specialist_key(masters: Iterable[CatalogMaster]) -> dict[UUID, CatalogMaster]:
+    """Мастер по каждому из его ключей каталога (:func:`specialist_keys`).
+
+    То же правило, каким день вяжет визиты с мастерами (DRF-2185): у строки
+    синка ключ один — первичный, у соло и склеенного приглашения ещё и
+    ``catalog_specialist_id``. При совпадении ключа побеждает последний по
+    порядку ростера — как в корзинах :func:`build_salon_day`.
+    """
+
+    index: dict[UUID, CatalogMaster] = {}
+    for master in masters:
+        for key in specialist_keys(master):
+            index[key] = master
+    return index
+
+
 def build_salon_day(tenant, *, day: date_cls, now: datetime | None = None) -> SalonDay:
     """Every master's visits for one tenant-local calendar day.
 
@@ -264,11 +296,7 @@ def build_salon_day(tenant, *, day: date_cls, now: datetime | None = None) -> Sa
         service_names = _resolve_service_names((p.service_id for p in proxies), tenant.id)
         client_names = _resolve_client_names((p.bot_user_id for p in proxies), tenant.id)
 
-        masters = list(
-            CatalogMaster.objects.filter(tenant_id=tenant.id, archived_at__isnull=True).order_by(
-                "name"
-            )
-        )
+        masters = salon_roster(tenant)
     # DRF-2185: зеркало ключится каталожным id мастера; у соло/склеенного
     # он ≠ pk — одна корзина на мастера под каждым из его ключей, иначе
     # его визиты уходят в сироты, а колонка пуста.
@@ -321,4 +349,6 @@ __all__ = [
     "SalonDay",
     "build_salon_day",
     "day_bounds_utc",
+    "masters_by_specialist_key",
+    "salon_roster",
 ]

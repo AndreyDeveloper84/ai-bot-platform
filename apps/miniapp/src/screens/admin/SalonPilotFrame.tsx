@@ -25,7 +25,8 @@
  * * **Меню «⋮» на каждом разделе.** DRF-1235 подтвердил для P0 ровно один
  *   его пункт — «Рабочее время», а это пункт «Расписания». С DRF-2936 экран
  *   рабочего времени есть, и меню стоит там, где его пункт имеет смысл:
- *   «Расписание» передаёт его в `actions`. Сама рамка меню не рисует.
+ *   «Расписание» передаёт его в `titleActions` (DRF-2933 — в строке
+ *   заголовка, как на макете). Сама рамка меню не рисует.
  *
  * Вложенные потоки пилота (создание записи, детали записи, очередь
  * диалогов) — отдельные экраны с явным возвратом, и DRF-1235 прямо
@@ -46,6 +47,8 @@ export function SalonPilotFrame({
   title,
   subtitle,
   actions,
+  overline,
+  titleActions,
   children,
 }: {
   me: MeResponse;
@@ -58,8 +61,16 @@ export function SalonPilotFrame({
    * выглядела бы как ответ сервера и врала бы про часовой пояс салона.
    */
   subtitle?: string | null;
-  /** Кнопки шапки слева от аватара — меню «Расписания» (DRF-2936). */
+  /** Кнопки шапки слева от аватара. */
   actions?: ReactNode;
+  /**
+   * Строка НАД заголовком и кнопки справа от него — шапка «Расписания»
+   * (DRF-2933, кадр 1 макета DRF-2854: дата над словом «Расписание»,
+   * календарь и «⋯» в той же строке). Не заданы — заголовок рисуется как
+   * прежде, у «Сегодня» и «Ayla» ничего не меняется.
+   */
+  overline?: string | null;
+  titleActions?: ReactNode;
   children: ReactNode;
 }) {
   // Корень поверхности: системной «назад» нечего показывать.
@@ -74,7 +85,17 @@ export function SalonPilotFrame({
         {actions ? <div className="salon-pilot__actions">{actions}</div> : null}
         <AvatarSheet name={me.user.name} items={avatarSheetItemsFor(me)} />
       </div>
-      <h1 className="screen__title">{title}</h1>
+      {overline != null || titleActions ? (
+        <div className="salon-pilot__titlerow">
+          <div className="salon-pilot__titles">
+            {overline != null ? <p className="salon-pilot__overline">{overline}</p> : null}
+            <h1 className="screen__title salon-pilot__title">{title}</h1>
+          </div>
+          {titleActions ? <div className="salon-pilot__title-actions">{titleActions}</div> : null}
+        </div>
+      ) : (
+        <h1 className="screen__title">{title}</h1>
+      )}
       {subtitle ? <p className="salon-pilot__subtitle">{subtitle}</p> : null}
       <div className="screen__body">{children}</div>
       <SalonPilotTabBar />

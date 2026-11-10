@@ -14,6 +14,7 @@ import {
   type BookingSlot,
   type AdminBookingDetail,
 } from "../../lib/admin-api";
+import { bookingDetailBack } from "../../lib/salon-return";
 import { backTo } from "../../lib/screen-back";
 import { signalReady } from "../../lib/max-sdk";
 import { parseSalonWallClock } from "../../lib/format";
@@ -24,26 +25,6 @@ type Phase =
   | { kind: "error"; err: unknown };
 
 type Mode = "idle" | "cancel" | "reschedule" | "pending" | "conflict";
-
-/**
- * День «Рабочего времени» (DRF-2936): из конфликта с записями человек уходит
- * в карточку записи и возвращается к своему дню, где ждёт черновик. Адрес
- * закрытого вида, а не любой: состояние маршрута приходит снаружи.
- */
-const WORKING_TIME_DAY = /^\/admin\/working-time\/[0-9A-Za-z%_-]+\/\d{4}-\d{2}-\d{2}$/;
-
-function safeBack(state: unknown): string {
-  if (state && typeof state === "object" && "from" in state) {
-    const from = (state as { from?: unknown }).from;
-    if (
-      typeof from === "string" &&
-      (from === "/admin/today" || from === "/admin/schedule" || WORKING_TIME_DAY.test(from))
-    ) {
-      return from;
-    }
-  }
-  return "/admin/schedule";
-}
 
 function wireDate(iso: string): string {
   return parseSalonWallClock(iso)?.ymd ?? iso;
@@ -62,7 +43,7 @@ function clientName(data: AdminBookingDetail): string {
 export function AdminBookingDetailScreen() {
   const { id = "" } = useParams<{ id: string }>();
   const location = useLocation();
-  useScreenBack(backTo(safeBack(location.state)));
+  useScreenBack(backTo(bookingDetailBack(location.state)));
 
   const [phase, setPhase] = useState<Phase>({ kind: "loading" });
   const [busy, setBusy] = useState(false);
