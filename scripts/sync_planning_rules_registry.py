@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import sys
 import urllib.error
 import urllib.parse
@@ -35,6 +36,14 @@ SOURCE_PATH = REPO_ROOT / "apps" / "planning_rules" / "data" / "source.json"
 
 RAW_URL = "https://raw.githubusercontent.com/{repository}/{ref}/{path}"
 
+#: Токен чтения источника. ayla-knowledge закрыт с 06.11.2026 (DRF-1703):
+#: анонимный запрос к raw.githubusercontent.com отвечает 404 и для закрытого
+#: репозитория, и для несуществующего пути — одинаково. С токеном, у которого
+#: есть чтение содержимого ayla-knowledge, тот же URL отдаёт файл. Значение
+#: никогда не печатается; переменная не задана — запрос идёт анонимно, как
+#: раньше (локальный запуск с открытым источником).
+TOKEN_ENV = "PLANNING_RULES_SOURCE_TOKEN"
+
 
 def _fetch_registry(repository: str, ref: str, path: str) -> bytes:
     url = RAW_URL.format(
@@ -42,9 +51,24 @@ def _fetch_registry(repository: str, ref: str, path: str) -> bytes:
         ref=urllib.parse.quote(ref, safe=""),
         path=urllib.parse.quote(path, safe="/"),
     )
-    request = urllib.request.Request(url, headers={"User-Agent": "ayla-planning-rules-sync"})
-    with urllib.request.urlopen(request, timeout=30) as response:
-        return response.read()
+    headers = {"User-Agent": "ayla-planning-rules-sync"}
+    token = os.environ.get(TOKEN_ENV, "").strip()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    request = urllib.request.Request(url, headers=headers)
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            return response.read()
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404 and not token:
+            raise urllib.error.HTTPError(
+                exc.url,
+                exc.code,
+                f"{exc.reason}; {repository} закрыт — задайте {TOKEN_ENV} с правом чтения его содержимого",
+                exc.headers,
+                None,
+            ) from None
+        raise
 
 
 def _load_source() -> dict:
