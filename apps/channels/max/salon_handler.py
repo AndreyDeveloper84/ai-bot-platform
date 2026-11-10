@@ -1367,12 +1367,13 @@ def _already_has_a_solo_workspace(bot_user) -> bool:
     Без этой проверки человек, у которого кабинет уже есть, получал бы
     предложение завести его снова и узнавал бы правду только после
     нажатия. Не молчание, но и не ответ.
-    """
-    from apps.identity.services.solo_onboarding import _solo_tenant_slug
-    from apps.tenancy.models import Tenant
 
-    slug = _solo_tenant_slug(bot_user.channel, bot_user.channel_user_id)
-    return Tenant.objects.filter(slug=slug).exists()
+    Кабинет, закрытый удалением аккаунта, кабинетом не считается: человек
+    вернулся — ему заводят новый (решение владельца 10.11.2026).
+    """
+    from apps.identity.services.solo_onboarding import active_solo_tenant
+
+    return active_solo_tenant(bot_user.channel, bot_user.channel_user_id) is not None
 
 
 def _solo_identity_rejected(bot_user) -> bool:

@@ -106,11 +106,17 @@ def revoke_staff_access(
     reason: str = "",
     surface: str = "",
     actor_label: str = "",
+    allow_owner: bool = False,
 ) -> RevokeResult:
     """Take away every salon-side capability ``bot_user`` holds in ``tenant``.
 
     Idempotent: a second call finds nothing active and returns a result
     with ``changed=False``.
+
+    ``allow_owner`` — the one caller that may take the owner row too: the
+    account-deletion cascade closing a one-person solo cabinet (the owner IS
+    the cabinet, nobody is locked out). No human surface passes it; the
+    refusal below stays the rule everywhere else.
 
     ``surface`` / ``actor_label`` (DRF-2082): who revoked and from where when
     the actor has no ``BotUser`` — a platform operator in Django Admin. Both
@@ -140,7 +146,7 @@ def revoke_staff_access(
             )
         )
 
-        if any(row.role == TenantStaff.Role.OWNER for row in rows):
+        if not allow_owner and any(row.role == TenantStaff.Role.OWNER for row in rows):
             logger.info(
                 "identity.staff_revoke.owner_refused tenant=%s person=%s",
                 tenant.slug,

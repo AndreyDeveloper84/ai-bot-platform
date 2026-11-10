@@ -73,7 +73,7 @@ from collections import defaultdict
 
 from django.core.management.base import BaseCommand
 
-from apps.identity.services.solo_onboarding import _solo_tenant_slug
+from apps.identity.services.solo_onboarding import is_own_solo_slug
 from apps.tenancy.models import Tenant, TenantStaff
 
 #: Вид слага соло-тенанта. Используется ТОЛЬКО в диагностической строке
@@ -127,7 +127,7 @@ class Command(BaseCommand):
                 if tenant.slug.startswith(SOLO_SHAPE):
                     solo_shaped_ownerless += 1
                 continue
-            if not any(_solo_tenant_slug(*identity) == tenant.slug for identity in identities):
+            if not any(is_own_solo_slug(tenant.slug, *identity) for identity in identities):
                 # Пересчёт не сошёлся: либо салон, либо слаг соло-вида,
                 # заведённый не provisioning-ом этих личностей.
                 not_solo += 1
