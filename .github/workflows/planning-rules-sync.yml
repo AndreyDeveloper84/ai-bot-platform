@@ -34,4 +34,12 @@ jobs:
         run: python -m pip install "PyYAML==6.0.2"
 
       - name: Check registry drift against ayla-knowledge
+        # ayla-knowledge закрыт с 06.11.2026 (DRF-1703); анонимно raw отдаёт
+        # 404, и сверка падала каждую ночь с 07.11. Токен — тот же секрет,
+        # которым ставится ayla-ai-core; ему нужно чтение содержимого
+        # ayla-knowledge (на 10.11.2026 этого права у секрета нет — сверка
+        # красная, пока токен не перевыпущен на оба репозитория).
+        # Скрипт значение не печатает.
+        env:
+          PLANNING_RULES_SOURCE_TOKEN: ${{ secrets.GH_DEPLOY_TOKEN }}
         run: python scripts/sync_planning_rules_registry.py --check
