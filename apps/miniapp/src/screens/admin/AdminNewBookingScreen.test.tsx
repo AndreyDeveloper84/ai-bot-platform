@@ -7,7 +7,7 @@
  */
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../../lib/admin-api", async (importOriginal) => {
@@ -39,6 +39,11 @@ const mockedServices = vi.mocked(getCatalogServicesForAdmin);
 const mockedMasters = vi.mocked(listMasters);
 const mockedSearch = vi.mocked(searchSalonCustomers);
 const mockedCreate = vi.mocked(createSalonBooking);
+
+function Where() {
+  const location = useLocation();
+  return <output data-testid="where">{`${location.pathname}${location.search}`}</output>;
+}
 
 function renderScreen() {
   render(
@@ -148,6 +153,96 @@ describe("prefill from the admin assistant (DRF-2119)", () => {
     await waitFor(() => expect(mockedMasters).toHaveBeenCalled());
     expect(await screen.findByLabelText(/^Мастер: выбрать/)).toBeInTheDocument();
     expect(screen.getByLabelText(/^Услуга: выбрать/)).toBeInTheDocument();
+  });
+});
+
+describe("свободное окно из «Расписания» салона (DRF-2933, макет DRF-2854)", () => {
+  const TWO_MASTERS = {
+    items: ["Анна", "Инна"].map((name, i) => ({
+      id: `m-${i + 1}`,
+      name,
+      specialization: "",
+      photo_url: "",
+      is_active: true,
+      invite_status: "accepted",
+      last_seen_at: null,
+      services_count: 1,
+    })),
+    next_cursor: null,
+    total_count: 2,
+  };
+
+  function renderWithQuery(query: string) {
+    render(
+      <MemoryRouter initialEntries={[`/admin/booking/new?${query}`]}>
+        <AdminNewBookingScreen />
+      </MemoryRouter>,
+    );
+  }
+
+  it("мастер подставлен — окно показано подписью «с чего начали», время не выбрано", async () => {
+    renderWithQuery("return=schedule&date=2026-08-21&master_id=m-1&from=12%3A00&to=13%3A00");
+
+    expect(await screen.findByLabelText(/^Мастер: Анна/)).toBeInTheDocument();
+    const window1 = screen.getByText("Выбранное окно").closest(".callout")!;
+    expect(window1).toHaveTextContent("12:00–13:00");
+    // Окно — контекст, а не время записи: слот выбирается из расписания.
+    expect(screen.getByLabelText(/^Дата и время: выбрать/)).toBeInTheDocument();
+    expect(mockedCreate).not.toHaveBeenCalled();
+  });
+
+  it("мастера нет в списке — окна тоже нет: оно не висит над пустой строкой «Мастер»", async () => {
+    renderWithQuery("return=schedule&date=2026-08-21&master_id=m-other&from=12%3A00&to=13%3A00");
+
+    expect(await screen.findByLabelText(/^Мастер: выбрать/)).toBeInTheDocument();
+    expect(screen.queryByText("Выбранное окно")).toBeNull();
+  });
+
+  it("половина окна и мусор — не окно", async () => {
+    renderWithQuery("return=schedule&date=2026-08-21&master_id=m-1&from=12%3A00&to=%D0%B2%D0%B5%D1%87%D0%B5%D1%80");
+
+    expect(await screen.findByLabelText(/^Мастер: Анна/)).toBeInTheDocument();
+    expect(screen.queryByText("Выбранное окно")).toBeNull();
+  });
+
+  it("смена мастера снимает окно и говорит об этом", async () => {
+    mockedMasters.mockResolvedValue(TWO_MASTERS);
+    renderWithQuery("return=schedule&date=2026-08-21&master_id=m-1&from=12%3A00&to=13%3A00");
+    expect(await screen.findByText("Выбранное окно")).toBeInTheDocument();
+
+    screen.getByLabelText(/^Мастер: Анна/).click();
+    (await screen.findByText("Инна")).click();
+
+    expect(await screen.findByLabelText(/^Мастер: Инна/)).toBeInTheDocument();
+    expect(screen.queryByText("Выбранное окно")).toBeNull();
+    expect(screen.getByText("Выбранное окно снято — оно было у другого мастера.")).toBeInTheDocument();
+  });
+
+  it("возврат ведёт на тот же день «Расписания», а с дня мастера — к мастеру", async () => {
+    const view = render(
+      <MemoryRouter initialEntries={["/admin/booking/new?return=schedule&date=2026-08-21&master_id=m-1"]}>
+        <Routes>
+          <Route path="/admin/booking/new" element={<AdminNewBookingScreen />} />
+          <Route path="*" element={<Where />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    (await screen.findByRole("button", { name: "← Расписание" })).click();
+    expect(await screen.findByTestId("where")).toHaveTextContent("/admin/schedule?date=2026-08-21");
+    view.unmount();
+
+    render(
+      <MemoryRouter
+        initialEntries={["/admin/booking/new?return=schedule-master&date=2026-08-21&master_id=m-1"]}
+      >
+        <Routes>
+          <Route path="/admin/booking/new" element={<AdminNewBookingScreen />} />
+          <Route path="*" element={<Where />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    (await screen.findByRole("button", { name: "← Расписание" })).click();
+    expect(await screen.findByTestId("where")).toHaveTextContent("/admin/schedule/master/m-1?date=2026-08-21");
   });
 });
 

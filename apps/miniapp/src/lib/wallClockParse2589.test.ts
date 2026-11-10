@@ -79,6 +79,9 @@ describe("часы из строки ISO — только в lib/format.ts (DRF-
     const marked = Object.entries(SOURCES).filter(
       ([p, t]) => !/\.test\.(ts|tsx)$/.test(p) && MARK.test(t),
     );
-    expect(marked.length).toBeGreaterThanOrEqual(4);
+    // Было четыре: четвёртым был экран «Расписание» салона до v2 (DRF-2933) —
+    // он резал «ЧЧ:ММ» из строк предпросмотра закрытия. Предпросмотр уехал в
+    // «Рабочее время», экран переписан и строк больше не режет.
+    expect(marked.length).toBeGreaterThanOrEqual(3);
   });
 });

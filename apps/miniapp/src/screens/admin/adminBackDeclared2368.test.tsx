@@ -41,6 +41,9 @@ const BACK_TARGETS: ReadonlyArray<readonly [string, string]> = [
   ["AdminNewBookingScreen", "returnTo.path"],
   // DRF-2936: в список «Рабочего времени» входят из «Расписания».
   ["SalonPilotWorkingTimeScreen", '"/admin/schedule"'],
+  // DRF-2933: день мастера возвращает в «Расписание» той же даты — адрес
+  // собирает `schedulePath` из проверенной даты, а не из строки запроса.
+  ["SalonPilotScheduleMasterScreen", "schedulePath(wanted)"],
 ];
 
 describe("Возврат объявлен адресом, и адрес тот самый", () => {
@@ -96,6 +99,7 @@ describe("Возврат в кабинете — адрес, а не истор�
     "SalonPilotWorkingTimeScreen",
     "SalonPilotWorkingTimeWeekScreen",
     "SalonPilotWorkingTimeDayScreen",
+    "SalonPilotScheduleMasterScreen",
   ])("%s не ходит по истории", (screen) => {
     // `navigate(-1)` в кабинете не встречался ни разу — пусть так и
     // останется: в приложение заходят по ссылке из бота, истории может не

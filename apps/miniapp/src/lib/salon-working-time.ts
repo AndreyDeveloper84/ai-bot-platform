@@ -110,6 +110,8 @@ export const WT_COPY = {
   conflict: {
     title: "Конфликт с записями",
     body: "В выбранное время есть записи клиентов. Сначала перенесите или отмените их.",
+    /** Не из макета: строка переехала с «Расписания» вместе с предпросмотром (DRF-2933). */
+    refund: (percent: number) => `при отмене вернётся ${percent}%`,
     open: "Перейти к записям",
     cancel: "Отмена",
   },
@@ -852,6 +854,12 @@ export interface ConflictRow {
   client: string | null;
   /** Запись есть в зеркале — её карточку можно открыть. */
   linkable: boolean;
+  /**
+   * Сколько процентов вернётся клиенту при отмене — из того же предпросмотра.
+   * До DRF-2933 это показывал блок «Закрыть время — кого затронет» на
+   * «Расписании»; блок ушёл сюда, и строка с ним. `null` — каталог не сказал.
+   */
+  refundPercent: number | null;
 }
 
 /**
@@ -883,6 +891,7 @@ export function conflictRows(
         service: row.service_name,
         client,
         linkable: booking !== undefined,
+        refundPercent: row.refund_percent_if_cancelled ?? null,
       });
     }
   }

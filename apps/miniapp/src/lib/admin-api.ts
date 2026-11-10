@@ -1273,6 +1273,13 @@ export type FrameList = WireList<FrameInterval>;
 
 export interface SalonFrameMaster {
   specialist_id: string;
+  /**
+   * Мастер дня салона (`SalonDayMaster.master_id`), которому принадлежит
+   * строка (DRF-2933). `specialist_id` — id каталога, а день салона знает
+   * мастера по строке зеркала; у соло и склеенного приглашения они разные.
+   * `null` — пары в салоне нет; поля нет — прежний сервер.
+   */
+  master_id?: string | null;
   display_name: string;
   is_working_day: boolean;
   schedule_note: string | null;
@@ -1282,9 +1289,21 @@ export interface SalonFrameMaster {
   absences: FrameList;
 }
 
+/** Закрытие салона на день или его часть (DRF-2933). */
+export interface SalonFrameClosure {
+  /** «ЧЧ:ММ»; `null` — с начала дня. */
+  start: string | null;
+  /** «ЧЧ:ММ»; `null` — до конца дня. */
+  end: string | null;
+  is_full_day: boolean;
+  reason: string;
+}
+
 export interface SalonDayFrame {
   date: string | null;
   source: string;
+  /** Закрытия салона на эту дату; поля нет — прежний сервер. */
+  closures?: WireList<SalonFrameClosure>;
   masters: SalonFrameMaster[];
   /** Какие списки экран не вправе показать полными. */
   unreadable_lists: string[];

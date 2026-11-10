@@ -103,6 +103,28 @@ describe("draft invalidation (§16)", () => {
     expect(slotInvalidatedBy).toBeUndefined();
   });
 
+  it("drops «Выбранное окно» when the master changes — it was the previous master's (DRF-2933)", () => {
+    // The salon schedule opens the draft with ONE master's free range. Under
+    // another master that range describes time nobody offered.
+    const { draft, windowDropped } = applyDraftAction(draftWithSlot(), {
+      type: "master/set",
+      master: INNA,
+    });
+    expect(draft.window).toBeNull();
+    expect(windowDropped).toBe(true);
+  });
+
+  it("keeps the window on the first assignment and on re-selecting the same master", () => {
+    const unassigned = { ...draftWithSlot(), master: null, slot: null };
+    const first = applyDraftAction(unassigned, { type: "master/set", master: ANNA });
+    expect(first.draft.window).toEqual(WINDOW);
+    expect(first.windowDropped).toBeUndefined();
+
+    const same = applyDraftAction(draftWithSlot(), { type: "master/set", master: { ...ANNA } });
+    expect(same.draft.window).toEqual(WINDOW);
+    expect(same.windowDropped).toBeUndefined();
+  });
+
   it("re-selecting the same master is not a change", () => {
     const { draft, slotInvalidatedBy } = applyDraftAction(draftWithSlot(), {
       type: "master/set",

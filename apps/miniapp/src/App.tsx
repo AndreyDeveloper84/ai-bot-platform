@@ -99,6 +99,7 @@ import { SalonPlanChangeScreen } from "./screens/admin/SalonPlanChangeScreen";
 import { SalonBillingRedirect } from "./components/SalonBillingRedirect";
 import { AdminTeamScreen } from "./screens/admin/AdminTeamScreen";
 import { SalonPilotAylaScreen } from "./screens/admin/SalonPilotAylaScreen";
+import { SalonPilotScheduleMasterScreen } from "./screens/admin/SalonPilotScheduleMasterScreen";
 import { SalonPilotScheduleScreen } from "./screens/admin/SalonPilotScheduleScreen";
 import { SalonPilotWorkingTimeDayScreen } from "./screens/admin/SalonPilotWorkingTimeDayScreen";
 import { SalonPilotWorkingTimeScreen } from "./screens/admin/SalonPilotWorkingTimeScreen";
@@ -331,6 +332,20 @@ function adminRouteElements(me: MeResponse): React.ReactNode {
         element={
           canOpenSalonPilot(me) ? (
             <SalonPilotScheduleScreen me={me} />
+          ) : (
+            <AdminSectionDeniedScreen me={me} section="Расписание" />
+          )
+        }
+      />
+      {/*
+        DRF-2933 — день одного мастера из «Расписания» (макет DRF-2854,
+        кадр 12). Вложенный экран того же раздела и под тем же стражем.
+      */}
+      <Route
+        path="/admin/schedule/master/:masterId"
+        element={
+          canOpenSalonPilot(me) ? (
+            <SalonPilotScheduleMasterScreen />
           ) : (
             <AdminSectionDeniedScreen me={me} section="Расписание" />
           )

@@ -1,64 +1,99 @@
 /**
- * «Расписание» салона, режим одного мастера (DRF-1237, срез A1).
+ * DRF-2933 — «Расписание» салона v2 по макету DRF-2854 FROZEN v1.0.
  *
- * Три вещи, которые эти тесты держат помимо отрисовки:
+ * Держится то, что обещает замороженный контракт:
  *
- * * **выбор мастера берётся из дня салона, где есть ВСЕ неархивные мастера.**
- *   Свободный мастер обязан быть в списке — иначе именно его расписание и
- *   нельзя открыть, а это тот случай, ради которого экран существует;
- * * **недоступный источник называется, а не рисуется пустым днём.** Пустой
- *   день читается как «мастер свободен весь день», и администратор предложит
- *   клиенту время, которого нет;
- * * **свободные окна подписаны как диапазон доступности, а не как слот.**
- *   Это не вежливость: обеденный перерыв в них сегодня протекает (DRF-1638),
- *   и запись такое время отклонит. Подпись — то немногое, что экран вправе
- *   сделать, не заводя четвёртого вычислителя доступности.
+ * * раскладка — числом показанных мастеров: сетка при двух–четырёх, лента по
+ *   времени при большем числе, день списком при одном (MUST FIX 1 и 6);
+ * * экран ничего не пишет: запись ведёт в карточку, свободное окно и «+» —
+ *   в ручную запись с контекстом, блок — в «Рабочее время» (MUST FIX 2–5);
+ * * свободное окно — только строка сервера; на прошедшей дате, в день
+ *   закрытого салона, без сети и после пяти минут оно не действие (MUST FIX 7);
+ * * день читается из двух ответов, и «смены не загрузились» — не «все
+ *   свободны».
  */
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+vi.mock("../../lib/max-sdk", async (importOriginal) => {
+  const original = await importOriginal<typeof import("../../lib/max-sdk")>();
+  return { ...original, signalReady: () => undefined };
+});
 
 vi.mock("../../lib/admin-api", async (importOriginal) => {
   const original = await importOriginal<typeof import("../../lib/admin-api")>();
   return {
     ...original,
     getSalonDay: vi.fn(),
-    getMasterDaySchedule: vi.fn(),
     getSalonDayFrame: vi.fn(),
+    listMasters: vi.fn(),
+    getCatalogServicesForAdmin: vi.fn(),
+    getMasterDaySchedule: vi.fn(),
     getMasterSchedule: vi.fn(),
-    getMasterExceptions: vi.fn(),
-    getScheduleImpact: vi.fn(),
+    getMasterDetail: vi.fn(),
+    // Двери записи: «Расписание» не зовёт ни одну.
+    createSalonBooking: vi.fn(),
+    putDateException: vi.fn(),
+    deleteDateException: vi.fn(),
+    createTimeOff: vi.fn(),
+    deleteTimeOff: vi.fn(),
   };
 });
 
 import {
+  createSalonBooking,
+  createTimeOff,
+  deleteDateException,
+  deleteTimeOff,
+  getCatalogServicesForAdmin,
   getMasterDaySchedule,
-  getMasterExceptions,
+  getMasterDetail,
   getMasterSchedule,
   getSalonDay,
   getSalonDayFrame,
-  getScheduleImpact,
+  listMasters,
+  putDateException,
   type MasterDay,
-  type MasterExceptions,
+  type MasterDetail,
   type MasterSchedule,
   type MeResponse,
   type SalonDayFrame,
   type SalonDayResponse,
   type SalonDayVisit,
-  type ScheduleImpact,
+  type SalonFrameMaster,
 } from "../../lib/admin-api";
+import { ApiError } from "../../lib/api";
+import { settleScenario } from "../../test/settleScenario";
+import { SalonPilotScheduleMasterScreen } from "./SalonPilotScheduleMasterScreen";
 import { SalonPilotScheduleScreen } from "./SalonPilotScheduleScreen";
 
-const mockedDay = vi.mocked(getSalonDay);
-const mockedSchedule = vi.mocked(getMasterDaySchedule);
-const mockedFrame = vi.mocked(getSalonDayFrame);
-const mockedWeek = vi.mocked(getMasterSchedule);
-const mockedAssigned = vi.mocked(getMasterExceptions);
-const mockedImpact = vi.mocked(getScheduleImpact);
+const mocked = {
+  day: vi.mocked(getSalonDay),
+  frame: vi.mocked(getSalonDayFrame),
+  roster: vi.mocked(listMasters),
+  services: vi.mocked(getCatalogServicesForAdmin),
+  masterDay: vi.mocked(getMasterDaySchedule),
+  weekly: vi.mocked(getMasterSchedule),
+  detail: vi.mocked(getMasterDetail),
+};
+
+const WRITES = [createSalonBooking, putDateException, deleteDateException, createTimeOff, deleteTimeOff].map((fn) =>
+  vi.mocked(fn),
+);
+
+/** Ни одной записи на сервер — «Расписание» только читает. */
+function expectNoWrites() {
+  for (const write of WRITES) expect(write).not.toHaveBeenCalled();
+}
+
+/** Понедельник далёкого года: дата будущая — свободные окна показываются. */
+const DAY = "2034-08-21";
+const FILTERS_KEY = "max:salon-schedule:filters:t-1";
 
 const ME: MeResponse = {
-  user: { id: "u-1", name: "Карина", phone_masked: "+7 *** **12" },
-  tenant: { id: "t-1", name: "Формула тела", slug: "formula-tela" },
+  user: { id: "u-1", name: "Администратор", phone_masked: "+7 *** **12" },
+  tenant: { id: "t-1", name: "Салон", slug: "salon" },
   role: "owner",
   capabilities: [],
   is_customer: false,
@@ -70,1007 +105,994 @@ const ME: MeResponse = {
   landing_path: "/admin/today",
 };
 
-function salonDay(): SalonDayResponse {
+const NAMES = ["Мастер Один", "Мастер Два", "Мастер Три", "Мастер Четыре", "Мастер Пять", "Мастер Шесть"];
+
+function visit(
+  id: string,
+  from: string,
+  to: string,
+  patch: Partial<SalonDayVisit> = {},
+  date: string = DAY,
+): SalonDayVisit {
   return {
-    date: "2026-09-10",
-    timezone: "Europe/Moscow",
-    summary: { total: 0, upcoming: 0, completed: 0, released: 0 },
-    masters: [
-      { master_id: "m-1", name: "Ольга", is_active: true, visits: [] },
-      // Мастер без визитов — он и есть проверяемый случай: расписание
-      // свободного человека открыть нужно чаще, чем занятого.
-      { master_id: "m-2", name: "Денис", is_active: true, visits: [] },
-    ],
-    orphan_visits: [],
-  };
-}
-
-function masterDay(patch: Partial<MasterDay> = {}): MasterDay {
-  return {
-    date: "2026-09-10",
-    is_off_day: false,
-    working_hours: { start: "10:00", end: "19:00" },
-    bookings: [],
-    blocks: [],
-    free_windows: [{ start: "10:00", end: "19:00", duration_min: 540 }],
-    conflicts: [],
-    ...patch,
-  };
-}
-
-/**
- * Недельный график в форме ответа `GET masters/<id>/schedule/`.
- *
- * По умолчанию — подтверждённый для ЭТИХ часов: положительный контроль, без
- * которого проверки «не подтверждено» зеленели бы на экране, где подтверждения
- * не показывают вовсе.
- */
-function weekSchedule(patch: Partial<MasterSchedule> = {}): MasterSchedule {
-  return {
-    source: "ayla",
-    has_working_day: true,
-    days: [0, 1, 2, 3, 4, 5, 6].map((i) => ({
-      day_of_week: i,
-      is_working_day: i !== 6,
-      start_time: i !== 6 ? "10:00" : null,
-      end_time: i !== 6 ? "19:00" : null,
-      break_start: null,
-      break_end: null,
-    })),
-    confirmation: {
-      confirmed_at: "2026-09-09T12:00:00+03:00",
-      confirmed_by: { id: "u-1", name: "Карина" },
-      is_current: true,
-      fingerprint: "abc",
-      block: null,
-    },
-    ...patch,
-  };
-}
-
-/**
- * Назначенное в форме ответа `GET masters/<id>/exceptions/`.
- *
- * По умолчанию — всё разобрано и пусто: положительный контроль для проверок
- * «показано не всё», которые иначе зеленели бы на экране, где раздела нет.
- */
-function assignedNothing(
-  patch: Partial<MasterExceptions> = {},
-): MasterExceptions {
-  const empty = { state: "none" as const, rows: [], seen_fields: [] };
-  return {
-    from: "2026-09-10",
-    to: "2026-09-16",
-    exceptions: empty,
-    time_off: empty,
-    closures: empty,
-    unreadable_lists: [],
-    writable: false,
-    ...patch,
-  };
-}
-
-function WorkingTimeProbe() {
-  const location = useLocation();
-  return <output data-testid="working-time-probe">{JSON.stringify(location.state ?? null)}</output>;
-}
-
-function renderScreen() {
-  return render(
-    <MemoryRouter>
-      <SalonPilotScheduleScreen me={ME} />
-    </MemoryRouter>,
-  );
-}
-
-describe("Расписание салона — режим одного мастера", () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-    mockedDay.mockResolvedValue(salonDay());
-    mockedSchedule.mockResolvedValue({
-      tenant_tz: "Europe/Moscow",
-      from: "2026-09-10",
-      to: "2026-09-10",
-      days: [masterDay()],
-    });
-    mockedWeek.mockResolvedValue(weekSchedule());
-    mockedAssigned.mockResolvedValue(assignedNothing());
-  });
-
-  it("в выборе есть и тот мастер, у которого нет записей", async () => {
-    renderScreen();
-
-    expect(await screen.findByRole("option", { name: "Ольга" })).toBeTruthy();
-    expect(screen.getByRole("option", { name: "Денис" })).toBeTruthy();
-  });
-
-  it("показывает смену и свободное время посчитанными сервером", async () => {
-    renderScreen();
-
-    expect(await screen.findByText("Смена 10:00–19:00")).toBeTruthy();
-    expect(screen.getByText(/10:00–19:00 · 540 мин/)).toBeTruthy();
-  });
-
-  it("свободное время подписано как диапазон, а не как гарантия", async () => {
-    // Несущая подпись: перерыв в окна протекает (DRF-1638), и запись такое
-    // время отклонит. Экран не чинит это своими руками — он не обещает.
-    renderScreen();
-
-    expect(
-      await screen.findByText(/диапазон доступности, а не готовый слот/),
-    ).toBeTruthy();
-  });
-
-  it("нерабочий день назван словами, а не пустым списком", async () => {
-    mockedSchedule.mockResolvedValue({
-      tenant_tz: "Europe/Moscow",
-      from: "2026-09-10",
-      to: "2026-09-10",
-      days: [
-        masterDay({ is_off_day: true, working_hours: null, free_windows: [] }),
-      ],
-    });
-
-    renderScreen();
-
-    expect(await screen.findByText("Сегодня не работает")).toBeTruthy();
-  });
-
-  it("устаревший день не переживает переключение на упавший запрос", async () => {
-    // Две прежние версии этого теста были украшениями, и обе поймала подмена.
-    //
-    // Первая мокала отказ СРАЗУ: «Смена» отсутствовала потому, что дня не
-    // было вовсе. Вторая перемонтировала экран новым ключом — состояние
-    // обнулялось само, без участия проверяемого кода.
-    //
-    // Настоящий случай — ТОТ ЖЕ экран: день показан, администратор
-    // переключил мастера, запрос упал. Если показанное останется, он увидит
-    // расписание Ольги под именем Дениса.
-    //
-    // Инвариант держат ДВА стража сразу: `setDay(null)` в `catch` и
-    // `err == null` на отрисовке. Снимешь один — второй удержит, и подмена
-    // промолчит на верном тесте. Доказательство снимает оба; повторяя его,
-    // снимайте оба, иначе прочитаете «тест бесполезен» там, где он рабочий.
-    renderScreen();
-    expect(await screen.findByText("Смена 10:00–19:00")).toBeTruthy();
-
-    mockedSchedule.mockRejectedValue(new Error("boom"));
-    fireEvent.change(screen.getByLabelText("Мастер"), {
-      target: { value: "m-2" },
-    });
-
-    await waitFor(() => {
-      expect(screen.queryByText("Смена 10:00–19:00")).toBeNull();
-    });
-    expect(screen.queryByText(/диапазон доступности/)).toBeNull();
-  });
-
-  it("конфликт показывается, а не прячется", async () => {
-    // Запись вне рабочих часов существует законно — салонная и уличная
-    // создаются вне рамки намеренно. Спрятать её значит заставить
-    // администратора гадать, почему день выглядит странно.
-    mockedSchedule.mockResolvedValue({
-      tenant_tz: "Europe/Moscow",
-      from: "2026-09-10",
-      to: "2026-09-10",
-      days: [
-        masterDay({
-          conflicts: [
-            {
-              type: "outside_hours",
-              booking_id: "b-1",
-              description: "Запись в 20:30 вне рабочих часов",
-            },
-          ],
-        }),
-      ],
-    });
-
-    renderScreen();
-
-    expect(
-      await screen.findByText("Запись в 20:30 вне рабочих часов"),
-    ).toBeTruthy();
-  });
-});
-
-/**
- * Режим «Все» — срез A2.
- *
- * Он складывает ДВА ответа: визиты из дня салона (зеркало) и кадр из Ayla.
- * Тесты держат три вещи, каждая из которых иначе стоила бы дефекта:
- *
- * * параллельные записи группируются по времени — ради этого режим и нужен;
- * * неразобранный список назван СЛОВАМИ. Молчаливая пустота прочиталась бы
- *   как «перерывов нет», и первый салон с обедом получил бы его показанным
- *   рабочим временем;
- * * свободного времени здесь нет вовсе — вычесть занятое из смены значило бы
- *   завести четвёртый вычислитель доступности (§17, DRF-1637).
- */
-function visit(patch: Partial<SalonDayVisit> = {}): SalonDayVisit {
-  return {
-    id: "v-1",
-    service_id: "s-1",
-    start_at: "2026-09-10T14:00:00+03:00",
-    end_at: "2026-09-10T15:00:00+03:00",
+    id,
+    service_id: "svc-1",
+    start_at: `${date}T${from}:00+03:00`,
+    end_at: `${date}T${to}:00+03:00`,
     duration_min: 60,
     status: "confirmed",
-    service_name: "Стрижка",
-    client_first_name: "Мария",
-    client_last_initial: "К.",
+    service_name: "Маникюр",
+    client_first_name: "Клиент",
+    client_last_initial: "А",
     is_in_progress: false,
     ...patch,
   };
 }
 
-function frameMaster(patch: Partial<SalonDayFrame["masters"][number]> = {}) {
+/** День салона: `count` мастеров; у первого две записи, у второго одна. */
+function salonDay(count = 4, date: string = DAY, patch: Partial<SalonDayResponse> = {}): SalonDayResponse {
+  const visits: Record<number, SalonDayVisit[]> = {
+    0: [visit("v-1", "09:00", "10:00", {}, date), visit("v-2", "10:30", "11:30", { service_id: "svc-2", service_name: "Стрижка" }, date)],
+    1: [visit("v-3", "10:00", "11:00", { client_last_initial: "Б" }, date)],
+  };
   return {
-    specialist_id: "m-1",
-    display_name: "Ольга",
+    date,
+    timezone: "Europe/Moscow",
+    summary: { total: 3, upcoming: 3, completed: 0, released: 0 },
+    masters: NAMES.slice(0, count).map((name, i) => ({
+      master_id: `m-${i + 1}`,
+      name,
+      is_active: true,
+      visits: visits[i] ?? [],
+    })),
+    orphan_visits: [],
+    ...patch,
+  };
+}
+
+const NONE = { state: "none" as const, rows: [], seen_fields: [] };
+const rows = (...pairs: Array<[string, string]>) => ({
+  state: "parsed" as const,
+  rows: pairs.map(([start, end]) => ({ start, end })),
+  seen_fields: [],
+});
+
+function frameRow(index: number, patch: Partial<SalonFrameMaster> = {}): SalonFrameMaster {
+  return {
+    specialist_id: `cat-${index}`,
+    master_id: `m-${index}`,
+    display_name: NAMES[index - 1] ?? "",
     is_working_day: true,
     schedule_note: null,
-    schedule_source: "ayla",
-    working_intervals: {
-      state: "parsed" as const,
-      rows: [{ start: "10:00", end: "19:00" }],
-      seen_fields: ["end_local", "start_local"],
-    },
-    breaks: { state: "none" as const, rows: [], seen_fields: [] },
-    absences: { state: "none" as const, rows: [], seen_fields: [] },
+    schedule_source: null,
+    working_intervals: rows(["09:00", "16:00"]),
+    breaks: NONE,
+    absences: NONE,
     ...patch,
   };
 }
 
-function frame(patch: Partial<SalonDayFrame> = {}): SalonDayFrame {
+/**
+ * Кадр: первый мастер с блоком 14–16, третий — выходной, четвёртого в кадре
+ * нет (часы неизвестны), остальные работают 09–16.
+ */
+function salonFrame(count = 4, date: string = DAY, patch: Partial<SalonDayFrame> = {}): SalonDayFrame {
+  const masters: SalonFrameMaster[] = [];
+  for (let i = 1; i <= count; i += 1) {
+    if (i === 4) continue;
+    masters.push(
+      frameRow(i, {
+        ...(i === 1 ? { absences: rows(["14:00", "16:00"]) } : {}),
+        ...(i === 3 ? { is_working_day: false, working_intervals: NONE } : {}),
+      }),
+    );
+  }
+  return { date, source: "ayla", closures: NONE, masters, unreadable_lists: [], ...patch };
+}
+
+function masterDay(patch: Partial<MasterDay> = {}): MasterDay {
   return {
-    date: "2026-09-10",
+    date: DAY,
+    is_off_day: false,
+    working_hours: { start: "09:00", end: "16:00" },
+    bookings: [],
+    blocks: [
+      { exception_id: "x-1", start: `${DAY}T14:00:00+03:00`, end: `${DAY}T15:00:00+03:00`, reason: "sick", approved: true },
+    ],
+    free_windows: [{ start: "12:00", end: "13:00", duration_min: 60 }],
+    conflicts: [],
+    ...patch,
+  };
+}
+
+function weekly(confirmed = false): MasterSchedule {
+  return {
     source: "ayla",
-    masters: [frameMaster()],
-    unreadable_lists: [],
-    ...patch,
+    has_working_day: true,
+    days: [],
+    confirmation: confirmed
+      ? { confirmed_at: "2034-08-01T10:00:00+03:00", confirmed_by: { id: "u-1", name: "Владелец" }, is_current: true, fingerprint: "f", block: null }
+      : { confirmed_at: null, confirmed_by: null, is_current: false, fingerprint: "f", block: null },
   };
 }
 
-async function switchToAll() {
-  fireEvent.click(await screen.findByRole("tab", { name: "Все" }));
+const SERVICES = [
+  { id: "svc-1", name: "Маникюр", duration_min: 60 },
+  { id: "svc-2", name: "Стрижка", duration_min: 30 },
+];
+
+const DETAIL = {
+  id: "m-1",
+  name: "Мастер Один",
+  specialization: "Парикмахер",
+  bio: "Стригу с 2015 года.",
+  experience: "10 лет",
+  photo_url: "",
+  is_active: true,
+  services: [{ id: "svc-2", name: "Стрижка" }],
+} as unknown as MasterDetail;
+
+function Where() {
+  const location = useLocation();
+  return (
+    <output data-testid="where">
+      {`${location.pathname}${location.search}|${JSON.stringify(location.state ?? null)}`}
+    </output>
+  );
+}
+const where = () => screen.getByTestId("where").textContent ?? "";
+
+function renderAt(entry: string) {
+  return render(
+    <MemoryRouter initialEntries={[entry]}>
+      <Routes>
+        <Route path="/admin/schedule" element={<SalonPilotScheduleScreen me={ME} />} />
+        <Route path="/admin/schedule/master/:masterId" element={<SalonPilotScheduleMasterScreen />} />
+        <Route path="*" element={<p>другой экран</p>} />
+      </Routes>
+      <Where />
+    </MemoryRouter>,
+  );
 }
 
-describe("Расписание салона — режим «Все»", () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-    mockedDay.mockResolvedValue(salonDay());
-    mockedSchedule.mockResolvedValue({
-      tenant_tz: "Europe/Moscow",
-      from: "2026-09-10",
-      to: "2026-09-10",
-      days: [masterDay()],
-    });
-    mockedFrame.mockResolvedValue(frame());
-    mockedWeek.mockResolvedValue(weekSchedule());
-    mockedAssigned.mockResolvedValue(assignedNothing());
-  });
+/** Сколько мастеров отдают день и кадр по умолчанию. */
+let team = 4;
 
-  it("параллельные записи стоят под одним временем, а не в четырёх колонках", async () => {
-    const base = salonDay();
-    mockedDay.mockResolvedValue({
-      ...base,
-      masters: [
-        { ...base.masters[0]!, visits: [visit({ id: "v-1" })] },
-        {
-          ...base.masters[1]!,
-          visits: [
-            visit({
-              id: "v-2",
-              client_first_name: "Пётр",
-              service_name: "Бритьё",
-            }),
-          ],
-        },
-      ],
-    });
-
-    renderScreen();
-    await switchToAll();
-
-    expect(await screen.findByText("14:00")).toBeTruthy();
-    expect(screen.getByText(/Ольга · Стрижка · Мария К\./)).toBeTruthy();
-    expect(screen.getByText(/Денис · Бритьё · Пётр К\./)).toBeTruthy();
-    // Одно время на обе записи, а не два одинаковых заголовка.
-    expect(screen.getAllByText("14:00")).toHaveLength(1);
-  });
-
-  it("часы берутся со смещением салона, а не пересчитываются в пояс браузера", async () => {
-    // Проверка НЕ ЗАВИСИТ от пояса, в котором идёт прогон, и в этом весь
-    // смысл. Прежний код печатал часы через `new Date`, то есть в поясе
-    // браузера; местный прогон в MSK и провод с «+03:00» совпадали, и тест
-    // был зелёным на сломанном. Красноту нашёл CI — он идёт в UTC.
-    //
-    // Здесь два визита названы на ОДНО стенное время салона, но с разными
-    // смещениями. Пересчёт в любой единый пояс разведёт их на шесть часов и
-    // даст два заголовка; чтение времени салона даст один.
-    const base = salonDay();
-    mockedDay.mockResolvedValue({
-      ...base,
-      masters: [
-        {
-          ...base.masters[0]!,
-          visits: [visit({ id: "v-1", start_at: "2026-09-10T14:00:00+03:00" })],
-        },
-        {
-          ...base.masters[1]!,
-          visits: [
-            visit({
-              id: "v-2",
-              start_at: "2026-09-10T14:00:00+09:00",
-              client_first_name: "Пётр",
-              service_name: "Бритьё",
-            }),
-          ],
-        },
-      ],
-    });
-
-    renderScreen();
-    await switchToAll();
-
-    // Присутствие впереди отсутствия: сперва убеждаемся, что обе записи
-    // вообще отрисованы, иначе «одна группа» значило бы «ничего не показано».
-    expect(await screen.findByText(/Ольга · Стрижка · Мария К\./)).toBeTruthy();
-    expect(screen.getByText(/Денис · Бритьё · Пётр К\./)).toBeTruthy();
-
-    // Считаем ЗАГОЛОВКИ групп, а не одно значение. Первая редакция проверяла
-    // `getAllByText("14:00")).toHaveLength(1)` — и была зелёной при обеих
-    // реализациях: пересчёт уводил второй визит в «08:00», заголовков
-    // становилось два, но «14:00» по-прежнему один. Подмена молчала, и
-    // молчание это было дефектом теста, а не кода.
-    expect(screen.getAllByText(/^\d{2}:\d{2}$/)).toHaveLength(1);
-  });
-
-  it("неразобранный список назван словами, а не показан пустотой", async () => {
-    // Форма непустой строки breaks не проверена ничем: перерывов не завёл
-    // никто. Пока это так, «не разобрал» обязано звучать иначе, чем «нет».
-    mockedFrame.mockResolvedValue(
-      frame({
-        masters: [
-          frameMaster({
-            breaks: {
-              state: "unreadable",
-              rows: [],
-              seen_fields: ["from_minute"],
-            },
-          }),
-        ],
-        unreadable_lists: ["breaks"],
-      }),
-    );
-
-    renderScreen();
-    await switchToAll();
-
-    expect(
-      await screen.findByText(/не удалось разобрать перерывы/),
-    ).toBeTruthy();
-  });
-
-  it("часы, которых сервер не разобрал, не выдаются за смену", async () => {
-    mockedFrame.mockResolvedValue(
-      frame({
-        masters: [
-          frameMaster({
-            working_intervals: {
-              state: "unreadable",
-              rows: [],
-              seen_fields: ["shift"],
-            },
-          }),
-        ],
-        unreadable_lists: ["working_intervals"],
-      }),
-    );
-
-    renderScreen();
-    await switchToAll();
-
-    expect(await screen.findByText(/Ольга · часы неизвестны/)).toBeTruthy();
-  });
-
-  it("свободного времени в режиме «Все» нет вовсе", async () => {
-    // Вычесть занятое из смены — это и есть четвёртый вычислитель
-    // доступности. Здесь его нет, и подписи про диапазон тоже нет.
-    renderScreen();
-    await switchToAll();
-
-    await screen.findByText("Хронология");
-    expect(screen.queryByText("Свободное время")).toBeNull();
-    expect(screen.queryByText(/диапазон доступности/)).toBeNull();
-  });
-
-  it("устаревший кадр не переживает отказ при возврате в режим", async () => {
-    // Инвариант держат ДВА стража: `setFrame(null)` в `catch` и
-    // `frameErr == null` на отрисовке. Снимешь один — второй удержит, и
-    // подмена промолчит на верном тесте. Доказательство снимает оба;
-    // повторяя его, снимайте оба.
-    renderScreen();
-    await switchToAll();
-    expect(await screen.findByText(/Ольга · 10:00–19:00/)).toBeTruthy();
-
-    mockedFrame.mockRejectedValue(new Error("boom"));
-    fireEvent.click(screen.getByRole("tab", { name: "Один мастер" }));
-    await switchToAll();
-
-    await waitFor(() => {
-      expect(screen.queryByText(/Ольга · 10:00–19:00/)).toBeNull();
-    });
-    expect(screen.queryByText("Хронология")).toBeNull();
-  });
+beforeEach(() => {
+  vi.clearAllMocks();
+  window.sessionStorage.clear();
+  team = 4;
+  mocked.day.mockImplementation(async (date) => salonDay(team, date ?? DAY));
+  mocked.frame.mockImplementation(async (date) => salonFrame(team, date ?? DAY));
+  mocked.roster.mockImplementation(async () => ({
+    items: NAMES.map((name, i) => ({
+      id: `m-${i + 1}`,
+      name,
+      specialization: "Парикмахер",
+      photo_url: "",
+      is_active: true,
+      invite_status: "accepted",
+      last_seen_at: null,
+      services_count: 1,
+    })),
+    next_cursor: null,
+    total_count: NAMES.length,
+  }));
+  mocked.services.mockImplementation(async () => SERVICES);
+  mocked.masterDay.mockImplementation(async (_id, params) => ({
+    tenant_tz: "Europe/Moscow",
+    from: params?.from ?? DAY,
+    to: params?.to ?? DAY,
+    days: [masterDay({ date: params?.from ?? DAY })],
+  }));
+  mocked.weekly.mockImplementation(async () => weekly());
+  mocked.detail.mockImplementation(async () => DETAIL);
 });
 
-describe("Отметка «сейчас по плану» — утверждённая семантика DRF-1237", () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-    mockedDay.mockResolvedValue(salonDay());
-    mockedSchedule.mockResolvedValue({
-      tenant_tz: "Europe/Moscow",
-      from: "2026-09-10",
-      to: "2026-09-10",
-      days: [masterDay()],
-    });
-    mockedFrame.mockResolvedValue(frame());
-    mockedWeek.mockResolvedValue(weekSchedule());
-    mockedAssigned.mockResolvedValue(assignedNothing());
-  });
-
-  it("стоит у записи, чей интервал накрывает сейчас, и только у неё", async () => {
-    // Заморозка: `scheduled_start <= now < scheduled_end`. Считает это
-    // сервер (`is_in_progress`), клиент не заводит своё «сейчас».
-    //
-    // Отрицательный контроль в этом же тесте обязателен: проверка «отметка
-    // есть» без «у соседа её нет» зеленела бы и на отметке у всех подряд.
-    const base = salonDay();
-    mockedDay.mockResolvedValue({
-      ...base,
-      masters: [
-        {
-          ...base.masters[0]!,
-          visits: [visit({ id: "v-now", is_in_progress: true })],
-        },
-        {
-          ...base.masters[1]!,
-          visits: [
-            visit({
-              id: "v-later",
-              client_first_name: "Пётр",
-              service_name: "Бритьё",
-              is_in_progress: false,
-            }),
-          ],
-        },
-      ],
-    });
-
-    renderScreen();
-    await switchToAll();
-
-    expect(
-      await screen.findByText(/Ольга · Стрижка · Мария К\. · сейчас по плану/),
-    ).toBeTruthy();
-    expect(screen.getByText(/Денис · Бритьё · Пётр К\.$/)).toBeTruthy();
-  });
-
-  it("не обещает, что клиент пришёл", async () => {
-    // Заморозка прямо запрещает читать индикатор как приход клиента, оплату
-    // или статус in_progress. Слово «идёт» обещало бы ровно это, поэтому
-    // формулировка говорит про план, а не про факт.
-    const base = salonDay();
-    mockedDay.mockResolvedValue({
-      ...base,
-      masters: [
-        {
-          ...base.masters[0]!,
-          visits: [visit({ id: "v-now", is_in_progress: true })],
-        },
-        { ...base.masters[1]!, visits: [] },
-      ],
-    });
-
-    renderScreen();
-    await switchToAll();
-
-    await screen.findByText(/сейчас по плану/);
-    expect(screen.queryByText(/· идёт$/)).toBeNull();
-  });
+afterEach(() => {
+  window.sessionStorage.clear();
+  vi.restoreAllMocks();
 });
 
-/**
- * График и поручительство за него — срез B1.
- *
- * §29.5: «Неизвестное расписание нельзя считать ни свободным, ни занятым.
- * Третье состояние, а не подстановка значения по умолчанию», и там же —
- * «заглушка 10:00–19:00 подтверждением не является».
- *
- * Отсюда четыре состояния, и ни одно не сворачивается в остальные. Тесты
- * держат именно неразличимость соседей: «устарело» рядом с «никогда» и
- * «не прочитано» рядом с «не подтверждено» — те две пары, которые проще
- * всего склеить в булево и потерять действие, которым они отличаются.
- */
-describe("Расписание салона — график мастера и его подтверждение", () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-    mockedDay.mockResolvedValue(salonDay());
-    mockedSchedule.mockResolvedValue({
-      tenant_tz: "Europe/Moscow",
-      from: "2026-09-10",
-      to: "2026-09-10",
-      days: [masterDay()],
-    });
-    mockedFrame.mockResolvedValue(frame());
-    mockedWeek.mockResolvedValue(weekSchedule());
-    mockedAssigned.mockResolvedValue(assignedNothing());
-  });
-
-  it("показывает неделю целиком, включая выходной", async () => {
-    renderScreen();
-
-    expect(await screen.findByText("График на неделю")).toBeTruthy();
-    expect(screen.getByText("Вс")).toBeTruthy();
-    expect(screen.getByText("выходной")).toBeTruthy();
-  });
-
-  it("подтверждённое расписание названо подтверждённым", async () => {
-    // Положительный контроль: без него три следующие проверки зеленели бы и
-    // на экране, где подтверждение не показывают вовсе.
-    renderScreen();
-
-    expect(
-      await screen.findByText(/Расписание подтверждено 9 сентября · Карина/),
-    ).toBeTruthy();
-  });
-
-  it("неподтверждённое названо словами, а не показано пустотой", async () => {
-    mockedWeek.mockResolvedValue(
-      weekSchedule({
-        confirmation: {
-          confirmed_at: null,
-          confirmed_by: null,
-          is_current: false,
-          fingerprint: "abc",
-          block: null,
-        },
-      }),
-    );
-
-    renderScreen();
-
-    expect(await screen.findByText(/Расписание не подтверждено/)).toBeTruthy();
-  });
-
-  it("устаревшее подтверждение — не то же, что неподтверждённое", async () => {
-    // Разница не косметическая: «никогда не заверяли» лечится первым
-    // подтверждением, «часы изменились после» — повторным, и склеенные в
-    // булево они потеряли бы ровно то действие, которым отличаются.
-    mockedWeek.mockResolvedValue(
-      weekSchedule({
-        confirmation: {
-          confirmed_at: "2026-09-08T12:00:00+03:00",
-          confirmed_by: { id: "u-1", name: "Карина" },
-          is_current: false,
-          fingerprint: "def",
-          block: null,
-        },
-      }),
-    );
-
-    renderScreen();
-
-    expect(
-      await screen.findByText(/Часы изменились после подтверждения/),
-    ).toBeTruthy();
-    expect(screen.queryByText(/Расписание не подтверждено/)).toBeNull();
-  });
-
-  it("непрочитанное состояние не выдаётся за неподтверждённое", async () => {
-    // Самая соблазнительная склейка: запрос не дошёл — значит «не
-    // подтверждено». Нет: неизвестное нельзя подставлять значением по
-    // умолчанию НИ В ОДНУ сторону, иначе салон пойдёт заверять расписание,
-    // которое, возможно, уже заверено.
-    mockedWeek.mockRejectedValue(new Error("boom"));
-
-    renderScreen();
-
-    expect(
-      await screen.findByText(/Состояние подтверждения не прочитано/),
-    ).toBeTruthy();
-    expect(screen.queryByText(/Расписание не подтверждено/)).toBeNull();
-  });
-});
-
-/**
- * Показ назначенного — DRF-1240, читаемая половина.
- *
- * Держит три вещи:
- *
- * * назначенное видно вообще — сегодня его не показывает ни один экран;
- * * «ничего не назначено» — утверждение, и произносить его можно ТОЛЬКО
- *   когда разобрано всё. Сказать его поверх неразобранного списка значит
- *   поручиться за то, чего не читал;
- * * действий нет, и это говорит сервер полем `writable`, а не экран.
- */
-describe("Расписание салона — что уже назначено мастеру", () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-    mockedDay.mockResolvedValue(salonDay());
-    mockedSchedule.mockResolvedValue({
-      tenant_tz: "Europe/Moscow",
-      from: "2026-09-10",
-      to: "2026-09-10",
-      days: [masterDay()],
-    });
-    mockedFrame.mockResolvedValue(frame());
-    mockedWeek.mockResolvedValue(weekSchedule());
-    mockedAssigned.mockResolvedValue(assignedNothing());
-  });
-
-  it("отгул в 01:00 по салону — дата и час салона, не вчерашний день (DRF-2601)", async () => {
-    // Провод отгулов — в поясе салона (admin_api, DRF-2601). До починки
-    // каталог давал «2026-09-12T22:00:00+00:00», и экран печатал «12 сентября
-    // · 22:00» — отгул уезжал во вчерашний день. Здесь строка салона.
-    mockedAssigned.mockResolvedValue(
-      assignedNothing({
-        time_off: {
-          state: "parsed",
-          rows: [
-            {
-              id: "o-night",
-              start_at: "2026-09-13T01:00:00+03:00",
-              end_at: "2026-09-13T05:00:00+03:00",
-              reason: "",
-            },
-          ],
-          seen_fields: [],
-        },
-      }),
-    );
-
-    renderScreen();
-
-    expect(await screen.findByText("13 сентября · 01:00–05:00 · недоступна")).toBeTruthy();
-  });
-
-  it("показывает исключение, недоступность и закрытие салона", async () => {
-    mockedAssigned.mockResolvedValue(
-      assignedNothing({
-        exceptions: {
-          state: "parsed",
-          rows: [
-            {
-              id: "e1",
-              date: "2026-09-12",
-              is_working_day: true,
-              start: "12:00",
-              end: "16:00",
-            },
-          ],
-          seen_fields: [],
-        },
-        time_off: {
-          state: "parsed",
-          rows: [
-            {
-              id: "o1",
-              start_at: "2026-09-13T10:00:00+03:00",
-              end_at: "2026-09-13T14:00:00+03:00",
-              reason: "учёба",
-            },
-          ],
-          seen_fields: [],
-        },
-        closures: {
-          state: "parsed",
-          rows: [
-            {
-              id: "c1",
-              date: "2026-09-14",
-              start: null,
-              end: null,
-              reason: "санитарный день",
-            },
-          ],
-          seen_fields: [],
-        },
-      }),
-    );
-
-    renderScreen();
-
-    expect(await screen.findByText("12 сентября · 12:00–16:00")).toBeTruthy();
-    expect(
-      screen.getByText(/13 сентября · 10:00–14:00 · недоступна · учёба/),
-    ).toBeTruthy();
-    expect(
-      screen.getByText(/14 сентября · салон закрыт · санитарный день/),
-    ).toBeTruthy();
-  });
-
-  it("время недоступности показано как прислал салон, а не в поясе браузера", async () => {
-    // Провод несёт смещение САЛОНА. Пересчёт через Date показал бы
-    // администратору в другом поясе сдвинутое время назначения.
-    mockedAssigned.mockResolvedValue(
-      assignedNothing({
-        time_off: {
-          state: "parsed",
-          rows: [
-            {
-              id: "o1",
-              start_at: "2026-09-13T09:30:00+03:00",
-              end_at: "2026-09-13T11:00:00+03:00",
-              reason: "",
-            },
-          ],
-          seen_fields: [],
-        },
-      }),
-    );
-
-    renderScreen();
-
-    expect(
-      await screen.findByText(/13 сентября · 09:30–11:00 · недоступна/),
-    ).toBeTruthy();
-  });
-
-  it("нерабочий день не показывает часы, даже если они пришли", async () => {
-    // Первая версия этого теста была украшением, и поймала её подмена:
-    // фикстура приходила с `start: null`, поэтому снятие фронтового условия
-    // ничего не меняло — предмет держал сервер, который часы уже обнулил.
-    //
-    // Инвариант держат ДВОЕ: `_exception_row` на сервере и это условие на
-    // экране. Чтобы проверялось именно второе, данные здесь ВРАЖДЕБНЫЕ —
-    // нерабочий день с часами. Так выглядел бы ответ, если серверную
-    // половину однажды снимут, и экран обязан не поверить часам, которые
-    // тот же ответ объявил нерабочими.
-    mockedAssigned.mockResolvedValue(
-      assignedNothing({
-        exceptions: {
-          state: "parsed",
-          rows: [
-            {
-              id: "e1",
-              date: "2026-09-12",
-              is_working_day: false,
-              start: "12:00",
-              end: "16:00",
-            },
-          ],
-          seen_fields: [],
-        },
-      }),
-    );
-
-    renderScreen();
-
-    expect(await screen.findByText("12 сентября · не работает")).toBeTruthy();
-    expect(screen.queryByText(/12:00–16:00/)).toBeNull();
-  });
-
-  it("«ничего не назначено» говорится только когда разобрано всё", async () => {
-    // Положительный контроль стоит рядом: сперва убеждаемся, что фраза
-    // вообще появляется на пустом разобранном ответе.
-    renderScreen();
-    expect(
-      await screen.findByText("На ближайшие дни ничего не назначено."),
-    ).toBeTruthy();
-  });
-
-  it("поверх неразобранного списка «ничего не назначено» не произносится", async () => {
-    // Это и есть предмет: пустой список и непрочитанный список выглядят
-    // одинаково, и утверждение о пустоте поверх второго — обещание за то,
-    // чего мы не читали.
-    mockedAssigned.mockResolvedValue(
-      assignedNothing({
-        time_off: {
-          state: "unreadable",
-          rows: [],
-          seen_fields: ["from", "to"],
-        },
-        unreadable_lists: ["time_off"],
-      }),
-    );
-
-    renderScreen();
-
-    expect(
-      await screen.findByText(/не удалось разобрать недоступность/),
-    ).toBeTruthy();
-    expect(
-      screen.queryByText("На ближайшие дни ничего не назначено."),
-    ).toBeNull();
-  });
-});
-
-/**
- * §142, срез В — «показать, не применять».
- *
- * Держится три вещи: салон видит, кого затронет закрытие; окно уходит на
- * сервер датой и часами салона, а не ISO, посчитанным в браузере; и на
- * экране нет кнопки «Закрыть» — есть подсказка, куда идти, потому что сервер
- * сказал writable: false.
- */
-function impactOf(patch: Partial<ScheduleImpact> = {}): ScheduleImpact {
-  return {
-    start_at: "2026-09-15T10:00:00+03:00",
-    end_at: "2026-09-15T14:00:00+03:00",
-    timezone: "Europe/Moscow",
-    bookings: {
-      state: "parsed",
-      rows: [
-        {
-          appointment_id: "a-1",
-          start_local: "2026-09-15T11:00:00+03:00",
-          end_local: "2026-09-15T12:00:00+03:00",
-          service_name: "Стрижка",
-          status: "confirmed",
-          payment_status: "paid",
-          refund_percent_if_cancelled: 100,
-        },
-        {
-          appointment_id: "a-2",
-          start_local: "2026-09-15T12:30:00+09:00",
-          end_local: "2026-09-15T13:30:00+09:00",
-          service_name: null,
-          status: "confirmed",
-          payment_status: "unpaid",
-          refund_percent_if_cancelled: null,
-        },
-      ],
-      seen_fields: [],
-      unreadable_rows: 0,
-    },
-    writable: false,
-    next_step: "pro_app",
-    ...patch,
-  };
+async function openGrid(entry = `/admin/schedule?date=${DAY}`) {
+  renderAt(entry);
+  return screen.findByRole("region", { name: "Расписание по мастерам" });
 }
 
-async function askForImpact(date = "2026-09-15", from = "10:00", to = "14:00") {
-  fireEvent.change(await screen.findByLabelText("Дата закрытия"), {
-    target: { value: date },
+/** Нажатие в колонку на высоте `fraction` от её начала — как пальцем по времени. */
+function tapColumn(master: string, fraction: number) {
+  const tap = screen.getByRole("button", { name: `Свободные окна: ${master}` });
+  vi.spyOn(tap, "getBoundingClientRect").mockReturnValue({
+    top: 0,
+    left: 0,
+    width: 80,
+    height: 700,
+    bottom: 700,
+    right: 80,
+    x: 0,
+    y: 0,
+    toJSON: () => ({}),
   });
-  fireEvent.change(screen.getByLabelText("Закрыть с"), {
-    target: { value: from },
-  });
-  fireEvent.change(screen.getByLabelText("Закрыть до"), {
-    target: { value: to },
-  });
-  fireEvent.click(screen.getByRole("button", { name: "Показать записи" }));
+  fireEvent.click(tap, { clientY: 700 * fraction, detail: 1 });
 }
 
-describe("Закрыть время — кого затронет (§142, срез В)", () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-    mockedDay.mockResolvedValue(salonDay());
-    mockedSchedule.mockResolvedValue({
-      tenant_tz: "Europe/Moscow",
-      from: "2026-09-10",
-      to: "2026-09-10",
-      days: [masterDay()],
-    });
-    mockedFrame.mockResolvedValue(frame());
-    mockedWeek.mockResolvedValue(weekSchedule());
-    mockedAssigned.mockResolvedValue(assignedNothing());
-    mockedImpact.mockResolvedValue(impactOf());
-  });
+function selectOnly(masterIds: string[], serviceIds: string[] = []) {
+  window.sessionStorage.setItem(FILTERS_KEY, JSON.stringify({ masterIds, serviceIds }));
+}
 
-  it("окно уходит датой и часами салона, а не ISO из браузера", async () => {
-    renderScreen();
-    await askForImpact("2026-09-15", "10:00", "14:00");
+describe("кадр 1 — сетка: от двух до четырёх мастеров", () => {
+  it("дата над заголовком, колонки мастеров, записи, блок, выходной и неизвестные часы", async () => {
+    const grid = await openGrid();
 
-    await waitFor(() => expect(mockedImpact).toHaveBeenCalledTimes(1));
-    const [masterId, params] = mockedImpact.mock.calls[0]!;
-    expect(masterId).toBe("m-1");
-    expect(params).toEqual({ date: "2026-09-15", from: "10:00", to: "14:00" });
-  });
-
-  it("показывает затронутые записи со временем салона, не браузера", async () => {
-    renderScreen();
-    await askForImpact();
-
-    expect(await screen.findByText(/затронет 2 записи/)).toBeTruthy();
+    expect(screen.getByText("Пн, 21 августа")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Расписание" })).toBeInTheDocument();
+    for (const name of NAMES.slice(0, 4)) {
+      expect(within(grid).getByRole("button", { name: `Расписание мастера: ${name}` })).toBeInTheDocument();
+    }
     expect(
-      screen.getByText(/11:00–12:00 · Стрижка · при отмене вернётся 100%/),
-    ).toBeTruthy();
-    // Вторая запись пришла со смещением +09:00. Пересчёт в любой единый пояс
-    // сдвинул бы её; чтение времени салона оставляет 12:30.
-    expect(screen.getByText(/12:30–13:30 · услуга не названа/)).toBeTruthy();
+      within(grid).getByRole("button", { name: "Запись 09:00–10:00, Клиент А., Маникюр, мастер Мастер Один" }),
+    ).toBeInTheDocument();
+    expect(
+      within(grid).getByRole("button", { name: /^Блок 14:00–16:00, Мастер Один/ }),
+    ).toBeInTheDocument();
+    expect(within(screen.getByRole("group", { name: "Мастер Три" })).getByText("Выходной")).toBeInTheDocument();
+    // Строки мастера в кадре нет — «неизвестно», а не «свободен» и не «выходной».
+    expect(within(screen.getByRole("group", { name: "Мастер Четыре" })).getByText("Часы неизвестны")).toBeInTheDocument();
+    expect(screen.getByText(/^Актуально на \d\d:\d\d$/)).toBeInTheDocument();
   });
 
-  it("кнопки «Закрыть» нет — есть подсказка, куда идти", async () => {
-    renderScreen();
-    await askForImpact();
+  it("запись ведёт в карточку и уносит дату для возврата", async () => {
+    const grid = await openGrid();
 
-    // Присутствие впереди отсутствия: ответ показан, значит и подсказка при нём.
-    expect(await screen.findByText(/Pro App под своим именем/)).toBeTruthy();
-    expect(screen.queryByRole("button", { name: /^Закрыть/ })).toBeNull();
+    fireEvent.click(within(grid).getByRole("button", { name: /^Запись 10:30–11:30/ }));
+
+    expect(where()).toBe(`/admin/bookings/v-2|${JSON.stringify({ from: `/admin/schedule?date=${DAY}` })}`);
   });
 
-  it("подсказка не зависит от writable: закрывать время — в «Рабочем времени» (DRF-2936)", async () => {
-    // С DRF-2936 сервер говорит writable: true владельцу из салонного бота.
-    // Этот экран время всё равно не закрывает — кнопки нет и тогда.
-    mockedImpact.mockResolvedValue(impactOf({ writable: true }));
-    renderScreen();
-    await askForImpact();
-
-    expect(await screen.findByText(/можно в «Рабочем времени»/)).toBeTruthy();
-    expect(screen.queryByRole("button", { name: /^Закрыть/ })).toBeNull();
+  it("мастер ведёт в его день", async () => {
+    const grid = await openGrid();
+    fireEvent.click(within(grid).getByRole("button", { name: "Расписание мастера: Мастер Два" }));
+    expect(where()).toBe(`/admin/schedule/master/m-2?date=${DAY}|null`);
   });
 
-  it("меню «⋮» — один пункт, «Рабочее время», и мастер уходит туда отмеченным", async () => {
-    render(
-      <MemoryRouter initialEntries={["/admin/schedule"]}>
-        <Routes>
-          <Route path="/admin/schedule" element={<SalonPilotScheduleScreen me={ME} />} />
-          <Route path="/admin/working-time" element={<WorkingTimeProbe />} />
-        </Routes>
-      </MemoryRouter>,
+  it("блок ведёт в «Рабочее время» этой даты, а не правится здесь", async () => {
+    const grid = await openGrid();
+    fireEvent.click(within(grid).getByRole("button", { name: /^Блок 14:00–16:00, Мастер Один/ }));
+    expect(where()).toBe(`/admin/working-time/m-1/${DAY}|null`);
+    expectNoWrites();
+  });
+
+  it("«сейчас по плану» стоит у записи, чей интервал накрывает сейчас, и только у неё", async () => {
+    mocked.day.mockImplementation(async () => {
+      const day = salonDay();
+      day.masters[0]!.visits[0]!.is_in_progress = true;
+      return day;
+    });
+    const grid = await openGrid();
+
+    const now = within(grid).getByRole("button", { name: /^Запись 09:00–10:00.*сейчас по плану$/ });
+    expect(now).toHaveClass("ss-block--now");
+    expect(within(grid).getByRole("button", { name: /^Запись 10:30–11:30/ })).not.toHaveClass("ss-block--now");
+  });
+
+  it("освобождённая запись не скрывается, а приглушена", async () => {
+    mocked.day.mockImplementation(async () => {
+      const day = salonDay();
+      day.masters[0]!.visits[0]!.status = "cancelled";
+      return day;
+    });
+    const grid = await openGrid();
+
+    expect(within(grid).getByRole("button", { name: /^Запись 09:00–10:00/ })).toHaveClass("ss-block--released");
+  });
+
+  it("ничья запись в сетке не теряется: колонки для неё нет, а строка есть", async () => {
+    mocked.day.mockImplementation(async () =>
+      salonDay(4, DAY, { orphan_visits: [visit("v-9", "15:00", "16:00", { client_last_initial: "Я" })] }),
     );
-    await screen.findByLabelText("Дата закрытия");
+    await openGrid();
+
+    const orphans = screen.getByRole("region", { name: "Мастер не определён" });
+    fireEvent.click(within(orphans).getByRole("button", { name: /^Запись 15:00–16:00, Клиент Я\./ }));
+    expect(where()).toBe(`/admin/bookings/v-9|${JSON.stringify({ from: `/admin/schedule?date=${DAY}` })}`);
+  });
+
+  it("«+» ведёт в ручную запись с датой; меню «⋯» — один пункт, «Рабочее время»", async () => {
+    await openGrid();
 
     fireEvent.click(screen.getByRole("button", { name: "Ещё" }));
-    const menu = screen.getByRole("menu");
-    expect(within(menu).getAllByRole("menuitem").map((i) => i.textContent)).toEqual([
-      "Рабочее время",
-    ]);
-    fireEvent.click(within(menu).getByRole("menuitem", { name: "Рабочее время" }));
+    const items = screen.getAllByRole("menuitem");
+    expect(items.map((i) => i.textContent)).toEqual(["Рабочее время"]);
 
-    expect(await screen.findByTestId("working-time-probe")).toHaveTextContent('{"masterId":"m-1"}');
+    fireEvent.click(screen.getByRole("button", { name: "Новая запись" }));
+    expect(where()).toBe(`/admin/booking/new?return=schedule&date=${DAY}|null`);
+    expectNoWrites();
+  });
+});
+
+describe("кадр 3 — свободное окно в сетке", () => {
+  it("нажатие на пустое время колонки читает окна мастера и раскрывает окно под пальцем", async () => {
+    await openGrid();
+    await settleScenario();
+    expect(mocked.masterDay).not.toHaveBeenCalled();
+
+    // Ось 09–16: половина высоты — 12:30.
+    tapColumn("Мастер Один", 0.5);
+
+    const card = await screen.findByRole("group", { name: "Свободно 12:00–13:00" });
+    expect(mocked.masterDay).toHaveBeenCalledWith("m-1", { from: DAY, to: DAY });
+    expect(within(card).getByText("12:00 – 13:00")).toBeInTheDocument();
+    expect(screen.getByText(/диапазон доступности, а не готовый слот/)).toBeInTheDocument();
+
+    fireEvent.click(within(card).getByRole("button", { name: /Записать/ }));
+
+    expect(where()).toBe(
+      `/admin/booking/new?return=schedule&date=${DAY}&master_id=m-1&from=12%3A00&to=13%3A00|null`,
+    );
+    expectNoWrites();
   });
 
-  it("никого не затронет — сказано словами, а не пустотой", async () => {
-    mockedImpact.mockResolvedValue(
-      impactOf({
-        bookings: {
-          state: "none",
-          rows: [],
+  it("нажатие мимо окна окно не выдумывает: окна сервера видны, карточки нет", async () => {
+    await openGrid();
+
+    // 09:30 — занято записью; свободного окна сервера там нет.
+    tapColumn("Мастер Один", 0.07);
+
+    const window1 = await screen.findByRole("button", { name: "Свободно 12:00–13:00" });
+    expect(screen.queryByRole("group", { name: /^Свободно/ })).toBeNull();
+
+    fireEvent.click(window1);
+    expect(await screen.findByRole("group", { name: "Свободно 12:00–13:00" })).toBeInTheDocument();
+  });
+
+  it("с клавиатуры колонка открывает окна без выбора — они обычные кнопки", async () => {
+    await openGrid();
+
+    fireEvent.click(screen.getByRole("button", { name: "Свободные окна: Мастер Один" }));
+
+    expect(await screen.findByRole("button", { name: "Свободно 12:00–13:00" })).toBeInTheDocument();
+  });
+
+  it("окон у мастера нет — сказано словами и по имени", async () => {
+    mocked.masterDay.mockImplementation(async () => ({
+      tenant_tz: "Europe/Moscow",
+      from: DAY,
+      to: DAY,
+      days: [masterDay({ free_windows: [] })],
+    }));
+    await openGrid();
+
+    tapColumn("Мастер Два", 0.5);
+
+    expect(await screen.findByText("Мастер Два: свободных промежутков нет.")).toBeInTheDocument();
+  });
+
+  it("окна не загрузились — «не загрузились», а не «окон нет»", async () => {
+    mocked.masterDay.mockImplementation(async () => {
+      throw new ApiError(503, "schedule_unavailable", "");
+    });
+    await openGrid();
+
+    tapColumn("Мастер Один", 0.5);
+
+    expect(await screen.findByText(/Свободные окна не загрузились/)).toBeInTheDocument();
+    expect(screen.queryByText(/свободных промежутков нет/)).toBeNull();
+  });
+
+  it("окно старше пяти минут — не действие: в запись не уходим, просим обновить", async () => {
+    const clock = vi.spyOn(Date, "now");
+    const loaded = 1_800_000_000_000;
+    clock.mockReturnValue(loaded);
+    await openGrid();
+    tapColumn("Мастер Один", 0.5);
+    const card = await screen.findByRole("group", { name: "Свободно 12:00–13:00" });
+
+    clock.mockReturnValue(loaded + 5 * 60_000 + 1);
+    fireEvent.click(within(card).getByRole("button", { name: /Записать/ }));
+
+    expect(await screen.findByText("Расписание могло измениться")).toBeInTheDocument();
+    expect(screen.getByText(/Свободные окна могли измениться/)).toBeInTheDocument();
+    expect(where()).toBe(`/admin/schedule?date=${DAY}|null`);
+    // Устаревшее окно снято с экрана, а не оставлено «на всякий случай».
+    expect(screen.queryByRole("group", { name: /^Свободно/ })).toBeNull();
+  });
+
+  it("без сети окно видно, но «Записать» не нажимается", async () => {
+    Object.defineProperty(window.navigator, "onLine", { configurable: true, get: () => false });
+    try {
+      await openGrid();
+      expect(screen.getByText("Нет подключения")).toBeInTheDocument();
+
+      tapColumn("Мастер Один", 0.5);
+
+      const card = await screen.findByRole("group", { name: "Свободно 12:00–13:00" });
+      expect(within(card).getByRole("button", { name: /Записать/ })).toBeDisabled();
+    } finally {
+      delete (window.navigator as { onLine?: boolean }).onLine;
+    }
+  });
+
+  it("выключенному мастеру «Записать» не предлагается", async () => {
+    mocked.day.mockImplementation(async () => {
+      const day = salonDay();
+      day.masters[0]!.is_active = false;
+      return day;
+    });
+    await openGrid();
+
+    tapColumn("Мастер Один", 0.5);
+
+    const card = await screen.findByRole("group", { name: "Свободно 12:00–13:00" });
+    expect(within(card).getByRole("button", { name: /Записать/ })).toBeDisabled();
+  });
+
+  it("прошедшая дата — колонки не нажимаются: сервер не знает «сейчас» и отдал бы окна в прошлом", async () => {
+    await openGrid("/admin/schedule?date=2020-01-06");
+
+    expect(screen.getByRole("button", { name: "Свободные окна: Мастер Один" })).toBeDisabled();
+    await settleScenario();
+    expect(mocked.masterDay).not.toHaveBeenCalled();
+  });
+
+  it("салон в этот день закрыт — сказано словами, окна не показываются", async () => {
+    mocked.frame.mockImplementation(async () =>
+      salonFrame(4, DAY, {
+        closures: {
+          state: "parsed",
+          rows: [{ start: null, end: null, is_full_day: true, reason: "Санитарный день" }],
           seen_fields: [],
-          unreadable_rows: 0,
         },
       }),
     );
-    renderScreen();
-    await askForImpact();
+    await openGrid();
 
-    expect(
-      await screen.findByText(/записей нет, закрытие никого не затронет/),
-    ).toBeTruthy();
+    expect(screen.getByText("В этот день салон закрыт · Санитарный день")).toBeInTheDocument();
+    expect(screen.getByText("Свободные окна на этот день не показываются.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Свободные окна: Мастер Один" })).toBeDisabled();
   });
 
-  it("выброшенная строка названа рядом с показанными", async () => {
-    const one = impactOf();
-    one.bookings = {
-      ...one.bookings,
-      rows: one.bookings.rows.slice(0, 1),
-      unreadable_rows: 1,
-    };
-    mockedImpact.mockResolvedValue(one);
-    renderScreen();
-    await askForImpact();
+  it("окна одной колонки не переживают перечитывание дня", async () => {
+    await openGrid();
+    tapColumn("Мастер Один", 0.5);
+    await screen.findByRole("group", { name: "Свободно 12:00–13:00" });
 
-    expect(await screen.findByText(/затронет 1 запись/)).toBeTruthy();
-    expect(
-      screen.getByText(/Показано не всё: 1 запись не удалось разобрать/),
-    ).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Обновить" }));
+
+    await waitFor(() => expect(mocked.day).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.queryByRole("group", { name: /^Свободно/ })).toBeNull());
+  });
+});
+
+describe("лента по времени — больше четырёх мастеров (MUST FIX 1 и 6)", () => {
+  beforeEach(() => {
+    team = 6;
   });
 
-  it("смена мастера снимает чужой предпросмотр", async () => {
-    renderScreen();
-    await askForImpact();
-    expect(await screen.findByText(/затронет 2 записи/)).toBeTruthy();
+  async function openFeed() {
+    renderAt(`/admin/schedule?date=${DAY}`);
+    await screen.findByRole("heading", { name: "Записи дня" });
+  }
 
-    fireEvent.change(screen.getByRole("combobox"), {
-      target: { value: "m-2" },
+  it("колонок нет: записи стоят под временем, мастер назван в карточке", async () => {
+    await openFeed();
+
+    expect(screen.getByText(/Мастеров больше четырёх/)).toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "Расписание по мастерам" })).toBeNull();
+    const at10 = screen.getByText("10:00").closest("li")!;
+    expect(
+      within(at10).getByRole("button", { name: "Запись 10:00–11:00, Клиент Б., Маникюр, мастер Мастер Два" }),
+    ).toBeInTheDocument();
+  });
+
+  it("отсутствие мастера стоит событием дня", async () => {
+    await openFeed();
+
+    const at14 = screen.getByText("14:00").closest("li")!;
+    expect(within(at14).getByText("Блок")).toBeInTheDocument();
+    expect(within(at14).getByText("14:00 – 16:00")).toBeInTheDocument();
+    expect(within(at14).getByText("Мастер Один")).toBeInTheDocument();
+  });
+
+  it("свободных окон в ленте нет вовсе — день мастера за ними не читается", async () => {
+    await openFeed();
+    expect(screen.getAllByRole("button", { name: /^Запись/ }).length).toBeGreaterThan(0);
+
+    await settleScenario();
+    expect(screen.queryByText("Свободно")).toBeNull();
+    expect(mocked.masterDay).not.toHaveBeenCalled();
+  });
+
+  it("«Мастера и смены» раскрывается списком со сменами и ведёт в день мастера", async () => {
+    await openFeed();
+
+    const toggle = screen.getByRole("button", { name: "Мастера и смены · 6" });
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    fireEvent.click(toggle);
+
+    expect(screen.getByRole("button", { name: "Расписание мастера: Мастер Три, Выходной" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Расписание мастера: Мастер Четыре, Часы неизвестны" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Расписание мастера: Мастер Два, 09:00–16:00" }));
+    expect(where()).toBe(`/admin/schedule/master/m-2?date=${DAY}|null`);
+  });
+
+  it("ничья запись показывается, а не прячется", async () => {
+    mocked.day.mockImplementation(async () =>
+      salonDay(6, DAY, { orphan_visits: [visit("v-9", "15:00", "16:00", { client_last_initial: "Я" })] }),
+    );
+    await openFeed();
+
+    const orphan = screen.getByRole("button", { name: /^Запись 15:00–16:00, Клиент Я\./ });
+    expect(within(orphan).getByText("Мастер не определён")).toBeInTheDocument();
+  });
+
+  it("фильтр услуг сужает ленту; пустой итог назван", async () => {
+    selectOnly([], ["svc-2"]);
+    await openFeed();
+
+    expect(screen.getByRole("button", { name: /^Запись 10:30–11:30.*Стрижка/ })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^Запись 09:00–10:00/ })).toBeNull();
+    expect(screen.getByRole("button", { name: "Стрижка" })).toBeInTheDocument();
+  });
+
+  it("по выбранной услуге записей нет — сказано словами", async () => {
+    mocked.services.mockImplementation(async () => [...SERVICES, { id: "svc-9", name: "Окрашивание", duration_min: 90 }]);
+    selectOnly([], ["svc-9"]);
+    await openFeed();
+
+    expect(await screen.findByText("По выбранным услугам записей на этот день нет.")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^Запись/ })).toBeNull();
+  });
+});
+
+describe("один мастер — день списком (кадр 12 на экране расписания)", () => {
+  async function openSingle() {
+    selectOnly(["m-1"]);
+    renderAt(`/admin/schedule?date=${DAY}`);
+    await screen.findByRole("button", { name: /^Свободно 12:00–13:00/ });
+  }
+
+  it("записи — из дня салона, окно и блок — из дня мастера; подтверждение графика названо", async () => {
+    mocked.day.mockImplementation(async () => {
+      const day = salonDay();
+      day.masters[0]!.visits.push(visit("v-7", "15:00", "16:00", { status: "cancelled" }));
+      return day;
+    });
+    await openSingle();
+
+    expect(mocked.masterDay).toHaveBeenCalledWith("m-1", { from: DAY, to: DAY }, expect.anything());
+    expect(screen.getByRole("button", { name: "Запись 09:00–10:00, Клиент А., Маникюр" })).toBeInTheDocument();
+    // Отменённая есть в дне салона и пропала бы из day-schedule.
+    expect(screen.getByRole("button", { name: /^Запись 15:00–16:00/ })).toHaveClass("ss-row--released");
+    expect(screen.getByText("Расписание не подтверждено — салон его не заверял")).toBeInTheDocument();
+    expect(screen.getByText(/диапазон доступности, а не готовый слот/)).toBeInTheDocument();
+    // Причина блока («sick») человеку не показывается.
+    expect(screen.getByRole("button", { name: /^Блок 14:00–15:00/ })).toBeInTheDocument();
+  });
+
+  it("окно ведёт в ручную запись с мастером, датой и окном", async () => {
+    await openSingle();
+
+    fireEvent.click(screen.getByRole("button", { name: /^Свободно 12:00–13:00/ }));
+
+    expect(where()).toBe(
+      `/admin/booking/new?return=schedule&date=${DAY}&master_id=m-1&from=12%3A00&to=13%3A00|null`,
+    );
+    expectNoWrites();
+  });
+
+  it("«⋯» уносит мастера в «Рабочее время» отмеченным", async () => {
+    await openSingle();
+
+    fireEvent.click(screen.getByRole("button", { name: "Ещё" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Рабочее время" }));
+
+    expect(where()).toBe(`/admin/working-time|${JSON.stringify({ masterId: "m-1" })}`);
+  });
+
+  it("блок в дне мастера ведёт в «Рабочее время» этой даты", async () => {
+    await openSingle();
+
+    fireEvent.click(screen.getByRole("button", { name: /^Блок 14:00–15:00/ }));
+
+    expect(where()).toBe(`/admin/working-time/m-1/${DAY}|null`);
+    expectNoWrites();
+  });
+
+  it("конфликт назван по-русски по его виду и ведёт в запись", async () => {
+    mocked.masterDay.mockImplementation(async () => ({
+      tenant_tz: "Europe/Moscow",
+      from: DAY,
+      to: DAY,
+      days: [
+        masterDay({
+          conflicts: [{ type: "double_booking", booking_id: "v-2", description: "Overlaps booking 7f3c (09:00-10:00)" }],
+        }),
+      ],
+    }));
+    await openSingle();
+
+    const item = screen.getByRole("button", { name: /Записи пересекаются по времени/ });
+    expect(screen.queryByText(/Overlaps/)).toBeNull();
+    fireEvent.click(item);
+    expect(where()).toBe(`/admin/bookings/v-2|${JSON.stringify({ from: `/admin/schedule?date=${DAY}` })}`);
+  });
+
+  it("непрочитанное подтверждение не выдаётся за неподтверждённое", async () => {
+    mocked.weekly.mockImplementation(async () => {
+      throw new ApiError(503, "schedule_unavailable", "");
+    });
+    await openSingle();
+
+    expect(screen.getByText(/Состояние подтверждения не прочитано/)).toBeInTheDocument();
+    expect(screen.queryByText(/Расписание не подтверждено/)).toBeNull();
+  });
+
+  it("день мастера не загрузился — записи показаны, про остальное сказано", async () => {
+    mocked.masterDay.mockImplementation(async () => {
+      throw new ApiError(503, "schedule_unavailable", "");
+    });
+    selectOnly(["m-1"]);
+    renderAt(`/admin/schedule?date=${DAY}`);
+
+    expect(await screen.findByText(/Часы, блоки и свободные окна мастера не загрузились/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^Запись 09:00–10:00/ })).toBeInTheDocument();
+    expect(screen.queryByText("Свободных промежутков нет.")).toBeNull();
+  });
+
+  it("окно старше пяти минут в списке — не действие", async () => {
+    const clock = vi.spyOn(Date, "now");
+    const loaded = 1_800_000_000_000;
+    clock.mockReturnValue(loaded);
+    await openSingle();
+
+    clock.mockReturnValue(loaded + 5 * 60_000 + 1);
+    fireEvent.click(screen.getByRole("button", { name: /^Свободно 12:00–13:00/ }));
+
+    expect(await screen.findByText("Расписание могло измениться")).toBeInTheDocument();
+    expect(where()).toBe(`/admin/schedule?date=${DAY}|null`);
+  });
+});
+
+describe("дата", () => {
+  it("вход без даты: день называет сервер, а кадр спрашивается с ЕГО датой", async () => {
+    await openGrid("/admin/schedule");
+
+    expect(mocked.day.mock.calls[0]?.[0]).toBeUndefined();
+    expect(mocked.frame.mock.calls[0]?.[0]).toBe(DAY);
+    expect(screen.getByText("Пн, 21 августа")).toBeInTheDocument();
+  });
+
+  it("дата из адреса уходит в оба запроса", async () => {
+    await openGrid(`/admin/schedule?date=${DAY}`);
+    expect(mocked.day.mock.calls[0]?.[0]).toBe(DAY);
+    expect(mocked.frame.mock.calls[0]?.[0]).toBe(DAY);
+  });
+
+  it("испорченная дата в адресе — как её отсутствие", async () => {
+    await openGrid("/admin/schedule?date=2034-02-30");
+    expect(mocked.day.mock.calls[0]?.[0]).toBeUndefined();
+  });
+
+  it("день недели в полосе выбирает дату и кладёт её в адрес", async () => {
+    await openGrid();
+
+    fireEvent.click(screen.getByRole("button", { name: "22 августа, Вт" }));
+
+    await waitFor(() => expect(mocked.day.mock.calls.at(-1)?.[0]).toBe("2034-08-22"));
+    expect(where()).toBe("/admin/schedule?date=2034-08-22|null");
+    expect(await screen.findByText("Вт, 22 августа")).toBeInTheDocument();
+  });
+
+  it("кадр, ответивший про другой день, отбрасывается: смены вторника под записями понедельника не рисуются", async () => {
+    mocked.frame.mockImplementation(async () => salonFrame(4, "2034-08-22"));
+    await openGrid();
+
+    expect(screen.getByText(/Смены и недоступность не загрузились/)).toBeInTheDocument();
+    expect(within(screen.getByRole("group", { name: "Мастер Один" })).getByText("Часы неизвестны")).toBeInTheDocument();
+  });
+});
+
+describe("кадр 2 — шторка «Фильтры»", () => {
+  async function openSheet(trigger: RegExp | string = "Фильтры") {
+    fireEvent.click(screen.getByRole("button", { name: trigger }));
+    return screen.findByRole("dialog", { name: "Фильтры" });
+  }
+
+  it("выбранные мастера применяются, чип говорит сколько; «Сбросить» возвращает всех", async () => {
+    team = 6;
+    renderAt(`/admin/schedule?date=${DAY}`);
+    await screen.findByRole("heading", { name: "Записи дня" });
+
+    let sheet = await openSheet(/Все мастера/);
+    fireEvent.click(within(sheet).getByRole("checkbox", { name: /Мастер Один/ }));
+    fireEvent.click(within(sheet).getByRole("checkbox", { name: /Мастер Два/ }));
+    fireEvent.click(within(sheet).getByRole("button", { name: "Применить" }));
+
+    // Двое — уже сетка, а не лента.
+    const grid = await screen.findByRole("region", { name: "Расписание по мастерам" });
+    expect(within(grid).getAllByRole("button", { name: /^Расписание мастера:/ })).toHaveLength(2);
+    expect(screen.getByRole("button", { name: "2 мастера" })).toBeInTheDocument();
+    expect(JSON.parse(window.sessionStorage.getItem(FILTERS_KEY) ?? "{}")).toEqual({
+      masterIds: ["m-1", "m-2"],
+      serviceIds: [],
     });
 
-    await waitFor(() =>
-      expect(screen.queryByText(/затронет 2 записи/)).toBeNull(),
+    sheet = await openSheet("2 мастера");
+    fireEvent.click(within(sheet).getByRole("button", { name: "Сбросить" }));
+    expect(within(sheet).getByRole("checkbox", { name: "Все мастера" })).toBeChecked();
+    fireEvent.click(within(sheet).getByRole("button", { name: "Применить" }));
+
+    expect(await screen.findByRole("heading", { name: "Записи дня" })).toBeInTheDocument();
+    expect(window.sessionStorage.getItem(FILTERS_KEY)).toBeNull();
+  });
+
+  it("фильтр услуг в сетке приглушает чужие записи, а не убирает: занятое время не выглядит свободным", async () => {
+    const grid = await openGrid();
+
+    const sheet = await openSheet(/Все услуги/);
+    fireEvent.click(within(sheet).getByRole("checkbox", { name: "Стрижка" }));
+    fireEvent.click(within(sheet).getByRole("button", { name: "Применить" }));
+
+    expect(await screen.findByRole("button", { name: "Стрижка" })).toBeInTheDocument();
+    expect(within(grid).getByRole("button", { name: /^Запись 09:00–10:00/ })).toHaveClass("ss-block--dim");
+    expect(within(grid).getByRole("button", { name: /^Запись 10:30–11:30/ })).not.toHaveClass("ss-block--dim");
+  });
+
+  it("«Месяц» — способ выбрать день: дата применяется вместе с фильтрами", async () => {
+    await openGrid();
+
+    const sheet = await openSheet("Выбрать дату");
+    fireEvent.click(within(sheet).getByRole("button", { name: "Месяц" }));
+    expect(within(sheet).getByText("Август 2034")).toBeInTheDocument();
+    fireEvent.click(within(sheet).getByRole("button", { name: "Следующий месяц" }));
+    fireEvent.click(within(sheet).getByRole("button", { name: "5 сентября, Вт" }));
+    fireEvent.click(within(sheet).getByRole("button", { name: "Применить" }));
+
+    await waitFor(() => expect(mocked.day.mock.calls.at(-1)?.[0]).toBe("2034-09-05"));
+    expect(where()).toBe("/admin/schedule?date=2034-09-05|null");
+  });
+
+  it("«Неделя» листает недели, выбор — по-прежнему один день", async () => {
+    await openGrid();
+
+    const sheet = await openSheet("Выбрать дату");
+    fireEvent.click(within(sheet).getByRole("button", { name: "Неделя" }));
+    fireEvent.click(within(sheet).getByRole("button", { name: "Следующая неделя" }));
+    expect(within(sheet).getByText("28 авг. – 3 сент. 2034")).toBeInTheDocument();
+    fireEvent.click(within(sheet).getByRole("button", { name: "30 августа, Ср" }));
+    fireEvent.click(within(sheet).getByRole("button", { name: "Применить" }));
+
+    await waitFor(() => expect(mocked.day.mock.calls.at(-1)?.[0]).toBe("2034-08-30"));
+  });
+
+  it("закрытие без «Применить» ничего не меняет", async () => {
+    await openGrid();
+
+    const sheet = await openSheet(/Все мастера/);
+    fireEvent.click(within(sheet).getByRole("checkbox", { name: /Мастер Один/ }));
+    fireEvent.click(within(sheet).getByRole("button", { name: "Закрыть" }));
+
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(screen.getByRole("button", { name: /Все мастера/ })).toBeInTheDocument();
+    expect(window.sessionStorage.getItem(FILTERS_KEY)).toBeNull();
+  });
+
+  it("большая команда — поиск по имени (MUST FIX 6)", async () => {
+    mocked.day.mockImplementation(async () => {
+      const day = salonDay(6);
+      for (let i = 7; i <= 9; i += 1) {
+        day.masters.push({ master_id: `m-${i}`, name: `Специалист ${i}`, is_active: true, visits: [] });
+      }
+      return day;
+    });
+    renderAt(`/admin/schedule?date=${DAY}`);
+    await screen.findByRole("heading", { name: "Записи дня" });
+
+    const sheet = await openSheet(/Все мастера/);
+    const search = within(sheet).getByRole("searchbox", { name: "Поиск мастера" });
+    fireEvent.change(search, { target: { value: "специалист 8" } });
+
+    expect(within(sheet).getByRole("checkbox", { name: /Специалист 8/ })).toBeInTheDocument();
+    expect(within(sheet).queryByRole("checkbox", { name: /Мастер Один/ })).toBeNull();
+
+    fireEvent.change(search, { target: { value: "никто" } });
+    expect(within(sheet).getByText("Никого не нашли.")).toBeInTheDocument();
+  });
+
+  it("маленькой команде поиск не показывается", async () => {
+    await openGrid();
+    const sheet = await openSheet(/Все мастера/);
+    expect(within(sheet).getByRole("checkbox", { name: /Мастер Один/ })).toBeInTheDocument();
+    expect(within(sheet).queryByRole("searchbox")).toBeNull();
+  });
+});
+
+describe("фильтры между заходами", () => {
+  it("вход без даты — свежий: фильтры прошлого захода не поднимаются и стираются", async () => {
+    selectOnly(["m-1"]);
+    await openGrid("/admin/schedule");
+
+    expect(screen.getByRole("button", { name: /Все мастера/ })).toBeInTheDocument();
+    expect(window.sessionStorage.getItem(FILTERS_KEY)).toBeNull();
+  });
+
+  it("возврат с датой поднимает фильтры", async () => {
+    selectOnly(["m-1", "m-2"]);
+    await openGrid();
+    expect(screen.getByRole("button", { name: "2 мастера" })).toBeInTheDocument();
+  });
+
+  it("сохранённый id, которого больше нет, фильтром не считается: записи не прячутся", async () => {
+    selectOnly(["архив"], ["удалена"]);
+    const grid = await openGrid();
+
+    expect(screen.getByRole("button", { name: /Все мастера/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Все услуги/ })).toBeInTheDocument();
+    expect(within(grid).getByRole("button", { name: /^Запись 09:00–10:00/ })).not.toHaveClass("ss-block--dim");
+  });
+});
+
+describe("кадр 13 — состояния", () => {
+  it("день не загрузился — названо «расписание», повтор загружает", async () => {
+    mocked.day.mockImplementationOnce(async () => {
+      throw new ApiError(500, "server_error", "");
+    });
+    renderAt(`/admin/schedule?date=${DAY}`);
+
+    expect(await screen.findByRole("heading", { name: "Не удалось загрузить расписание" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Попробовать снова" }));
+
+    expect(await screen.findByRole("region", { name: "Расписание по мастерам" })).toBeInTheDocument();
+  });
+
+  it("обновление не удалось — последнее известное остаётся на экране с пометкой", async () => {
+    const grid = await openGrid();
+    mocked.day.mockImplementationOnce(async () => {
+      throw new ApiError(503, "schedule_unavailable", "");
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Обновить" }));
+
+    expect(await screen.findByText("Не удалось обновить. Показаны последние данные")).toBeInTheDocument();
+    expect(within(grid).getByRole("button", { name: /^Запись 09:00–10:00/ })).toBeInTheDocument();
+  });
+
+  it("после сбоя обновления окно не действие", async () => {
+    await openGrid();
+    mocked.day.mockImplementationOnce(async () => {
+      throw new ApiError(503, "schedule_unavailable", "");
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Обновить" }));
+    await screen.findByText("Не удалось обновить. Показаны последние данные");
+
+    tapColumn("Мастер Один", 0.5);
+
+    const card = await screen.findByRole("group", { name: "Свободно 12:00–13:00" });
+    expect(within(card).getByRole("button", { name: /Записать/ })).toBeDisabled();
+  });
+
+  it("кадр не прочитан, день прочитан — записи показаны, про смены сказано", async () => {
+    mocked.frame.mockImplementation(async () => {
+      throw new ApiError(503, "schedule_unavailable", "");
+    });
+    const grid = await openGrid();
+
+    expect(screen.getByText(/Смены и недоступность не загрузились/)).toBeInTheDocument();
+    expect(within(grid).getByRole("button", { name: /^Запись 09:00–10:00/ })).toBeInTheDocument();
+    expect(within(screen.getByRole("group", { name: "Мастер Три" })).getByText("Часы неизвестны")).toBeInTheDocument();
+  });
+
+  it("неразобранный список кадра назван словами", async () => {
+    mocked.frame.mockImplementation(async () => salonFrame(4, DAY, { unreadable_lists: ["breaks", "closures"] }));
+    await openGrid();
+
+    expect(
+      screen.getByText("День показан не полностью: не удалось разобрать перерывы, закрытия салона. Показанное верно, но не всё."),
+    ).toBeInTheDocument();
+  });
+
+  it("в салоне нет мастеров — карточка, а не пустая сетка", async () => {
+    team = 0;
+    renderAt(`/admin/schedule?date=${DAY}`);
+
+    expect(await screen.findByRole("heading", { name: "Нет мастеров" })).toBeInTheDocument();
+    expect(screen.getByText("В салоне нет мастеров — расписание показывать некому.")).toBeInTheDocument();
+  });
+
+  it("возврат на экран перечитывает день", async () => {
+    await openGrid();
+    expect(mocked.day).toHaveBeenCalledTimes(1);
+
+    Object.defineProperty(document, "visibilityState", { configurable: true, get: () => "visible" });
+    fireEvent(document, new Event("visibilitychange"));
+
+    await waitFor(() => expect(mocked.day).toHaveBeenCalledTimes(2));
+  });
+});
+
+describe("кадр 12 — экран «Мастер»", () => {
+  async function openMaster(entry = `/admin/schedule/master/m-1?date=${DAY}`) {
+    renderAt(entry);
+    await screen.findByRole("button", { name: /^Свободно 12:00–13:00/ });
+  }
+
+  it("шапка, вкладки и день: записи дня салона, окно, блок", async () => {
+    await openMaster();
+
+    expect(screen.getByRole("heading", { name: "Мастер" })).toBeInTheDocument();
+    expect(screen.getByText("Мастер Один")).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Расписание" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("heading", { name: "Пн, 21 августа" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Запись 09:00–10:00, Клиент А., Маникюр" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^Блок 14:00–15:00/ })).toBeInTheDocument();
+    // Чужие записи на экране мастера не появляются.
+    expect(screen.queryByRole("button", { name: /Клиент Б\./ })).toBeNull();
+    expect(mocked.masterDay).toHaveBeenCalledTimes(1);
+  });
+
+  it("окно ведёт в ручную запись и просит вернуть к мастеру", async () => {
+    await openMaster();
+
+    fireEvent.click(screen.getByRole("button", { name: /^Свободно 12:00–13:00/ }));
+
+    expect(where()).toBe(
+      `/admin/booking/new?return=schedule-master&date=${DAY}&master_id=m-1&from=12%3A00&to=13%3A00|null`,
     );
+    expectNoWrites();
+  });
+
+  it("запись ведёт в карточку и уносит адрес мастера", async () => {
+    await openMaster();
+
+    fireEvent.click(screen.getByRole("button", { name: /^Запись 09:00–10:00/ }));
+    expect(where()).toBe(
+      `/admin/bookings/v-1|${JSON.stringify({ from: `/admin/schedule/master/m-1?date=${DAY}` })}`,
+    );
+  });
+
+  it("«назад» и «✕» возвращают в расписание той же даты", async () => {
+    await openMaster();
+    fireEvent.click(screen.getByRole("button", { name: "Закрыть" }));
+    expect(where()).toBe(`/admin/schedule?date=${DAY}|null`);
+  });
+
+  it("«О мастере» — только чтение и ссылка на карточку с недельным графиком", async () => {
+    await openMaster();
+
+    fireEvent.click(screen.getByRole("tab", { name: "О мастере" }));
+
+    expect(await screen.findByText("Стригу с 2015 года.")).toBeInTheDocument();
+    expect(screen.getByText("10 лет")).toBeInTheDocument();
+    expect(screen.getByText(/Недельный график и его подтверждение — в карточке мастера/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Открыть карточку мастера" }));
+    expect(where()).toBe("/admin/team/m-1|null");
+  });
+
+  it("прошедшая дата — окон нет, и про «свободных промежутков нет» экран молчит", async () => {
+    renderAt("/admin/schedule/master/m-1?date=2020-01-06");
+    mocked.masterDay.mockImplementation(async () => ({
+      tenant_tz: "Europe/Moscow",
+      from: "2020-01-06",
+      to: "2020-01-06",
+      days: [masterDay({ date: "2020-01-06", blocks: [] })],
+    }));
+
+    expect(await screen.findByText("Расписание не подтверждено — салон его не заверял")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^Свободно/ })).toBeNull();
+    expect(screen.queryByText("Свободных промежутков нет.")).toBeNull();
+  });
+
+  it("выходной назван словом сервера", async () => {
+    mocked.masterDay.mockImplementation(async () => ({
+      tenant_tz: "Europe/Moscow",
+      from: DAY,
+      to: DAY,
+      days: [masterDay({ is_off_day: true, working_hours: null, blocks: [], free_windows: [] })],
+    }));
+    renderAt(`/admin/schedule/master/m-1?date=${DAY}`);
+
+    expect(await screen.findByText("Выходной")).toBeInTheDocument();
+    // Салонная запись законно живёт и в выходной — она остаётся видна.
+    expect(screen.getByRole("button", { name: /^Запись 09:00–10:00/ })).toBeInTheDocument();
   });
 });

@@ -23,6 +23,7 @@
 import { useMemo } from "react";
 import { useSearchParams } from "react-router-dom";
 import { useScreenBack } from "../../hooks/useScreenBack";
+import { scheduleReturnPath } from "../../lib/salon-return";
 import { backTo } from "../../lib/screen-back";
 
 import {
@@ -105,10 +106,14 @@ const SALON_API: BookingFormApi = {
 
 export function AdminNewBookingScreen() {
   const [searchParams] = useSearchParams();
-  const returnTo = useMemo(
-    () => RETURN_TARGETS[searchParams.get("return") ?? ""] ?? RETURN_DEFAULT,
-    [searchParams],
-  );
+  const returnTo = useMemo(() => {
+    // DRF-2933 — с «Расписания» v2 приходят с датой, а с дня мастера — ещё и
+    // с мастером: возврат ведёт на тот же день (и к тому же мастеру), а не в
+    // «сегодня». Адрес собирается из проверенных частей (`salon-return`).
+    const schedule = scheduleReturnPath(searchParams);
+    if (schedule && RETURN_TARGETS.schedule) return { ...RETURN_TARGETS.schedule, path: schedule };
+    return RETURN_TARGETS[searchParams.get("return") ?? ""] ?? RETURN_DEFAULT;
+  }, [searchParams]);
   // DRF-2368 — возврат объявлен ЗДЕСЬ, а не только нарисован формой:
   // адрес зависит от того, откуда пришли («Сегодня» или «День салона»), и
   // берётся из того же закрытого списка, что и подпись кнопки. Одно

@@ -218,7 +218,9 @@ function offsOn(rows: Array<{ id: string; from: string; to: string; reason: stri
   });
 }
 
-function impact(rows: Array<{ id: string; from: string; to: string }> = []): ScheduleImpact {
+function impact(
+  rows: Array<{ id: string; from: string; to: string; refund?: number | null }> = [],
+): ScheduleImpact {
   return {
     start_at: "",
     end_at: "",
@@ -232,7 +234,7 @@ function impact(rows: Array<{ id: string; from: string; to: string }> = []): Sch
         service_name: "Маникюр",
         status: "confirmed",
         payment_status: null,
-        refund_percent_if_cancelled: null,
+        refund_percent_if_cancelled: r.refund ?? null,
       })),
       seen_fields: [],
       unreadable_rows: 0,
@@ -464,6 +466,28 @@ describe("кадры 3–9 — одна дата", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Перейти к записям" }));
     expect(where()).toBe(`/admin/bookings/a-1|${JSON.stringify({ from: DAY_PATH })}`);
+  });
+
+  it("кадр 7 говорит, сколько вернётся клиенту при отмене, — когда каталог это сказал (DRF-2933)", async () => {
+    // Строка жила в предпросмотре «Закрыть время — кого затронет» на
+    // «Расписании»; предпросмотр переехал сюда, возможность — с ним.
+    mocked.impact.mockResolvedValue(
+      impact([
+        { id: "a-1", from: "13:00", to: "14:00", refund: 50 },
+        { id: "a-2", from: "15:00", to: "16:00" },
+      ]),
+    );
+    mocked.day.mockResolvedValue(dayFrame([{ id: "a-1", first: "Анна", initial: "К." }]));
+    await openDay();
+
+    fireEvent.click(screen.getByRole("switch", { name: "Рабочий день" }));
+    fireEvent.click(screen.getByRole("button", { name: "Сохранить" }));
+
+    expect(await screen.findByText("при отмене вернётся 50%")).toBeInTheDocument();
+    // Каталог не сказал — строки нет, а не «вернётся 0%».
+    expect(screen.getAllByText(/при отмене вернётся/)).toHaveLength(1);
+    await settleScenario();
+    expectNoWrites();
   });
 
   it("день вернули к шаблону — изменение снимается, нового не пишется", async () => {

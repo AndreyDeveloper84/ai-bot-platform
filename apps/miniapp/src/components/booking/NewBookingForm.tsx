@@ -145,6 +145,11 @@ const INVALIDATION_COPY: Record<SlotInvalidationReason, string> = {
   window_changed: "Время сброшено — вы выбрали другой день.",
 };
 
+/** DRF-2933 — окно пришло из расписания одного мастера и с другим не живёт. */
+const WINDOW_DROPPED_COPY = "Выбранное окно снято — оно было у другого мастера.";
+
+const HHMM = /^\d{2}:\d{2}$/;
+
 function toIsoDate(d: Date): string {
   const y = d.getFullYear();
   const m = `${d.getMonth() + 1}`.padStart(2, "0");
@@ -305,13 +310,20 @@ export function NewBookingForm({
 
   const dispatch = useCallback((action: DraftAction) => {
     setDraft((current) => {
-      const { draft: next, slotInvalidatedBy } = applyDraftAction(
+      const { draft: next, slotInvalidatedBy, windowDropped } = applyDraftAction(
         current,
         action,
       );
       // §12 — the system never silently drops the start. If a change took
-      // it, the change has to announce itself.
-      setNotice(slotInvalidatedBy ? INVALIDATION_COPY[slotInvalidatedBy] : "");
+      // it, the change has to announce itself. Same for the window the
+      // draft was started from (DRF-2933).
+      setNotice(
+        slotInvalidatedBy
+          ? INVALIDATION_COPY[slotInvalidatedBy]
+          : windowDropped
+            ? WINDOW_DROPPED_COPY
+            : "",
+      );
       return next;
     });
   }, []);
@@ -338,6 +350,9 @@ export function NewBookingForm({
   // человек проходит форму до «Записать» сам.
   const prefilledRef = useRef(false);
   const [prefillHint, setPrefillHint] = useState<string>("");
+  // День окна — из адреса, а не текущий день листа времени: листая ←/→,
+  // человек не должен увидеть «23 сентября · 14:00–17:00» для окна 22-го.
+  const [windowDate, setWindowDate] = useState<string>("");
   useEffect(() => {
     if (prefilledRef.current) return;
     if (masters.length === 0 && services.length === 0) return;
@@ -370,6 +385,17 @@ export function NewBookingForm({
         type: "master/set",
         master: { id: master.id, name: master.name },
       });
+      // DRF-2933 — «Расписание» салона приводит со свободным окном этого
+      // мастера (`?date&from&to`, макет DRF-2854). Окно — подпись, с чего
+      // начали, и живёт ТОЛЬКО вместе с подставленным мастером: мастера нет
+      // в списке — окна тоже нет, иначе оно висело бы над пустой строкой
+      // «Мастер» и относилось бы неизвестно к кому.
+      const from = searchParams.get("from") ?? "";
+      const to = searchParams.get("to") ?? "";
+      if (HHMM.test(from) && HHMM.test(to)) {
+        dispatch({ type: "window/set", window: { start_at: from, end_at: to } });
+        setWindowDate(searchParams.get("date") ?? "");
+      }
     }
     if (clientId && clientName) {
       dispatch({
@@ -400,16 +426,13 @@ export function NewBookingForm({
   // `?date&from&to` — «Выбранное окно: 14:00–17:00» (DRF-1183, состояние 4).
   // Подпись — диапазон, с которого начали, не длительность записи.
   const windowRef = useRef(false);
-  // День окна — из адреса, а не текущий день листа времени: листая ←/→,
-  // мастер не должен увидеть «23 сентября · 14:00–17:00» для окна 22-го.
-  const [windowDate, setWindowDate] = useState<string>("");
   useEffect(() => {
     if (!isMaster || windowRef.current) return;
     windowRef.current = true;
     const from = searchParams.get("from") ?? "";
     const to = searchParams.get("to") ?? "";
     const day = searchParams.get("date") ?? "";
-    if (/^\d{2}:\d{2}$/.test(from) && /^\d{2}:\d{2}$/.test(to)) {
+    if (HHMM.test(from) && HHMM.test(to)) {
       dispatch({ type: "window/set", window: { start_at: from, end_at: to } });
       setWindowDate(day);
     }

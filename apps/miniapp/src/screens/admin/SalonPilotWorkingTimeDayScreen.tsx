@@ -993,6 +993,9 @@ function ConflictView({
                 <span className="wt-conflict__who">
                   {row.client ? <span className="wt-conflict__name">{row.client}</span> : null}
                   {row.service ? <span className="wt-conflict__service">{row.service}</span> : null}
+                  {row.refundPercent !== null ? (
+                    <span className="wt-conflict__service">{WT_COPY.conflict.refund(row.refundPercent)}</span>
+                  ) : null}
                 </span>
               </>
             );
