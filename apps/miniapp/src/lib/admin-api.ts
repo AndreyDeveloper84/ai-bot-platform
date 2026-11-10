@@ -1307,12 +1307,13 @@ export interface MasterExceptionRow {
   start: string | null;
   end: string | null;
   /**
-   * Перерыв и заметка даты (DRF-2936) — чем изменение отличается от шаблона
-   * кроме часов. Необязательны: прежний сервер их не отдавал.
+   * Перерыв даты и факт заметки (DRF-2936) — чем изменение отличается от
+   * шаблона кроме часов. Текст заметки не отдаётся: экрану нужен только факт,
+   * а ответ читает и ресепшн. Необязательны: прежний сервер их не отдавал.
    */
   break_start?: string | null;
   break_end?: string | null;
-  note?: string;
+  has_note?: boolean;
 }
 
 export interface MasterTimeOffRow {

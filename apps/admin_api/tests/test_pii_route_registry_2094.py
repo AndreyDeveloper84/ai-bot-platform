@@ -230,7 +230,7 @@ ADMIN_ROUTES: dict[str, Entry] = {
         ),
     ),
     "master_exceptions": third_party(
-        "exceptions[] (date, hours, break, note)",
+        "exceptions[] (date, hours, break, has_note)",
         "time_off[].reason",
         "closures[].reason",
         via=A + "views_master_exceptions:master_exceptions",
@@ -238,8 +238,9 @@ ADMIN_ROUTES: dict[str, Entry] = {
         why=(
             "the operator reads why the master is unavailable in the window; the reason is "
             "the master's own free-text note as Ayla stores it (_time_off_row, _closure_row); "
-            "the date's note (_exception_row) is shown so an edit of the date's hours does "
-            "not silently drop it (DRF-2936)"
+            "of the date's note only the fact that one exists is sent (has_note, _exception_row) "
+            "so an edit of the date's hours does not silently drop it (DRF-2936); the text itself "
+            "stays in Ayla — the screen never shows it and reception reads this answer too"
         ),
     ),
     "master_schedule_impact": none(

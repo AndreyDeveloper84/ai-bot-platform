@@ -269,12 +269,13 @@ class TestTheSalonSeesWhatIsAlreadyBooked:
 
         row = _get(client, synced_master).json()["exceptions"]["rows"][0]
 
-        assert (row["start"], row["break_start"], row["break_end"], row["note"]) == (
+        assert (row["start"], row["break_start"], row["break_end"], row["has_note"]) == (
             "10:00",
             "15:00",
             "16:00",
-            "Свадьба",
+            True,
         )
+        assert "note" not in row, "текст заметки даты ответом не отдаётся — только факт её наличия"
 
     def test_the_owner_from_the_salon_bot_may_write(
         self,

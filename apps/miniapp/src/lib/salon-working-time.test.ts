@@ -90,7 +90,7 @@ function withOffs(rows: MasterTimeOffRow[], patch: Partial<MasterExceptions> = {
 function withException(
   start: string,
   end: string,
-  extra: { break_start?: string | null; break_end?: string | null; note?: string } = {},
+  extra: { break_start?: string | null; break_end?: string | null; has_note?: boolean } = {},
 ): MasterExceptions {
   return exceptions({
     exceptions: {
@@ -104,7 +104,7 @@ function withException(
           end,
           break_start: null,
           break_end: null,
-          note: "",
+          has_note: false,
           ...extra,
         },
       ],
@@ -233,7 +233,7 @@ describe("снимается только снятое человеком", () =
 
 describe("изменение на дату — по намерению, с сохранением чужого", () => {
   it("часы не трогали — изменения нет, даже если оно равно шаблону", () => {
-    const ex = withException("10:00", "19:00", { note: "Свадьба" });
+    const ex = withException("10:00", "19:00", { has_note: true });
     const draft: DayDraft = {
       ...fresh(ex),
       added: [{ key: "n", from: "13:00", to: "15:00", reason: "Личные дела" }],
@@ -249,7 +249,7 @@ describe("изменение на дату — по намерению, с со�
   });
 
   it("вернули к шаблону, а у даты своя заметка или перерыв — переписать часы, не снимая", () => {
-    for (const extra of [{ note: "Свадьба" }, { break_start: "15:00", break_end: "16:00" }]) {
+    for (const extra of [{ has_note: true }, { break_start: "15:00", break_end: "16:00" }]) {
       const ex = withException("12:00", "16:00", extra);
       const draft: DayDraft = { ...fresh(ex), hoursTouched: true, start: "10:00", end: "19:00" };
       expect(dateActionFor(snap(ex), draft)).toEqual({
@@ -296,7 +296,7 @@ describe("изменение на дату — по намерению, с со�
             end: null,
             break_start: null,
             break_end: null,
-            note: "",
+            has_note: false,
           },
         ],
         seen_fields: [],

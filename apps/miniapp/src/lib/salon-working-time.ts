@@ -565,7 +565,7 @@ export function snapshotLayer(snap: DaySnapshot): DayLayer {
 export function snapshotKey(snap: DaySnapshot): string {
   const layer = (l: DayLayer) => (l.working ? `${l.start}-${l.end}` : "off");
   const ex = snap.exception
-    ? `${layer(exceptionLayer(snap.exception))}|${snap.exception.break_start ?? ""}-${snap.exception.break_end ?? ""}|${snap.exception.note ?? ""}`
+    ? `${layer(exceptionLayer(snap.exception))}|${snap.exception.break_start ?? ""}-${snap.exception.break_end ?? ""}|${snap.exception.has_note === undefined ? "?" : snap.exception.has_note ? "n" : ""}`
     : "none";
   const offs = snap.timeOff
     .map((o) => `${o.id}:${o.from}-${o.to}:${o.reason}:${o.editable ? "e" : "r"}`)
@@ -719,7 +719,7 @@ export type DateAction =
 function exceptionCarriesMore(snap: DaySnapshot): boolean {
   const ex = snap.exception;
   if (!ex) return false;
-  if (ex.note === undefined || ex.note.trim() !== "") return true;
+  if (ex.has_note === undefined || ex.has_note) return true;
   if (!ex.is_working_day || !snap.template.working) return false;
   if (ex.break_start === undefined || ex.break_end === undefined) return true;
   const weekday = snap.templateBreak;
