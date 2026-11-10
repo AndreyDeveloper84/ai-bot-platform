@@ -64,6 +64,11 @@ def _fetch_registry(repository: str, ref: str, path: str) -> bytes:
         # несуществующий путь — одинаково. Без токена причина почти всегда
         # первая; с токеном — токен не читает этот репозиторий (замер
         # 10.11.2026: GH_DEPLOY_TOKEN видит ayla-ai-core, но не ayla-knowledge).
+        if exc.code in (401, 403) and token:
+            hint = f"{TOKEN_ENV} задан, но GitHub его не принял (отозван, истёк или повреждён) — перевыпустить"
+            raise urllib.error.HTTPError(
+                exc.url, exc.code, f"{exc.reason}; {hint}", exc.headers, None
+            ) from None
         if exc.code == 404:
             hint = (
                 f"{TOKEN_ENV} задан, но {repository} им не читается — токену нужно право "
