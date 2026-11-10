@@ -23,7 +23,8 @@
 * s7 — кабинет со слагом чужой личности своим не считается: обычное правило салона;
 * s8 — кабинет, заведённый настоящей саморегистрацией, распознаётся и стирается;
 * s9 — сбой стирания называется в ответе: каталог не получит ``all_ok``;
-* s10 — что названо пределом: роль владельца и связь остаются;
+* s10 — с 10.11.2026 кабинет закрывается: роли сняты, связь снята, тенант выключен
+  (подробно — ``test_solo_cabinet_closure_and_return.py``);
 * s11 — в журнале нет имени человека.
 """
 
@@ -229,7 +230,7 @@ def test_s1_the_solo_card_and_the_cabinet_name_are_erased(quiet_cascade: None) -
     outcome = _delete(person)
 
     assert outcome.all_ok is True
-    assert _detail(outcome) == "roles=0 cards=0 owner_role_kept=1 solo_cards_erased=1"
+    assert _detail(outcome) == "roles=2 cards=0 solo_cards_erased=1 solo_cabinets_closed=1"
     card = _card(person)
     assert _personal(card) == ERASED
     assert card.is_active is False
@@ -280,7 +281,7 @@ def test_s5_people_who_already_left_do_not_make_it_shared(quiet_cascade: None) -
 
     outcome = _delete(person)
 
-    assert _detail(outcome) == "roles=0 cards=0 owner_role_kept=1 solo_cards_erased=1"
+    assert _detail(outcome) == "roles=2 cards=0 solo_cards_erased=1 solo_cabinets_closed=1"
     assert _personal(_card(person)) == ERASED
 
 
@@ -291,7 +292,7 @@ def test_s5_an_unanswered_invite_is_not_a_person(quiet_cascade: None) -> None:
 
     outcome = _delete(person)
 
-    assert _detail(outcome) == "roles=0 cards=0 owner_role_kept=1 solo_cards_erased=1"
+    assert _detail(outcome) == "roles=2 cards=0 solo_cards_erased=1 solo_cabinets_closed=1"
     assert _personal(_card(person)) == ERASED
     assert _tenant(person).name == ERASED_SOLO_TENANT_NAME
 
@@ -302,7 +303,7 @@ def test_s5_the_persons_own_second_shell_is_not_someone_else(quiet_cascade: None
 
     outcome = _delete(person)
 
-    assert _detail(outcome).endswith("owner_role_kept=1 solo_cards_erased=1")
+    assert _detail(outcome) == "roles=3 cards=0 solo_cards_erased=1 solo_cabinets_closed=1"
     assert _personal(_card(person)) == ERASED
 
 
@@ -315,7 +316,7 @@ def test_s12_a_card_unlinked_earlier_is_still_erased(quiet_cascade: None) -> Non
 
     outcome = _delete(person)
 
-    assert _detail(outcome) == "roles=1 cards=0 solo_cards_erased=1"
+    assert _detail(outcome) == "roles=1 cards=0 solo_cards_erased=1 solo_cabinets_closed=1"
     card = _card(person)
     assert card.linked_bot_user_id is None
     assert _personal(card) == ERASED
@@ -354,14 +355,14 @@ def test_s13_a_failure_on_the_cabinet_rolls_the_card_back(
 
 def test_s6_a_second_run_changes_nothing(quiet_cascade: None) -> None:
     person = _solo("s6")
-    assert _detail(_delete(person)).endswith("solo_cards_erased=1")
+    assert "solo_cards_erased=1" in _detail(_delete(person))
     archived_at = _card(person).archived_at
     assert archived_at is not None
 
     again = _delete(person)
 
     assert again.all_ok is True
-    assert _detail(again) == "roles=0 cards=0 owner_role_kept=1"
+    assert _detail(again) == "roles=0 cards=0"
     assert _card(person).archived_at == archived_at
     assert _personal(_card(person)) == ERASED
 
@@ -391,7 +392,7 @@ def test_s8_a_cabinet_made_by_real_self_registration_is_erased(quiet_cascade: No
     )
 
     assert outcome.all_ok is True
-    assert _detail(outcome) == "roles=0 cards=0 owner_role_kept=1 solo_cards_erased=1"
+    assert _detail(outcome) == "roles=2 cards=0 solo_cards_erased=1 solo_cabinets_closed=1"
     card = CatalogMaster.all_tenants.get(pk=made.master.pk)
     assert card.name == ERASED_CARD_NAME
     assert card.archived_at is not None
@@ -416,21 +417,20 @@ def test_s9_a_failed_erasure_is_named_and_the_catalog_gets_no_all_ok(
     assert _personal(_card(person)) == kept
 
 
-def test_s10_the_named_limits_hold(quiet_cascade: None) -> None:
-    """Роль владельца и связь с карточкой остаются: закрытие кабинета — отдельная задача."""
+def test_s10_the_cabinet_is_closed_and_the_catalog_key_stays(quiet_cascade: None) -> None:
+    """С 10.11.2026 предел сдвинут: роли и связь сняты, тенант закрыт; ключ каталога — аудит."""
     person = _solo("s10")
 
     _delete(person)
 
-    roles = sorted(
-        TenantStaff.all_tenants.filter(
-            bot_user=person.shell, deactivated_at__isnull=True
-        ).values_list("role", flat=True)
-    )
-    assert roles == ["admin", "owner"]
+    rows = TenantStaff.all_tenants.filter(bot_user=person.shell)
+    # ПРИСУТСТВИЕ впереди: строки ролей — история, остаются; активных нет.
+    assert sorted(rows.values_list("role", flat=True)) == ["admin", "owner"]
+    assert rows.filter(deactivated_at__isnull=True).count() == 0
     card = _card(person)
-    assert card.linked_bot_user_id == person.shell.id
+    assert card.linked_bot_user_id is None
     assert card.catalog_specialist_id == person.card.catalog_specialist_id
+    assert _tenant(person).is_active is False
 
 
 def test_s11_the_log_line_carries_no_name(

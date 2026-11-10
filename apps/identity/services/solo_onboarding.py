@@ -79,6 +79,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import re
 import struct
 from dataclasses import dataclass
 from enum import Enum
@@ -86,6 +87,7 @@ from typing import TYPE_CHECKING, Optional
 from uuid import UUID
 
 from django.db import connection, transaction
+from django.db.models import Q
 from django.utils import timezone
 
 from apps.catalog.models import CatalogMaster
@@ -247,10 +249,19 @@ def _slug_hash(channel: str, channel_user_id: str) -> str:
     return hashlib.sha256(raw).hexdigest()[:8]
 
 
+#: ``Tenant.slug`` is ``SlugField(max_length=50)``.
+SOLO_SLUG_MAX_LEN = 50
+#: The suffix ``_next_solo_slug`` writes: ASCII digits, no leading zero.
+_SUFFIX_RE = re.compile(r"[1-9][0-9]*")
+
+
 def _solo_tenant_slug(channel: str, channel_user_id: str) -> str:
     """Solo tenant slug shape: `solo-{channel-trimmed}-{8-hex}`.
 
-    Deterministic per identity → enables idempotent lookup-by-slug.
+    Deterministic per identity → enables idempotent lookup-by-slug. This is
+    the BASE slug: a cabinet re-registered after account deletion closed the
+    previous one gets ``{base}-2``, ``{base}-3``, … (see
+    :func:`is_own_solo_slug`, :func:`solo_tenant_family`).
     The 8-hex SHA-256 suffix carries identity uniqueness; the `channel`
     component is informational. Channel is trimmed to fit within
     `SlugField(max_length=50)` even when the channel string itself is
@@ -261,6 +272,70 @@ def _solo_tenant_slug(channel: str, channel_user_id: str) -> str:
     # 50 (slug max) − 5 (`solo-`) − 1 (`-`) − 8 (hex) = 36 chars for channel
     channel_trimmed = channel[:36]
     return f"solo-{channel_trimmed}-{_slug_hash(channel, channel_user_id)}"
+
+
+def is_own_solo_slug(slug: str, channel: str, channel_user_id: str) -> bool:
+    """Is ``slug`` a cabinet self-registration made for this identity.
+
+    The base slug or the base slug with a ``-N`` suffix (N — a positive
+    integer): the N-th cabinet of the same person after earlier ones were
+    closed by account deletion (owner's decision 2026-11-10, variant «а»:
+    a closed cabinet stays as a tombstone, the return gets a fresh one).
+    Anything else — another person's cabinet or a salon — is not one's own,
+    however solo-shaped its slug looks.
+    """
+    base = _solo_tenant_slug(channel, channel_user_id)
+    if slug == base:
+        return True
+    prefix = f"{base}-"
+    tail = slug[len(prefix) :]
+    # ASCII digits, no leading zero: ``-02`` and ``-²`` are not what
+    # ``_next_solo_slug`` writes, so they are not one's own either.
+    return slug.startswith(prefix) and _SUFFIX_RE.fullmatch(tail) is not None and int(tail) >= 2
+
+
+def solo_tenant_family(channel: str, channel_user_id: str) -> list[Tenant]:
+    """Every cabinet (active or closed) self-registration made for this identity."""
+    base = _solo_tenant_slug(channel, channel_user_id)
+    rows = Tenant.all_objects.filter(Q(slug=base) | Q(slug__startswith=f"{base}-")).order_by(
+        "created_at", "pk"
+    )
+    return [t for t in rows if is_own_solo_slug(t.slug, channel, channel_user_id)]
+
+
+def active_solo_tenant(channel: str, channel_user_id: str) -> Tenant | None:
+    """The person's open cabinet, or ``None`` — closed ones do not count.
+
+    Two open cabinets for one identity is a partial state nobody should see
+    (``create_solo_provider`` refuses to produce it); here the oldest wins,
+    the same tie-break as the salon chooser (DRF-1907).
+    """
+    for tenant in solo_tenant_family(channel, channel_user_id):
+        if tenant.is_active:
+            return tenant
+    return None
+
+
+def _next_solo_slug(base: str, taken: set[str]) -> str:
+    """``base`` if nobody holds it, else the first free ``base-N`` (N from 2).
+
+    Length stays within ``SlugField(max_length=50)`` for every real channel
+    (``solo-max-`` + 8 hex = 17 chars; the longest, ``telegram``/``whatsapp``,
+    gives 22) — a dozen digits of headroom. A channel name long enough to use
+    the base's whole 50 is refused by name here rather than as a database
+    error later.
+    """
+    if base not in taken:
+        return base
+    n = 2
+    while f"{base}-{n}" in taken:
+        n += 1
+    slug = f"{base}-{n}"
+    if len(slug) > SOLO_SLUG_MAX_LEN:
+        raise SoloOnboardingError(
+            f"next solo slug would be {len(slug)} chars, over {SOLO_SLUG_MAX_LEN}"
+        )
+    return slug
 
 
 def _advisory_lock_key(channel: str, channel_user_id: str) -> int:
@@ -387,7 +462,7 @@ def create_solo_provider(
     # двенадцать других есть. То есть проверка не «ещё не настроено» —
     # она требовала настройки под дверь, которую закрыли.
 
-    target_slug = _solo_tenant_slug(channel, channel_user_id)
+    base_slug = _solo_tenant_slug(channel, channel_user_id)
 
     # Idempotency lock — Postgres advisory transaction lock keyed on the
     # identity hash. Released automatically at transaction commit/rollback.
@@ -403,7 +478,24 @@ def create_solo_provider(
                 [_advisory_lock_key(channel, channel_user_id)],
             )
 
-    existing_tenant = Tenant.objects.filter(slug=target_slug).first()
+    # The person's cabinets: the open one is the idempotent answer; closed
+    # ones (account deleted, ``is_active=False``) are tombstones, and the
+    # return gets a fresh cabinet under the next free suffix — never the
+    # dead one back (owner's decision 2026-11-10, variant «а»).
+    family = solo_tenant_family(channel, channel_user_id)
+    open_cabinets = [t for t in family if t.is_active]
+    if len(open_cabinets) > 1:
+        raise SoloOnboardingPartialStateError(
+            f"identity has {len(open_cabinets)} open solo cabinets "
+            f"({', '.join(t.slug for t in open_cabinets)}). "
+            "Manual ops inspection required before retry."
+        )
+    existing_tenant = open_cabinets[0] if open_cabinets else None
+    target_slug = (
+        existing_tenant.slug
+        if existing_tenant is not None
+        else _next_solo_slug(base_slug, {t.slug for t in family})
+    )
 
     if existing_tenant is not None:
         # Solo tenant already exists — verify the 4 related rows are
