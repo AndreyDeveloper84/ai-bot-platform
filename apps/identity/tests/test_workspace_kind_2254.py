@@ -321,11 +321,16 @@ class TestR1Readiness:
         assert r.ready is False
 
     @pytest.mark.parametrize("kind", ["solo", None])
-    def test_solo_and_unknown_are_as_before(self, master, kind, settings) -> None:
+    def test_unknown_kind_reads_the_mirror_and_solo_is_not_asked(
+        self, master, kind, settings
+    ) -> None:
         settings.BOOKING_VIA_AYLA_REST = False
         r = _readiness(master, kind)
         states = _states(r)
-        assert states["services"][0] == "missing"
+        # Без субъекта: «не знаю» — по зеркалу (``missing``); у соло зеркало
+        # цен не видит (они на предложении) — «не спрошено», как у места.
+        expected_services = ("unknown", "no_subject") if kind == "solo" else ("missing", None)
+        assert states["services"] == expected_services
         # DRF-2370: было ("unavailable", "capability_not_built"), пока место
         # считалось непостроенной возможностью. Решение главного окна по
         # §6-квартер от 28.09 (docs/OWNER_QUESTIONS_2026-09-23.md, раздел
@@ -333,4 +338,4 @@ class TestR1Readiness:
         # каталог под субъектом мастера. Здесь субъекта нет → «не спрошено».
         assert states["location"] == ("unknown", "no_subject")
         assert "location:unknown" in r.blocking
-        assert "services:missing" in r.blocking
+        assert f"services:{expected_services[0]}" in r.blocking

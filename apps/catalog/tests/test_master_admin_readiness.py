@@ -27,6 +27,7 @@
 from __future__ import annotations
 
 import secrets
+from unittest.mock import patch
 
 import pytest
 from django.contrib.auth import get_user_model
@@ -35,7 +36,7 @@ from django.urls import reverse
 from django.utils import timezone
 
 from apps.catalog.admin import CatalogMasterAdmin
-from apps.catalog.models import CatalogMaster
+from apps.catalog.models import CatalogMaster, CatalogService, MasterService
 from apps.master_api.services.onboarding_readiness import ItemState
 from apps.tenancy.models import Tenant
 
@@ -88,19 +89,58 @@ class TestTheBlockRenders:
         for label in ("Услуги", "Места работы", "Расписание", "Профиль"):
             assert label in body, f"пункт не назван: {label}"
 
-    def test_the_unavailable_item_is_not_called_unconfigured(
+    def test_the_unasked_item_is_not_called_unconfigured(
         self, superuser_client: Client, master: CatalogMaster
     ) -> None:
-        """Та самая ловушка: «возможности нет» — не «не настроено».
+        """Та самая ловушка: «не спрошено» — не «не настроено».
 
-        Слить их значит отправить оператора чинить то, что не чинится:
-        мест работы мастеру некуда сохранить, и он ничего не мог сделать.
+        Слить их значит отправить оператора чинить то, чего он не видел:
+        место работы каталог отдаёт только самому мастеру (DRF-2370), у
+        оператора субъекта нет. До правки узел держался на тексте описания
+        секции («возможности ещё нет»), а не на бейдже пункта, и был зелен
+        ни о чём.
         """
         body = _card(superuser_client, master)
 
-        # ПРИСУТСТВИЕ: блок на месте и пункт в нём есть.
-        assert "Места работы" in body
-        assert "возможности ещё нет" in body
+        # ПРИСУТСТВИЕ: блок на месте, пункт в нём есть и назван «не спрошено».
+        assert "Места работы: " in body
+        location_badge = body.split("Места работы: ", 1)[1].split("</li>", 1)[0]
+        assert "не удалось спросить (no_subject)" in location_badge
+        # ОТСУТСТВИЕ: «не настроено» у этого пункта нет.
+        assert "не настроено" not in location_badge
+
+    def test_a_solo_masters_services_are_not_asked_rather_than_unconfigured(
+        self, superuser_client: Client, master: CatalogMaster
+    ) -> None:
+        """Живой прогон 09.11.2026: у готового соло-мастера карточка говорила «не настроено».
+
+        Зеркало цен соло не видит (они на предложении каталога), а выбор
+        услуг каталог отдаёт только самому мастеру — у оператора субъекта нет.
+        Ответ тот же, что у места работы: «не удалось спросить (no_subject)».
+        """
+        service = CatalogService.all_tenants.create(
+            tenant=master.tenant,
+            external_id=90101,
+            external_updated_at=timezone.now(),
+            slug="solo-card-service",
+            name="Массаж спины",
+            is_active=True,
+        )
+        MasterService.all_tenants.create(tenant=master.tenant, master=master, service=service)
+
+        with patch(
+            "apps.master_api.services.onboarding_readiness.workspace_kind", return_value="solo"
+        ):
+            body = _card(superuser_client, master)
+
+        # ПРИСУТСТВИЕ впереди: пункт на месте, и его бейдж — «не спрошено».
+        assert "Услуги: " in body
+        services_badge = body.split("Услуги: ", 1)[1].split("</li>", 1)[0]
+        assert "не удалось спросить (no_subject)" in services_badge
+        # ОТСУТСТВИЕ: прежнего «не настроено» у этого пункта нет. Смотрим на
+        # бейдж пункта, а не на всю страницу: у соседних пунктов это слово
+        # законно.
+        assert "не настроено" not in services_badge
 
 
 class TestTheVocabularyIsComplete:
