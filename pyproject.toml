@@ -82,13 +82,13 @@ dependencies = [
 
 [project.optional-dependencies]
 
-# ayla-ai-core is a separate PUBLIC repo (owner's decision 04.09.2026,
-# recorded in OPEN_DECISIONS.md §22 in the workspace root, outside this
-# repo), so pulling it needs no GitHub auth — the pinned SHA fetches
-# anonymously. GH_DEPLOY_TOKEN is still honoured
-# where it exists (CI/Docker rewrite the URL with it when non-empty) so
-# the machinery survives the visibility being closed again; it is not
-# required. It lives in its own extra because it is a heavy AI-only dep:
+# ayla-ai-core is a separate repo. It was PUBLIC by the owner's decision of
+# 04.09.2026 (OPEN_DECISIONS.md §22 in the workspace root, outside this
+# repo) and is PRIVATE again since 20.10.2026, so fetching the pinned SHA
+# needs GH_DEPLOY_TOKEN: CI rewrites the git URL with it, the Docker build
+# gets it as a BuildKit secret (see the Dockerfile — never a build-arg).
+# Without the token the anonymous fetch is still attempted and fails on a
+# private repo. It lives in its own extra because it is a heavy AI-only dep:
 # plain `uv sync --extra dev` stays light for non-AI contributors, AI
 # work uses `uv sync --extra dev --extra ai-core`.
 #

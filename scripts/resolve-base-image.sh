@@ -43,7 +43,10 @@
 #   DOCKER_CMD   чем звать docker (умолчание `docker`; на пилоте
 #                пригодится `sudo docker`)
 #   ENV_FILE     где искать GH_DEPLOY_TOKEN для ветки 3 (умолчание — .env
-#                рядом с репозиторием)
+#                рядом с репозиторием). На пилоте deploy-dev передаёт
+#                ~/.config/ayla-bot/build.env владельца — файл секрета
+#                сборки вне дерева выкладки; .env.staging только в
+#                переходном режиме, пока этого файла нет.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
