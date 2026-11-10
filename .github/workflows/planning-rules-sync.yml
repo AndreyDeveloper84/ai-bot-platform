@@ -35,11 +35,10 @@ jobs:
 
       - name: Check registry drift against ayla-knowledge
         # ayla-knowledge закрыт с 06.11.2026 (DRF-1703); анонимно raw отдаёт
-        # 404, и сверка падала каждую ночь с 07.11. Токен — тот же секрет,
-        # которым ставится ayla-ai-core; ему нужно чтение содержимого
-        # ayla-knowledge (на 10.11.2026 этого права у секрета нет — сверка
-        # красная, пока токен не перевыпущен на оба репозитория).
-        # Скрипт значение не печатает.
+        # 404, и сверка падала каждую ночь с 07.11. Токены выпущены по
+        # репозиторию: GH_DEPLOY_TOKEN читает только ayla-ai-core, поэтому
+        # для ayla-knowledge свой секрет AYLA_KNOWLEDGE_TOKEN (fine-grained,
+        # Contents: read на один репозиторий). Скрипт значение не печатает.
         env:
-          PLANNING_RULES_SOURCE_TOKEN: ${{ secrets.GH_DEPLOY_TOKEN }}
+          PLANNING_RULES_SOURCE_TOKEN: ${{ secrets.AYLA_KNOWLEDGE_TOKEN }}
         run: python scripts/sync_planning_rules_registry.py --check
