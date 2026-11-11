@@ -316,7 +316,7 @@ def _name_reasons_from_own_requests(
                     end_local=block.end_local,
                     reason=reason,
                 )
-    for day, exc in exceptions_by_date.items():
+    for day, exc in list(exceptions_by_date.items()):
         if exc.type != ScheduleException.Type.EVENT or exc.start_time is not None:
             continue
         day_open = datetime.combine(day, time(0, 0), tzinfo=tz)

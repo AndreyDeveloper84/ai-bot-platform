@@ -20,7 +20,12 @@
 * p4 — фид назвал ``base_price`` → рёбра её не трогают;
 * p5 — ребро непродаваемое (0 ₽) → цены нет;
 * p6 — ребро ушло из снимка → цена снята (``None``), повтор ничего не меняет;
-* p7 — операторское ребро (без ``ayla_specialist_service_id``) в расчёт не входит.
+* p7 — операторское ребро (без ``ayla_specialist_service_id``) в расчёт не входит;
+* p8 — такт ``salon-services`` с пустой ценой в фиде выведенную цену не обнуляет
+  (ею владеет вывод из рёбер — без окна «без цены» между транзакциями);
+* p9 — ``base_price: ""`` в фиде — это «цены нет», а не «цена есть»: выводится из ребра;
+* p10 — нечитаемая цена ребра («от 1500») не стоит ребра: ребро зеркалится без цены;
+* p11 — услуга без ``ayla_service_id`` (заведена руками) выводом не трогается.
 """
 
 from __future__ import annotations
@@ -34,8 +39,12 @@ import pytest
 
 from apps.catalog.models import CatalogMaster, CatalogService, MasterService
 from apps.catalog.provenance import MasterServiceSource, master_service_write
-from apps.catalog.services.http_client import CatalogSpecialistServiceDTO, _parse_specialist_service
-from apps.catalog.services.upserter import upsert_master_services
+from apps.catalog.services.http_client import (
+    CatalogSalonServiceDTO,
+    CatalogSpecialistServiceDTO,
+    _parse_specialist_service,
+)
+from apps.catalog.services.upserter import upsert_master_services, upsert_salon_services
 from apps.tenancy.models import Tenant
 from tests.support.catalog_mirror import sync_shaped
 
@@ -222,7 +231,9 @@ def test_p6_an_edge_gone_from_the_snapshot_takes_the_price_with_it(tenant: Tenan
 def test_p7_an_operator_edge_carries_no_price_and_is_ignored(tenant: Tenant) -> None:
     master = _master(tenant)
     service = _service(tenant)
-    with master_service_write(MasterServiceSource.MANUAL_SCRIPT, reason="test p7: operator-shaped edge"):
+    with master_service_write(
+        MasterServiceSource.MANUAL_SCRIPT, reason="test p7: operator-shaped edge"
+    ):
         MasterService.all_tenants.create(tenant=tenant, master=master, service=service)
 
     res = upsert_master_services(tenant, [], reconcile=False)
@@ -231,3 +242,90 @@ def test_p7_an_operator_edge_carries_no_price_and_is_ignored(tenant: Tenant) -> 
     service.refresh_from_db()
     assert service.price_from is None
     assert MasterService.all_tenants.get(service=service, master=master).price is None
+
+
+def _salon_dto(service: CatalogService, **over: Any) -> CatalogSalonServiceDTO:
+    """Строка фида ``salon-services`` соло: цены и длительности фид не знает."""
+    row = {
+        "id": str(service.ayla_service_id),
+        "tenant": str(service.tenant_id),
+        "name": service.name,
+        "is_active": True,
+        "base_price": None,
+        "duration_minutes": None,
+        "resolved_duration": None,
+        "goals": [],
+        "updated_at": "2026-11-11T12:00:00+00:00",
+        **over,
+    }
+    return CatalogSalonServiceDTO(
+        ayla_service_id=str(service.ayla_service_id),
+        external_updated_at=_TS,
+        name=service.name,
+        is_active=True,
+        price_from=None if row["base_price"] in (None, "") else Decimal(str(row["base_price"])),
+        duration_min=row["resolved_duration"],
+        goals=[],
+        raw=row,
+    )
+
+
+def test_p8_the_salon_services_beat_keeps_the_derived_price(tenant: Tenant) -> None:
+    master = _master(tenant)
+    service = _service(tenant)
+    upsert_master_services(tenant, [_dto(service, master)])
+    service.refresh_from_db()
+    assert service.price_from == Decimal("1600.00")
+
+    res = upsert_salon_services(tenant, [_salon_dto(service)])
+
+    assert res.errors == []
+    service.refresh_from_db()
+    assert service.price_from == Decimal("1600.00")
+    assert service.duration_min == 30
+
+
+def test_p9_an_empty_feed_price_counts_as_unknown(tenant: Tenant) -> None:
+    master = _master(tenant)
+    service = _service(tenant, raw={"base_price": ""})
+
+    upsert_master_services(tenant, [_dto(service, master)])
+
+    service.refresh_from_db()
+    assert service.price_from == Decimal("1600.00")
+
+
+def test_p10_an_unreadable_edge_price_does_not_cost_the_edge(tenant: Tenant) -> None:
+    master = _master(tenant)
+    service = _service(tenant)
+
+    dto = _dto(service, master, price="от 1500", duration_minutes="долго")
+
+    assert dto.price is None
+    assert dto.duration_minutes is None
+    res = upsert_master_services(tenant, [dto])
+    assert res.created == 1
+    assert res.errors == []
+    assert MasterService.all_tenants.filter(service=service, master=master).exists()
+    service.refresh_from_db()
+    assert service.price_from is None
+    assert service.duration_min == 30  # resolved_duration читается отдельно
+
+
+def test_p11_a_hand_made_service_without_feed_id_is_left_alone(tenant: Tenant) -> None:
+    master = _master(tenant)
+    hand_made = CatalogService.all_tenants.create(
+        tenant=tenant,
+        slug="hand-made",
+        name="Своя услуга",
+        external_updated_at=_TS,
+        price_from=Decimal("700.00"),
+        duration_min=20,
+    )
+    service = _service(tenant)
+
+    upsert_master_services(tenant, [_dto(service, master)])
+
+    hand_made.refresh_from_db()
+    assert hand_made.price_from == Decimal("700.00")
+    assert hand_made.duration_min == 20

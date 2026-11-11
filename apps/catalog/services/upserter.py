@@ -36,12 +36,14 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
 from django.db import IntegrityError, transaction
 
 from apps.catalog.master_state import sale_block
 from apps.catalog.models import CatalogService
+from apps.integrations.ayla.salon_service_duration import salon_service_duration_field
 from apps.tenancy.context import tenant_scope
 
 if TYPE_CHECKING:
@@ -135,7 +137,7 @@ def _service_fields(dto: "CatalogSalonServiceDTO") -> dict[str, Any]:
     upstream must empty the mirror too — otherwise a retracted goal would
     live on here forever.
     """
-    return {
+    fields: dict[str, Any] = {
         "external_updated_at": dto.external_updated_at,
         "name": dto.name,
         "is_active": dto.is_active,
@@ -145,6 +147,15 @@ def _service_fields(dto: "CatalogSalonServiceDTO") -> dict[str, Any]:
         "goals": dto.goals,
         "raw": dto.raw,
     }
+    # Цены/длительности, которых фид не знает, здесь не трогаем: ими владеет
+    # :func:`derive_service_prices_from_edges` (соло — цена на ребре). Иначе
+    # каждый такт сначала обнулял бы цену, а потом выводил заново — с окном
+    # «без цены» между транзакциями и на весь такт, если рёбра не дочитались.
+    # Снятие выведенной цены при уходе рёбер — тоже за выводом (p6).
+    for name in ("price_from", "duration_min"):
+        if fields[name] is None:
+            del fields[name]
+    return fields
 
 
 def upsert_specialists(tenant: "Tenant", dtos: list["CatalogSpecialistDTO"]) -> UpsertResult:
@@ -545,15 +556,34 @@ def upsert_master_services(
 #: видно, знает ли фид цену/длительность сам. Соло-кабинет: ``base_price`` и
 #: обе длительности — ``null``, цена живёт на ребре.
 _FEED_PRICE_KEY = "base_price"
-_FEED_DURATION_KEYS = ("resolved_duration", "duration_minutes")
 
 
 def _feed_knows_price(raw: Any) -> bool:
-    return isinstance(raw, dict) and raw.get(_FEED_PRICE_KEY) is not None
+    """«Фид назвал цену» = разбор ``base_price`` дал значение (как у ``_parse_decimal``)."""
+    if not isinstance(raw, dict):
+        return False
+    value = raw.get(_FEED_PRICE_KEY)
+    if value in (None, ""):
+        return False
+    try:
+        Decimal(str(value))
+    except (ArithmeticError, ValueError, TypeError):
+        return False
+    return True
 
 
 def _feed_knows_duration(raw: Any) -> bool:
-    return isinstance(raw, dict) and any(raw.get(k) is not None for k in _FEED_DURATION_KEYS)
+    """То же для длительности — тем же правилом ключей, что и парсер фида."""
+    if not isinstance(raw, dict):
+        return False
+    value = salon_service_duration_field(raw)
+    if value in (None, ""):
+        return False
+    try:
+        int(value)
+    except (ValueError, TypeError):
+        return False
+    return True
 
 
 def derive_service_prices_from_edges(
@@ -577,17 +607,20 @@ def derive_service_prices_from_edges(
     расчёт не входят. Возвращает число изменённых услуг.
     """
     changed_rows = 0
-    for service in service_model.objects.filter(tenant=tenant):
+    edges_by_service: dict[Any, list[tuple[Any, Any, bool]]] = {}
+    for service_id, price, duration_min, sellable in edge_model.objects.filter(
+        tenant=tenant, ayla_specialist_service_id__isnull=False
+    ).values_list("service_id", "price", "duration_min", "sellable"):
+        edges_by_service.setdefault(service_id, []).append((price, duration_min, sellable))
+    # Только строки зеркала (``ayla_service_id``): у заведённых руками услуг
+    # фида нет, и «фид цены не знает» про них ничего не значит.
+    for service in service_model.objects.filter(tenant=tenant, ayla_service_id__isnull=False):
         raw = service.raw
         knows_price = _feed_knows_price(raw)
         knows_duration = _feed_knows_duration(raw)
         if knows_price and knows_duration:
             continue
-        edges = list(
-            edge_model.objects.filter(
-                tenant=tenant, service=service, ayla_specialist_service_id__isnull=False
-            ).values_list("price", "duration_min", "sellable")
-        )
+        edges = edges_by_service.get(service.pk, [])
         update_fields: list[str] = []
         if not knows_price:
             prices = [p for p, _d, sellable in edges if sellable and p is not None and p >= 1]

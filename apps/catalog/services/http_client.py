@@ -1912,11 +1912,33 @@ def _parse_specialist_service(row: dict[str, Any]) -> CatalogSpecialistServiceDT
         # питоновский `None`, и до этой строки различить их было нечем.
         health_check_key_present="resolved_requires_health_check" in row,
         **_parse_sellable(row),
-        price=_parse_decimal(row.get("price")),
-        duration_minutes=_parse_int(row.get("duration_minutes")),
-        resolved_duration=_parse_int(row.get("resolved_duration")),
+        price=_parse_decimal_lenient(row, "price"),
+        duration_minutes=_parse_int_lenient(row, "duration_minutes"),
+        resolved_duration=_parse_int_lenient(row, "resolved_duration"),
         raw=row,
     )
+
+
+def _parse_decimal_lenient(row: dict[str, Any], key: str) -> Decimal | None:
+    """Цена ребра: нечитаемое значение — ``None`` + предупреждение, не отказ строки.
+
+    Строка ребра, упавшая на разборе, выпадает из снимка целиком, и полный
+    снимок сносит её ребро при сверке — мастер перестаёт предлагать услугу.
+    Цена такой власти над ребром иметь не должна: без неё зеркало просто без цены.
+    """
+    try:
+        return _parse_decimal(row.get(key))
+    except (ArithmeticError, ValueError, TypeError):
+        logger.warning("catalog.http.edge_field_unreadable key=%s edge=%s", key, row.get("id"))
+        return None
+
+
+def _parse_int_lenient(row: dict[str, Any], key: str) -> int | None:
+    try:
+        return _parse_int(row.get(key))
+    except (ValueError, TypeError):
+        logger.warning("catalog.http.edge_field_unreadable key=%s edge=%s", key, row.get("id"))
+        return None
 
 
 def _parse_specialist(row: dict[str, Any]) -> CatalogSpecialistDTO:
