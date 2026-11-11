@@ -10044,6 +10044,8 @@ Documentary fixtures `T-S1-G7Q-*`: 25 (ALLOW 10 / DENY 9 / UNKNOWN 6); technical
 - `apps/miniapp/src/screens/CustomerWellnessDashboardScreen.test.tsx`, `…crossGen.test.tsx` (перевёрнутые узлы)
 - `apps/miniapp/src/screens/CustomerWellnessDashboardScreen.price.test.tsx` — **удалён**: узел стал пустым, когда полка погасла; само правило «от 0 ₽» пинится `ServiceDetailScreen.price.test.tsx`
 
+---
+
 ## §173. ОТВЕЧЕН (07.11.2026): массажные каноны 1.1.1 / 1.1.4 / 1.1.5 бронируются без опроса о здоровье до появления анкеты; плановый пересмотр 2027-02-01
 
 **Источник:** решение владельца 07.11.2026 в чате приёмки Plan Engine; флаги в каталоге подтверждены в тот же вечер. **Каноническая запись лежит в репозитории каталога:** `docs/OWNER_DECISION_MASSAGE_WITHOUT_HEALTH_SCREENING_2026-11-07.md` (beautygo_backend). Здесь только указатель, чтобы решение находилось из реестра; текст не дублируется.
