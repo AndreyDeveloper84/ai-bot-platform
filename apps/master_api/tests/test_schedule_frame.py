@@ -297,3 +297,93 @@ class TestBuildScheduleEndToEnd:
             payload = build_schedule(master, from_date=FROM, to_date=FROM)
         day = payload.days[0]
         assert day.working_hours == {"start": "12:00", "end": "16:00"}
+
+
+class TestReasonsFromOwnRequests:
+    """Причина блока — из собственной одобренной заявки бота (11.11.2026).
+
+    Провод ``time-off`` вид отсутствия не несёт, и выше честно стоит
+    ``other``. Но отсутствие, заведённое этим же ботом (заявка мастера →
+    ``create_specialist_time_off``), он знает по своей ``ScheduleChangeRequest``:
+    одобренная заявка, накрывающая блок, даёт ему свой ``reason_class``;
+    на весь день — тип исключения (``DAY_OFF``/``VACATION``/``SICK_LEAVE``).
+    Без совпадения — как прежде, ``other``; ожидающая заявка не считается.
+    """
+
+    def test_blocks_take_the_reason_class_of_the_covering_approved_request(
+        self, tenant: Tenant, master: CatalogMaster, monkeypatch
+    ) -> None:
+        from apps.scheduling.models import ScheduleChangeRequest, ScheduleException
+
+        _staff(tenant)
+        client = FakeSalonClient(
+            template=_working_template(),
+            time_off=[
+                {  # заявка «личные дела» 10–12 — одобрена
+                    "id": "t-1",
+                    "start_at": "2026-08-24T10:00:00+03:00",
+                    "end_at": "2026-08-24T12:00:00+03:00",
+                    "reason": "тест настройки",
+                    "created_at": "2026-08-23T10:00:00+03:00",
+                },
+                {  # заявка «больничный» 15–16 — ещё ожидает, не считается
+                    "id": "t-2",
+                    "start_at": "2026-08-24T15:00:00+03:00",
+                    "end_at": "2026-08-24T16:00:00+03:00",
+                    "reason": "",
+                    "created_at": "2026-08-23T10:00:00+03:00",
+                },
+                {  # весь вторник — отпуск, одобрен
+                    "id": "t-3",
+                    "start_at": "2026-08-25T00:00:00+03:00",
+                    "end_at": "2026-08-25T23:59:59+03:00",
+                    "reason": "",
+                    "created_at": "2026-08-23T10:00:00+03:00",
+                },
+            ],
+        )
+
+        def _request(start: dt.datetime, end: dt.datetime, reason_class: str, status: str) -> None:
+            ScheduleChangeRequest.all_tenants.create(
+                tenant=tenant,
+                master=master,
+                requested_change={},
+                requested_start=start,
+                requested_end=end,
+                reason_class=reason_class,
+                status=status,
+            )
+
+        approved, pending = (
+            ScheduleChangeRequest.Status.APPROVED,
+            ScheduleChangeRequest.Status.PENDING,
+        )
+        _request(
+            dt.datetime(2026, 8, 24, 10, 0, tzinfo=MSK),
+            dt.datetime(2026, 8, 24, 12, 0, tzinfo=MSK),
+            "personal",
+            approved,
+        )
+        _request(
+            dt.datetime(2026, 8, 24, 15, 0, tzinfo=MSK),
+            dt.datetime(2026, 8, 24, 16, 0, tzinfo=MSK),
+            "sick",
+            pending,
+        )
+        _request(
+            dt.datetime(2026, 8, 25, 0, 0, tzinfo=MSK),
+            dt.datetime(2026, 8, 26, 0, 0, tzinfo=MSK),
+            "vacation",
+            approved,
+        )
+        _use_client(monkeypatch, client)
+
+        with override_settings(BOOKING_VIA_AYLA_REST=True):
+            _, exc, extra = schedule_frame.load_day_frame(
+                master, from_date=FROM, to_date=TO, tz=MSK
+            )
+
+        monday = {(str(b.start_local), b.reason) for b in extra[dt.date(2026, 8, 24)]}
+        assert monday == {("10:00:00", "personal"), ("15:00:00", "other")}
+        assert exc[dt.date(2026, 8, 25)].type == ScheduleException.Type.VACATION
+        assert exc[dt.date(2026, 8, 25)].id == "t-3"  # та же строка провода, только названная

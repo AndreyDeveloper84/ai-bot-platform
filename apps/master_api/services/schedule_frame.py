@@ -240,7 +240,97 @@ def _load_ayla(master: Any, *, from_date: date_cls, to_date: date_cls, tz: ZoneI
         exceptions_by_date=exceptions_by_date,
         tz=tz,
     )
+    _name_reasons_from_own_requests(
+        master, extra_blocks, exceptions_by_date, from_date=from_date, to_date=to_date, tz=tz
+    )
     return wh_by_weekday, exceptions_by_date, extra_blocks
+
+
+#: ``reason_class`` заявки → тип исключения дня (для блоков на весь день):
+#: ``_EXCEPTION_TYPE_TO_REASON`` в ``schedule.py`` переводит его обратно в
+#: тот же ``reason_class``.
+_REASON_CLASS_TO_EXCEPTION_TYPE: dict[str, str] = {
+    "vacation": ScheduleException.Type.VACATION,
+    "sick": ScheduleException.Type.SICK_LEAVE,
+    "personal": ScheduleException.Type.DAY_OFF,
+}
+
+
+def _name_reasons_from_own_requests(
+    master: Any,
+    extra_blocks: dict[date_cls, list[FrameBlock]],
+    exceptions_by_date: dict[date_cls, ExceptionLike],
+    *,
+    from_date: date_cls,
+    to_date: date_cls,
+    tz: ZoneInfo,
+) -> None:
+    """Причина блока — из собственной одобренной заявки, а не «other» (11.11.2026).
+
+    Провод каталога (``time-off``) вид отсутствия не несёт, и угаданная
+    подпись лгала бы — поэтому выше стоит ``other``. Но отсутствие, которое
+    завёл сам этот бот (``ScheduleChangeRequest`` → ``create_specialist_time_off``),
+    он знает по своей записи: ``reason_class`` одобренной заявки с тем же
+    интервалом. Совпадение — по накрытию: интервал заявки накрывает блок (блок
+    режется по дням, заявка — нет). Ничего не совпало — остаётся ``other``.
+    Запрос один на диапазон; у исключений на весь день меняется ``type``,
+    у частичных блоков — ``reason``.
+    """
+    from apps.scheduling.models import ScheduleChangeRequest
+
+    range_start = datetime.combine(from_date, time(0, 0), tzinfo=tz)
+    range_end = datetime.combine(to_date, time(0, 0), tzinfo=tz) + timedelta(days=1)
+    requests: list[tuple[datetime, datetime, str]] = [
+        (req_start, req_end, str(reason_class))
+        for req_start, req_end, reason_class in ScheduleChangeRequest.all_tenants.filter(
+            tenant_id=master.tenant_id,
+            master_id=master.id,
+            status=ScheduleChangeRequest.Status.APPROVED,
+            requested_start__lt=range_end,
+            requested_end__gt=range_start,
+        )
+        .exclude(reason_class__in=("", "other"))
+        .values_list("requested_start", "requested_end", "reason_class")
+        if req_start is not None and req_end is not None
+    ]
+    if not requests:
+        return
+
+    def covering(start: datetime, end: datetime) -> str | None:
+        for req_start, req_end, reason_class in requests:
+            if req_start <= start and req_end >= end:
+                return reason_class
+        return None
+
+    for day, blocks in extra_blocks.items():
+        for i, block in enumerate(blocks):
+            if block.reason != "other":
+                continue
+            start = datetime.combine(day, block.start_local, tzinfo=tz)
+            end = datetime.combine(day, block.end_local, tzinfo=tz)
+            reason = covering(start, end)
+            if reason is not None:
+                blocks[i] = FrameBlock(
+                    id=block.id,
+                    start_local=block.start_local,
+                    end_local=block.end_local,
+                    reason=reason,
+                )
+    for day, exc in list(exceptions_by_date.items()):
+        if exc.type != ScheduleException.Type.EVENT or exc.start_time is not None:
+            continue
+        day_open = datetime.combine(day, time(0, 0), tzinfo=tz)
+        reason = covering(day_open, day_open + timedelta(days=1) - timedelta(seconds=1))
+        new_type = _REASON_CLASS_TO_EXCEPTION_TYPE.get(reason or "")
+        if new_type is not None:
+            exceptions_by_date[day] = FrameException(
+                id=exc.id,
+                type=new_type,
+                start_time=None,
+                end_time=None,
+                break_start=getattr(exc, "break_start", None),
+                break_end=getattr(exc, "break_end", None),
+            )
 
 
 def _ayla_read_actor(tenant: Any) -> Any | None:

@@ -164,13 +164,23 @@ def list_master_services(*, master: CatalogMaster) -> list[dict[str, Any]]:
 
     # DRF-1989 — служебный экран: непродаваемое не скрывается, а показывается
     # с причиной, иначе мастеру некому её исправить.
-    sale_state = {
-        service_id: (sellable, unsellable_reason or None)
-        for service_id, sellable, unsellable_reason in MasterService.all_tenants.filter(
-            tenant_id=master.tenant_id,
-            master_id=master.id,
-        ).values_list("service_id", "sellable", "unsellable_reason")
-    }
+    sale_state: dict[Any, tuple[bool, str | None]] = {}
+    # Своя цена/длительность ребра (11.11.2026): у соло цена живёт на ребре,
+    # у салона с несколькими мастерами ``price_from`` услуги — «от» по всем,
+    # а мастеру на своём экране нужна его собственная.
+    own_edge: dict[Any, tuple[Any, Any]] = {}
+    for (
+        service_id,
+        sellable,
+        unsellable_reason,
+        edge_price,
+        edge_duration,
+    ) in MasterService.all_tenants.filter(
+        tenant_id=master.tenant_id,
+        master_id=master.id,
+    ).values_list("service_id", "sellable", "unsellable_reason", "price", "duration_min"):
+        sale_state[service_id] = (sellable, unsellable_reason or None)
+        own_edge[service_id] = (edge_price, edge_duration)
     service_ids = list(sale_state)
     if not service_ids:
         return []
@@ -194,12 +204,15 @@ def list_master_services(*, master: CatalogMaster) -> list[dict[str, Any]]:
     for svc in services:
         category = _derive_category(svc)
         description = (svc.description or svc.short_description or "").strip()
-        duration_min = int(svc.duration_min) if svc.duration_min is not None else 0
+        edge_price, edge_duration = own_edge.get(svc.id, (None, None))
+        price = edge_price if edge_price is not None else svc.price_from
+        duration = edge_duration if edge_duration is not None else svc.duration_min
+        duration_min = int(duration) if duration is not None else 0
         out.append(
             {
                 "service_id": str(svc.id),
                 "name": svc.name,
-                "price_rub": _price_rub(svc.price_from),
+                "price_rub": _price_rub(price),
                 "duration_min": duration_min,
                 "description": description,
                 "category": category,
