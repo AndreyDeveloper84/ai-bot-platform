@@ -86,7 +86,8 @@ function refusalCards(err: unknown): AylaCard[] {
   return Array.isArray(cards) ? (cards as AylaCard[]) : [];
 }
 
-const FAILED_TEXT = "Не получилось отправить. Попробуйте ещё раз.";
+// Экспорт — для клиентской ленты (DRF-2953): те же слова, не копия.
+export const FAILED_TEXT = "Не получилось отправить. Попробуйте ещё раз.";
 const DECLINED_TEXT = "Хорошо, ничего не меняю.";
 
 export interface AylaChatMessage {

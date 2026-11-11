@@ -52,6 +52,8 @@ const PRIMARIES = [
   ".schedule-sheet__primary",
   ".catalog-empty__cta-primary",
   ".ayla-compose__send",
+  // DRF-2953: отправка в чате клиента (круг на месте микрофона макета).
+  ".cchat-compose__send",
 ];
 
 /** Фон акцента без отклика по праву: это не кнопки, а отметки и состояния. */
@@ -72,6 +74,8 @@ const NOT_BUTTONS = new Set([
   ".records-detail__sticky-cta-msg",
   ".records-msg-modal__send",
   ".ayla-bubble--mine",
+  // DRF-2953: реплика человека в чате клиента — отметка «моё», не кнопка.
+  ".cchat-bubble--mine",
   ".setup-landing__bar-fill",
   ".system-state__dot",
   // Признак попадания в список: ОТМЕТКА СОСТОЯНИЯ, а не интерактивный элемент —
