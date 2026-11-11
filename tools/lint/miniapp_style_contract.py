@@ -233,8 +233,6 @@ BASELINE: frozenset[str] = frozenset(
         "src/components/booking/NewBookingForm.tsx::callout--warning",
         "src/components/booking/NewBookingForm.tsx::draft-rows",
         "src/components/booking/NewBookingForm.tsx::section__title",
-        "src/screens/CustomerBookingDetailScreen.tsx::modal",
-        "src/screens/CustomerBookingDetailScreen.tsx::modal__sheet",
         "src/screens/CustomerBookingSuccessScreen.tsx::customer-success__payment-note",
         "src/screens/CustomerCardsScreen.tsx::profile-cards__brand",
         "src/screens/CustomerCardsScreen.tsx::profile-cards__consent",

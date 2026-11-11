@@ -1,19 +1,6 @@
 /**
- * Tests for `customer-records.ts` after pilot phase 3.2 — the stub lib
- * (890 lines of invented bookings, tenant groupings, AMM messages,
- * repeat-intent prefill) is replaced by the real
- * `GET /bookings/list` + `GET /bookings/<id>` endpoints. HTTP layer
- * (`./api`) mocked; fixtures are verbatim `BookingItem` rows per
- * `apps/miniapp_api/views.py::_booking_to_dict`.
- *
- * Derivation rules pinned here:
- *   - display status: confirmed + visit in the past → "completed"
- *     (the backend has no completed status; can_rate is computed the
- *     same way server-side);
- *   - is_nearest: FIRST upcoming item with visit within ≤24h;
- *   - actions come only from real flags (cancellable / reschedulable /
- *     can_rate) — "message" (AMM) and route deeplinks have no backend
- *     and are gone for the pilot.
+ * `lib/customer-records` — что экран «Записи» выводит из настоящих строк
+ * `BookingItem` (DRF-2952). Слой HTTP подменён.
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -28,8 +15,11 @@ vi.mock("./api", async (importOriginal) => {
 
 import { fetchBooking, fetchMyBookings, type BookingItem } from "./api";
 import {
+  displayStatusFor,
   getBookingDetail,
   getMyBookings,
+  initialsOf,
+  isOrdinaryStatus,
   renderStatus,
 } from "./customer-records";
 
@@ -55,9 +45,8 @@ function booking(partial: Partial<BookingItem> & Pick<BookingItem, "id">): Booki
     reschedulable: true,
     rating: null,
     can_rate: false,
-    // DRF-1652 — умолчание `null`, то есть «источник промолчал».
-    // НЕ `""`: это сказало бы, что салон ответил «адреса нет», и
-    // фикстура утверждала бы за салон то, чего он не говорил.
+    // DRF-1652 — умолчание `null`, «источник промолчал». НЕ `""`: это сказало
+    // бы, что салон ответил «адреса нет», чего он не говорил.
     address: null,
     ...partial,
   };
@@ -68,128 +57,91 @@ beforeEach(() => {
 });
 
 describe("getMyBookings", () => {
-  it("upcoming section queries without the past flag", async () => {
-    mockedList.mockResolvedValue({ items: [], next_cursor: null });
-    await getMyBookings("upcoming");
-    expect(mockedList).toHaveBeenCalledWith(
-      expect.objectContaining({ past: false }),
-    );
+  it("предстоящие — без `status=past`, прошедшие — с ним; курсор уходит как `before`", async () => {
+    mockedList.mockResolvedValue({ items: [], next_cursor: "c-1" });
+
+    const upcoming = await getMyBookings("upcoming");
+    expect(mockedList).toHaveBeenLastCalledWith({ past: false });
+    expect(upcoming.nextCursor).toBe("c-1");
+
+    await getMyBookings("history", "c-1");
+    expect(mockedList).toHaveBeenLastCalledWith({ past: true, before: "c-1" });
   });
 
-  it("history section queries with the past flag", async () => {
-    mockedList.mockResolvedValue({ items: [], next_cursor: null });
-    await getMyBookings("history");
-    expect(mockedList).toHaveBeenCalledWith(
-      expect.objectContaining({ past: true }),
-    );
-  });
-
-  it("maps real BookingItems with derived actions for an upcoming booking", async () => {
-    mockedList.mockResolvedValue({
-      items: [booking({ id: "b-1" })],
-      next_cursor: null,
-    });
-    const page = await getMyBookings("upcoming");
-    expect(page.totalCount).toBe(1);
-    const item = page.items[0]!;
-    expect(item.bookingId).toBe("b-1");
-    expect(item.serviceName).toBe("Маникюр");
-    expect(item.masterName).toBe("Анна Соколова");
-    expect(item.status).toBe("confirmed");
-    expect(item.actions).toEqual(["open", "reschedule", "cancel"]);
-  });
-
-  it("derives «Прошла» for confirmed bookings whose visit is in the past", async () => {
+  it("строка несёт то, что рисует карточка, — и ничего выдуманного", async () => {
     mockedList.mockResolvedValue({
       items: [
         booking({
-          id: "b-h1",
-          visit_at: isoInHours(-30),
-          cancellable: false,
-          reschedulable: false,
-          can_rate: true,
+          id: "b-1",
+          salon_name: "Салон «Ромашка»",
+          master_photo_url: "/api/v1/customer/media/masters/mst-1/photo?v=1",
+          address: "Пенза, Московская, 12",
+          price: "2500.00",
+          payment: { capture_state: "authorized", amount: "2500.00" },
         }),
       ],
       next_cursor: null,
     });
-    const page = await getMyBookings("history");
-    const item = page.items[0]!;
-    expect(item.status).toBe("completed");
-    expect(renderStatus(item.status).rendering.label).toBe("Прошла");
-    expect(item.actions).toEqual(["open", "repeat", "review"]);
+
+    const [item] = (await getMyBookings("upcoming")).items;
+    expect(item).toMatchObject({
+      bookingId: "b-1",
+      status: "confirmed",
+      serviceName: "Маникюр",
+      masterName: "Анна Соколова",
+      salonName: "Салон «Ромашка»",
+      masterPhotoUrl: "/api/v1/customer/media/masters/mst-1/photo?v=1",
+      address: "Пенза, Московская, 12",
+      price: "2500.00",
+      paymentState: "authorized",
+      canRate: false,
+    });
   });
 
-  it("keeps terminal statuses as-is in history (cancelled → «Отменена»)", async () => {
-    mockedList.mockResolvedValue({
-      items: [
-        booking({
-          id: "b-h2",
-          status: "cancelled",
-          visit_at: isoInHours(-80),
-          cancellable: false,
-          reschedulable: false,
-        }),
-      ],
-      next_cursor: null,
+  it("чего провод не несёт — пусто, а не догадка", async () => {
+    mockedList.mockResolvedValue({ items: [booking({ id: "b-1" })], next_cursor: null });
+    const [item] = (await getMyBookings("upcoming")).items;
+    expect(item).toMatchObject({
+      salonName: "",
+      masterPhotoUrl: "",
+      address: null,
+      price: null,
+      paymentState: null,
     });
-    const page = await getMyBookings("history");
-    const item = page.items[0]!;
-    expect(item.status).toBe("cancelled");
-    expect(renderStatus(item.status).rendering.label).toBe("Отменена");
-    expect(item.actions).toEqual(["open", "repeat"]);
-  });
-
-  it("marks only the first upcoming booking within 24h as nearest", async () => {
-    mockedList.mockResolvedValue({
-      items: [
-        booking({ id: "b-1", visit_at: isoInHours(20) }),
-        booking({ id: "b-2", visit_at: isoInHours(22) }),
-        booking({ id: "b-3", visit_at: isoInHours(70) }),
-      ],
-      next_cursor: null,
-    });
-    const page = await getMyBookings("upcoming");
-    expect(page.items.map((i) => [i.bookingId, i.isNearest])).toEqual([
-      ["b-1", true],
-      ["b-2", false],
-      ["b-3", false],
-    ]);
-  });
-
-  it("never emits message/route actions (no such backend in the pilot)", async () => {
-    mockedList.mockResolvedValue({
-      items: [booking({ id: "b-1" })],
-      next_cursor: null,
-    });
-    const page = await getMyBookings("upcoming");
-    for (const item of page.items) {
-      expect(item.actions).not.toContain("message");
-      expect(item.actions).not.toContain("route");
-    }
   });
 });
 
-describe("getBookingDetail", () => {
-  it("passes through to the real detail endpoint", async () => {
-    const row = booking({ id: "b-1" });
+describe("статус для показа", () => {
+  it("подтверждённая запись в прошлом — «прошла»; в будущем — как есть", () => {
+    expect(displayStatusFor(booking({ id: "a", visit_at: isoInHours(-3) }))).toBe("completed");
+    expect(displayStatusFor(booking({ id: "b", visit_at: isoInHours(3) }))).toBe("confirmed");
+    expect(displayStatusFor(booking({ id: "c", status: "cancelled", visit_at: isoInHours(-3) }))).toBe(
+      "cancelled",
+    );
+  });
+
+  it("обычный статус своего раздела карточка не называет, любой другой — называет", () => {
+    expect(isOrdinaryStatus("confirmed", "upcoming")).toBe(true);
+    expect(isOrdinaryStatus("completed", "history")).toBe(true);
+    expect(isOrdinaryStatus("cancelled", "history")).toBe(false);
+    expect(isOrdinaryStatus("reschedule_requested", "upcoming")).toBe(false);
+    // Незнакомый статус обычным не бывает — его обязаны увидеть.
+    expect(isOrdinaryStatus("something_new", "upcoming")).toBe(false);
+    expect(renderStatus("cancelled").rendering.label).toBe("Отменена");
+  });
+});
+
+describe("getBookingDetail и мелочи", () => {
+  it("одна запись — настоящий GET /bookings/<id>", async () => {
+    const row = booking({ id: "b-9" });
     mockedDetail.mockResolvedValue({ booking: row });
-    const detail = await getBookingDetail("b-1");
-    expect(mockedDetail).toHaveBeenCalledWith("b-1");
-    expect(detail).toEqual(row);
+    expect(await getBookingDetail("b-9")).toBe(row);
+    expect(mockedDetail).toHaveBeenCalledWith("b-9");
   });
-});
 
-describe("payment read model passthrough (C7.3)", () => {
-  it("carries capture_state onto the list item when present", async () => {
-    mockedList.mockResolvedValue({
-      items: [
-        booking({ id: "b-1", payment: { capture_state: "authorized" } }),
-        booking({ id: "b-2" }),
-      ],
-      next_cursor: null,
-    });
-    const page = await getMyBookings("upcoming");
-    expect(page.items[0]!.paymentState).toBe("authorized");
-    expect(page.items[1]!.paymentState).toBeNull();
+  it("инициалы — плитка вместо фото", () => {
+    expect(initialsOf("Анна Соколова")).toBe("АС");
+    expect(initialsOf("  ольга ")).toBe("О");
+    expect(initialsOf("")).toBe("");
   });
 });

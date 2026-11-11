@@ -18,7 +18,7 @@
  *                          review 2026-05-26)
  */
 
-import type { StatusIcon, StatusRendering, StatusTint } from "../lib/booking-status";
+import type { StatusIcon, StatusRendering } from "../lib/booking-status";
 
 interface Props {
   rendering: StatusRendering;
@@ -129,22 +129,5 @@ function StatusGlyph({ icon }: { icon: StatusIcon }) {
           <circle cx="8" cy="5" r="0.6" fill="currentColor" stroke="none" />
         </svg>
       );
-  }
-}
-
-/**
- * Convenience: subscript helper that maps a `StatusTint` to a colour
- * variable name. Used in `BookingCard` to colour the left rail / chip
- * accent — keeps the tint→colour mapping co-located with the badge.
- */
-export function tintColourVar(tint: StatusTint): string {
-  switch (tint) {
-    case "sage":
-      return "var(--c-success)";
-    case "warning":
-      return "var(--c-warning)";
-    case "muted":
-    default:
-      return "var(--c-text-secondary)";
   }
 }

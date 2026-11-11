@@ -46,8 +46,9 @@ const PRIMARIES = [
   ".salon-today__cta",
   ".m6-btn-primary",
   ".m6-compose__send",
-  ".records-card__action--primary",
   ".records-empty__cta-primary",
+  // DRF-2952: главная кнопка раздела «Записи» клиента (макет «Записи.png»).
+  ".cr-btn--primary",
   ".schedule-sheet__primary",
   ".catalog-empty__cta-primary",
   ".ayla-compose__send",
@@ -95,9 +96,11 @@ describe("главная кнопка отзывается на нажатие, 
     expect(rules.at(-1)?.body).toMatch(/background:\s*var\(--c-accent-pressed\)/);
   });
 
-  it("главное действие на карточке записи не наследует второстепенный отклик", () => {
+  it("главное действие на `.btn-secondary` не наследует второстепенный отклик", () => {
+    // Носитель — `.records-empty__cta-primary` (приглашение к цели): прежний,
+    // `.records-card__action--primary`, ушёл вместе с `BookingCard` (DRF-2952).
     const [secondary] = activeRules(".btn-secondary");
-    const [primary] = activeRules(".records-card__action--primary");
+    const [primary] = activeRules(".records-empty__cta-primary");
     // Специфичность равная (0,2,0): побеждает правило, стоящее позже.
     expect(primary?.index ?? -1).toBeGreaterThan(secondary?.index ?? Infinity);
   });

@@ -95,11 +95,15 @@ describe("утверждение экрана при «запрошена отм
       </MemoryRouter>,
     );
 
-    await user.click(await screen.findByRole("button", { name: "Отменить" }));
     await user.click(await screen.findByRole("button", { name: "Отменить запись" }));
+    await user.click(await screen.findByRole("button", { name: "Да, отменить запись" }));
 
     const message = (await screen.findByRole("status")).textContent ?? "";
     expect(message).toContain("Отменяю"); // наличие: сообщение о ходе дела есть
     expect(message).not.toContain("отменена");
+    // И ни строка статуса, ни что-либо ещё на экране не говорит «отменена»
+    // (DRF-2952: раньше это говорила подпись статуса на карточке).
+    expect(document.body.textContent ?? "").not.toMatch(/отменена/i);
+    expect(screen.getByText("Отмена обрабатывается")).toBeInTheDocument();
   });
 });

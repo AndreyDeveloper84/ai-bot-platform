@@ -80,8 +80,10 @@ const PAIRS: Array<{ name: string; danger: string[]; ordinary: string[] }> = [
     ordinary: [".ayla-btn", ".ayla-btn--secondary"],
   },
   {
-    name: "карточка записи: «Отменить» × соседние действия (BookingCard)",
-    danger: [".btn-secondary", ".records-card__action--danger"],
+    // DRF-2952: `BookingCard` ушёл; опасная контурная кнопка раздела «Записи»
+    // клиента — `.cr-btn--danger` («Отменить запись», «Да, отменить запись»).
+    name: "записи клиента: «Отменить запись» × обычная контурная кнопка",
+    danger: [".cr-btn--danger"],
     ordinary: [".btn-secondary"],
   },
   {

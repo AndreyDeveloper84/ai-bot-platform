@@ -239,10 +239,9 @@ a {
 
 /* §6-йота (28.09) — тот же отклик у главных кнопок экранов, которые
    собраны своими классами, а не `.btn-primary`. Стоит ПОСЛЕ
-   `.btn-secondary:active` намеренно: `.records-card__action--primary`
-   сидит на `.btn-secondary`, специфичность равная, и раньше при нажатии
-   побеждал второстепенный почти белый фон под белым текстом. */
-.records-card__action--primary:active,
+   `.btn-secondary:active` намеренно: эти классы сидят на `.btn-secondary`,
+   специфичность равная, и раньше при нажатии побеждал второстепенный почти
+   белый фон под белым текстом. */
 .records-empty__cta-primary:active,
 .schedule-sheet__primary:active,
 .catalog-empty__cta-primary:active,
@@ -6451,45 +6450,6 @@ a {
   font-size: var(--font-size-200);
   text-align: center;
 }
-/* Действие, которого без сети не будет, читается выключенным. */
-.records-card__action:disabled {
-  opacity: 0.5;
-  cursor: default;
-}
-.records-screen__tabs {
-  display: flex;
-  gap: var(--s-2);
-  padding: var(--s-3) var(--s-3) 0;
-  border-bottom: 1px solid var(--c-divider);
-}
-.records-screen__tab {
-  flex: 1;
-  background: transparent;
-  border: none;
-  border-bottom: 2px solid transparent;
-  min-height: 44px;
-  padding: var(--s-2) var(--s-2);
-  font-size: var(--font-size-200);
-  font-weight: 500;
-  color: var(--c-text-secondary);
-  cursor: pointer;
-  font-family: var(--font-sans);
-}
-.records-screen__tab:focus-visible {
-  outline: 2px solid var(--c-accent);
-  outline-offset: -2px;
-}
-.records-screen__tab--active {
-  color: var(--c-accent);
-  border-bottom-color: var(--c-accent);
-  font-weight: 600;
-}
-.records-screen__main {
-  padding: var(--s-3);
-  display: flex;
-  flex-direction: column;
-  gap: var(--s-2);
-}
 .records-screen__filter-row {
   display: flex;
   flex-wrap: wrap;
@@ -6516,61 +6476,6 @@ a {
   border-color: var(--c-accent);
   font-weight: 600;
 }
-.records-screen__list {
-  display: flex;
-  flex-direction: column;
-  gap: var(--s-3);
-}
-.records-screen__group {
-  display: flex;
-  flex-direction: column;
-  gap: var(--s-1);
-}
-.records-screen__time-bucket {
-  display: flex;
-  flex-direction: column;
-  gap: var(--s-2);
-}
-.records-screen__items {
-  list-style: none;
-  padding: 0;
-  margin: 0;
-  display: flex;
-  flex-direction: column;
-  gap: var(--s-2);
-}
-.records-screen__error,
-.records-screen__filter-empty {
-  background: var(--c-surface-1);
-  border: 1px solid var(--c-divider);
-  border-radius: var(--r-md);
-  padding: var(--s-3);
-  display: flex;
-  flex-direction: column;
-  gap: var(--s-2);
-}
-.records-screen__error p,
-.records-screen__filter-empty p {
-  margin: 0;
-}
-.records-screen__load-more {
-  align-self: center;
-  margin-top: var(--s-2);
-}
-.records-screen__toast {
-  position: fixed;
-  bottom: calc(56px + var(--safe-bottom) + var(--s-3));
-  left: var(--s-3);
-  right: var(--s-3);
-  background: var(--c-text-primary);
-  color: var(--c-surface-1);
-  padding: var(--s-2) var(--s-3);
-  border-radius: var(--r-sm);
-  font-size: var(--font-size-200);
-  z-index: 20;
-  text-align: center;
-}
-
 /* ── empty state ───────────────────────────────────────────────── */
 /* ── goal invite (вход в анкету цели с домашнего экрана) ───────── */
 .goal-invite {
@@ -6619,85 +6524,6 @@ a {
   background: var(--c-accent);
   color: var(--c-text-on-accent);
   border-color: var(--c-accent);
-}
-
-/* ── booking card (3 variants) ─────────────────────────────────── */
-.records-card {
-  background: var(--c-surface-1);
-  border: 1px solid var(--c-divider);
-  border-left-width: 3px;
-  border-radius: var(--r-md);
-  padding: var(--s-3);
-  display: flex;
-  flex-direction: column;
-  gap: var(--s-1);
-}
-.records-card--nearest {
-  /* Slightly stronger emphasis for the next booking. */
-  box-shadow: 0 1px 4px rgb(17 24 39 / 0.05);
-}
-.records-card--skeleton {
-  gap: var(--s-2);
-}
-.records-card__status-row {
-  margin-bottom: var(--s-1);
-}
-.records-card__when {
-  font-weight: 600;
-  font-size: var(--font-size-200);
-}
-.records-card__what {
-  font-size: var(--font-size-200);
-  color: var(--c-text-primary);
-}
-.records-card__duration {
-  color: var(--c-text-secondary);
-  font-weight: 400;
-}
-.records-card__who {
-  font-size: var(--font-size-200);
-  color: var(--c-text-secondary);
-}
-.records-card__price {
-  font-size: var(--font-size-200);
-  color: var(--c-text-secondary);
-}
-.records-card__review-hint {
-  margin: var(--s-1) 0 0;
-  font-size: var(--font-size-100);
-  color: var(--c-success);
-}
-.records-card__actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--s-2);
-  margin-top: var(--s-2);
-}
-.records-card__action {
-  min-height: 44px;
-  padding: var(--s-2) var(--s-3);
-  font-size: var(--font-size-200);
-}
-.records-card__action--primary {
-  background: var(--c-accent);
-  color: var(--c-text-on-accent);
-  border-color: var(--c-accent);
-}
-.records-card__action--danger {
-  color: var(--c-danger);
-  /* §6-упсилон (28.09): опасное — контурное, но с рамкой толще обычной
-     (1 px): цвет больше не единственный признак. Сторож — пара
-     «опасное × обычное» в dangerBorder2469.build.test.ts. */
-  border-width: 2px;
-}
-@media (max-width: 320px) {
-  /* WCAG 1.4.4 — at small viewport / 200% zoom, actions stack. */
-  .records-card__actions {
-    flex-direction: column;
-  }
-  .records-card__action {
-    width: 100%;
-  }
 }
 
 /* ── booking detail screen ─────────────────────────────────────── */
@@ -12089,4 +11915,703 @@ button.ss-card {
   height: 22px;
   flex: none;
   accent-color: var(--c-accent);
+}
+
+/* =========================================================================
+   «Записи» клиента v2 (DRF-2952) — макет «Записи.png», набор владельца от
+   06.10.2026. Список, карточка записи, отмена, перенос и состояния.
+
+   Классы `cr-*`. Общие `.records-screen*` (их носят профиль, дневник,
+   карты) не трогаются: у списка остаётся только каркас `.records-screen`.
+   Цвета — токены; подложки значков и «Новое» выведены из токенов через
+   `color-mix`, как `.callout--danger` и `.callout--success`.
+   ========================================================================= */
+.cr-screen {
+  min-height: 100vh;
+  background: var(--c-bg);
+  color: var(--c-text-primary);
+}
+/* Вложенные экраны (карточка, перенос, исходы): нижней панели нет, внизу —
+   только безопасная зона. */
+.cr-screen--nested {
+  position: relative;
+  padding-bottom: calc(var(--s-5) + var(--safe-bottom));
+}
+.cr-icon {
+  flex: none;
+}
+
+/* Шапка списка: знак и дверь в профиль. */
+.cr-brandbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 56px;
+  padding: var(--s-2) var(--s-4) 0;
+}
+.cr-brand {
+  display: inline-flex;
+  align-items: flex-start;
+  gap: var(--s-1);
+  font-size: var(--font-size-500);
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--c-text-primary);
+}
+.cr-brand__star {
+  fill: var(--c-accent);
+}
+.cr-main {
+  padding: var(--s-3) var(--s-4);
+}
+
+/* Сегмент «Предстоящие | Прошедшие». */
+.cr-segment {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: 1fr;
+  gap: var(--s-1);
+  padding: var(--s-1);
+  background: var(--c-surface-2);
+  border-radius: var(--r-lg);
+}
+.cr-segment__item {
+  min-height: 44px;
+  font: inherit;
+  font-size: var(--font-size-200);
+  font-weight: 600;
+  color: var(--c-text-secondary);
+  background: transparent;
+  border: none;
+  border-radius: var(--r-md);
+  cursor: pointer;
+}
+.cr-segment__item--on {
+  background: var(--c-accent);
+  color: var(--c-text-on-accent);
+}
+.cr-panel {
+  margin-top: var(--s-4);
+}
+.cr-heading {
+  margin: var(--s-4) 0 var(--s-3);
+  font-size: var(--font-size-300);
+  font-weight: 700;
+}
+.cr-panel > section:first-child > .cr-heading {
+  margin-top: 0;
+}
+
+/* Список и карточка. */
+.cr-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.cr-card {
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+  width: 100%;
+  padding: var(--s-3);
+  font: inherit;
+  text-align: left;
+  color: var(--c-text-primary);
+  background: var(--c-surface-1);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-lg);
+  cursor: pointer;
+}
+.cr-card:active {
+  background: var(--c-surface-2);
+}
+.cr-card--skeleton {
+  cursor: default;
+}
+.cr-card__text {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  gap: 2px;
+  min-width: 0;
+}
+.cr-card__service {
+  font-size: var(--font-size-200);
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+.cr-card__master,
+.cr-card__when {
+  font-size: var(--font-size-200);
+  color: var(--c-text-secondary);
+  overflow-wrap: anywhere;
+}
+.cr-card__price {
+  font-size: var(--font-size-200);
+  font-weight: 700;
+}
+.cr-card__address {
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+  overflow-wrap: anywhere;
+}
+/* Строки под услугой — описание карточки для читающего с экрана. */
+.cr-card__details {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.cr-card__progress {
+  padding: 2px var(--s-2);
+  font-size: var(--font-size-100);
+  color: var(--c-text-primary);
+  background: var(--c-surface-2);
+  border-radius: var(--r-pill);
+}
+.cr-card__badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-1);
+  margin-top: var(--s-1);
+}
+.cr-card__hint {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-1);
+  margin-top: var(--s-1);
+  font-size: var(--font-size-100);
+  color: var(--c-accent);
+}
+.cr-card__chevron {
+  display: inline-flex;
+  flex: none;
+  color: var(--c-text-secondary);
+}
+.cr-skel {
+  display: block;
+  height: 14px;
+  border-radius: var(--r-sm);
+}
+.cr-skel--title {
+  width: 70%;
+  height: 18px;
+}
+.cr-skel--line {
+  width: 50%;
+  margin-top: var(--s-1);
+}
+/* Кадр 12: самая свежая прошедшая запись и её действия — одним блоком. */
+.cr-card-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  padding: var(--s-2);
+  background: var(--c-surface-1);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-lg);
+}
+.cr-card-group > .cr-card {
+  padding: var(--s-1);
+  border: none;
+}
+.cr-more {
+  display: flex;
+  justify-content: center;
+  margin-top: var(--s-3);
+}
+.cr-note {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--s-3);
+  padding: var(--s-4);
+  color: var(--c-text-secondary);
+  background: var(--c-surface-1);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-lg);
+}
+.cr-note p {
+  margin: 0;
+}
+
+/* Фото мастера: в списке, аватаром и плиткой. */
+.cr-thumb {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  overflow: hidden;
+  color: var(--c-accent-pressed);
+  background: var(--c-accent-subtle);
+}
+.cr-thumb--card {
+  width: 64px;
+  height: 84px;
+  border-radius: var(--r-md);
+}
+.cr-thumb--avatar {
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+}
+.cr-thumb--tile {
+  width: 56px;
+  height: 56px;
+  border-radius: var(--r-md);
+}
+.cr-thumb__img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.cr-thumb__initials {
+  font-size: var(--font-size-200);
+  font-weight: 700;
+}
+
+/* Кнопки раздела. */
+.cr-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--s-2);
+  width: 100%;
+  min-height: 52px;
+  padding: var(--s-2) var(--s-4);
+  font: inherit;
+  font-size: var(--font-size-200);
+  font-weight: 600;
+  text-align: center;
+  text-decoration: none;
+  border: none;
+  border-radius: var(--r-lg);
+  cursor: pointer;
+}
+.cr-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.cr-btn:focus-visible,
+.cr-card:focus-visible,
+.cr-segment__item:focus-visible,
+.cr-back:focus-visible,
+.cr-week__day:focus-visible,
+.cr-week__nav:focus-visible,
+.cr-slots__cell:focus-visible {
+  outline: 2px solid var(--c-accent);
+  outline-offset: 2px;
+}
+.cr-btn--primary {
+  background: var(--c-accent);
+  color: var(--c-text-on-accent);
+}
+.cr-btn--soft {
+  background: var(--c-accent-subtle);
+  color: var(--c-accent-pressed);
+}
+.cr-btn--soft:active {
+  background: color-mix(in srgb, var(--c-accent) 22%, var(--c-surface-1));
+}
+/* §6-упсилон (28.09): опасное — контурное, с рамкой толще обычной; заливки
+   нет. Сторож — dangerBorder2469.build.test.ts. */
+.cr-btn--danger {
+  background: var(--c-surface-1);
+  color: var(--c-danger);
+  border: 2px solid var(--c-danger);
+}
+.cr-btn--danger:active {
+  background: color-mix(in srgb, var(--c-danger) 10%, var(--c-surface-1));
+}
+.cr-btn--text {
+  min-height: 44px;
+  background: transparent;
+  color: var(--c-accent);
+}
+.cr-btn--text:active {
+  background: var(--c-accent-subtle);
+}
+/* Главная кнопка, выбранный сегмент, день и время — на нажатие отзываются
+   (§6-йота, primaryPress.build.test.ts). */
+.cr-btn--primary:active,
+.cr-segment__item--on:active,
+.cr-week__day--on:active {
+  background: var(--c-accent-pressed);
+}
+.cr-actions {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+  margin-top: var(--s-5);
+}
+
+/* Состояние на весь экран: кадры 2, 7–10, 14–16. */
+.cr-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--s-3);
+  padding: var(--s-6) var(--s-4) var(--s-4);
+  text-align: center;
+}
+.cr-state__badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 112px;
+  height: 112px;
+  margin-bottom: var(--s-2);
+  border-radius: 50%;
+}
+.cr-state__badge--accent {
+  color: var(--c-accent);
+  background: var(--c-accent-subtle);
+}
+.cr-state__badge--info {
+  color: var(--c-accent);
+  background: var(--c-accent-subtle);
+}
+.cr-state__badge--success {
+  color: var(--c-success);
+  background: color-mix(in srgb, var(--c-success) 14%, var(--c-surface-1));
+}
+.cr-state__badge--danger {
+  color: var(--c-danger);
+  background: color-mix(in srgb, var(--c-danger) 12%, var(--c-surface-1));
+}
+.cr-state__title {
+  margin: 0;
+  font-size: var(--font-size-400);
+  font-weight: 700;
+  outline: none;
+}
+.cr-state__body {
+  max-width: 320px;
+  color: var(--c-text-secondary);
+}
+.cr-state__body p {
+  margin: 0;
+}
+.cr-state__actions {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+  width: 100%;
+  margin-top: var(--s-4);
+}
+.cr-loading {
+  padding: var(--s-6) var(--s-4);
+  text-align: center;
+  color: var(--c-text-secondary);
+}
+
+/* Мини-карточка «о какой записи речь». */
+.cr-summary {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  width: 100%;
+  padding: var(--s-3);
+  text-align: left;
+  background: var(--c-surface-1);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-lg);
+}
+.cr-summary__head {
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+}
+.cr-summary__service {
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+.cr-summary__row {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  color: var(--c-text-primary);
+}
+
+/* Вложенные экраны: стрелка возврата и фото-шапка. */
+.cr-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 56px;
+  padding: var(--s-1) var(--s-2);
+}
+.cr-topbar--over {
+  position: relative;
+  z-index: 1;
+}
+.cr-back {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 44px;
+  min-height: 44px;
+  color: var(--c-text-primary);
+  background: transparent;
+  border: none;
+  border-radius: 50%;
+  cursor: pointer;
+}
+.cr-hero {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 280px;
+  /* Место занято до прихода фото: лист под ним не прыгает. */
+  background: var(--c-accent-subtle);
+}
+.cr-hero__img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  /* Портрет: при обрезке по высоте остаётся лицо, а не макушка. */
+  object-position: center 20%;
+}
+/* Поверх фото стрелка и дверь в профиль стоят на своей подложке: фото
+   бывает любым, и без неё знак на светлом пропадал бы. */
+.cr-screen--hero .cr-back {
+  background: var(--c-surface-1);
+}
+.cr-screen--hero .cr-sheet {
+  margin-top: 180px;
+  border-radius: var(--r-lg) var(--r-lg) 0 0;
+}
+.cr-sheet {
+  position: relative;
+  padding: var(--s-4);
+  background: var(--c-bg);
+}
+.cr-sheet__title {
+  margin: 0 0 var(--s-3);
+  font-size: var(--font-size-400);
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+.cr-master {
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+  margin-bottom: var(--s-3);
+}
+.cr-master__name {
+  font-weight: 700;
+}
+.cr-master__role {
+  font-size: var(--font-size-200);
+  color: var(--c-text-secondary);
+}
+.cr-facts {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+  margin: 0 0 var(--s-3);
+}
+.cr-fact {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s-3);
+  color: var(--c-text-secondary);
+}
+.cr-fact dt {
+  display: inline-flex;
+  color: var(--c-text-primary);
+}
+.cr-fact dd {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.cr-fact--strong {
+  color: var(--c-text-primary);
+}
+.cr-fact--strong dd,
+.cr-fact__lead {
+  font-weight: 600;
+  color: var(--c-text-primary);
+}
+.cr-statusline,
+.cr-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s-2);
+  margin: var(--s-3) 0 0;
+  padding: var(--s-3);
+  color: var(--c-text-primary);
+  background: var(--c-accent-subtle);
+  border-radius: var(--r-md);
+}
+.cr-statusline .cr-icon,
+.cr-notice .cr-icon {
+  color: var(--c-accent-pressed);
+}
+
+/* Подтверждение отмены — поверх карточки, на весь экран (кадр 8). */
+.cr-dialog {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  overflow-y: auto;
+  /* Прокрутка диалога не протягивает страницу под ним. */
+  overscroll-behavior: contain;
+  padding-bottom: var(--safe-bottom);
+  background: var(--c-bg);
+}
+.cr-reasons {
+  width: 100%;
+  text-align: left;
+}
+.cr-reasons__title {
+  margin: 0 0 var(--s-2);
+  color: var(--c-text-secondary);
+}
+
+/* Перенос: кадры 5 и 6. */
+.cr-flow {
+  padding: 0 var(--s-4) var(--s-4);
+}
+.cr-flow__title {
+  margin: 0 0 var(--s-1);
+  font-size: var(--font-size-400);
+  font-weight: 700;
+}
+.cr-flow__sub {
+  margin: 0 0 var(--s-4);
+  color: var(--c-text-secondary);
+  overflow-wrap: anywhere;
+}
+.cr-flow__service {
+  margin: var(--s-3) 0;
+  font-size: var(--font-size-400);
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+.cr-flow__row {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s-2);
+  margin: 0 0 var(--s-3);
+  color: var(--c-text-secondary);
+}
+.cr-flow__row--strong {
+  margin-top: var(--s-3);
+  font-weight: 600;
+  color: var(--c-text-primary);
+}
+.cr-week {
+  padding: var(--s-3);
+  background: var(--c-surface-1);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-lg);
+}
+.cr-week__head {
+  display: flex;
+  align-items: center;
+  gap: var(--s-1);
+  margin-bottom: var(--s-2);
+}
+.cr-week__month {
+  flex: 1;
+  font-size: var(--font-size-300);
+  font-weight: 700;
+}
+.cr-week__nav {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 44px;
+  min-height: 44px;
+  color: var(--c-text-secondary);
+  background: transparent;
+  border: none;
+  border-radius: 50%;
+  cursor: pointer;
+}
+.cr-week__days {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: var(--s-1);
+}
+.cr-week__day {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--s-1);
+  min-height: 64px;
+  padding: var(--s-1) 0;
+  font: inherit;
+  color: var(--c-text-primary);
+  background: transparent;
+  border: none;
+  border-radius: var(--r-md);
+  cursor: pointer;
+}
+.cr-week__day:disabled {
+  color: var(--c-text-secondary);
+  opacity: 0.45;
+  cursor: default;
+}
+.cr-week__name {
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+.cr-week__num {
+  font-size: var(--font-size-300);
+  font-weight: 600;
+}
+.cr-week__day--on {
+  background: var(--c-accent);
+  color: var(--c-text-on-accent);
+}
+.cr-week__day--on .cr-week__name {
+  color: var(--c-text-on-accent);
+}
+.cr-slots {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--s-3);
+}
+.cr-slots__cell {
+  min-height: 52px;
+  font: inherit;
+  font-size: var(--font-size-300);
+  color: var(--c-text-secondary);
+  background: var(--c-surface-1);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-md);
+  cursor: pointer;
+}
+.cr-slots__cell--on {
+  font-weight: 700;
+  color: var(--c-accent-pressed);
+  background: var(--c-accent-subtle);
+  border: 2px solid var(--c-accent);
+}
+.cr-when {
+  margin-bottom: var(--s-2);
+  padding: var(--s-3);
+  background: var(--c-surface-1);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-lg);
+}
+.cr-when--new {
+  background: color-mix(in srgb, var(--c-success) 12%, var(--c-surface-1));
+  border-color: transparent;
+}
+.cr-when__label {
+  margin-bottom: var(--s-1);
+  font-weight: 700;
+}
+.cr-when__value {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
 }
