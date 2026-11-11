@@ -254,7 +254,24 @@ class CatalogSpecialistServiceDTO:
     sellable: bool = True
     unsellable_reason: str | None = None
     sellable_key_present: bool = False
+    #: Цена и длительность РЕБРА (``SpecialistService.price`` /
+    #: ``duration_minutes`` / ``resolved_duration``). У соло цена живёт
+    #: только здесь — ``SalonService.base_price`` у него пуст, — и до
+    #: 11.11.2026 зеркало её не читало: клиентские списки бота показывали
+    #: услуги соло-мастера без «от … ₽», а котировка говорила «цену озвучит
+    #: администратор», которого у соло нет. ``None`` — ключа в ответе нет
+    #: или он ``null``.
+    price: Decimal | None = None
+    duration_minutes: int | None = None
+    resolved_duration: int | None = None
     raw: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def effective_duration(self) -> int | None:
+        """Длительность, по которой считать окна: разрешённая каскадом, иначе своя."""
+        return (
+            self.resolved_duration if self.resolved_duration is not None else self.duration_minutes
+        )
 
 
 @dataclass(frozen=True)
@@ -1895,6 +1912,9 @@ def _parse_specialist_service(row: dict[str, Any]) -> CatalogSpecialistServiceDT
         # питоновский `None`, и до этой строки различить их было нечем.
         health_check_key_present="resolved_requires_health_check" in row,
         **_parse_sellable(row),
+        price=_parse_decimal(row.get("price")),
+        duration_minutes=_parse_int(row.get("duration_minutes")),
+        resolved_duration=_parse_int(row.get("resolved_duration")),
         raw=row,
     )
 

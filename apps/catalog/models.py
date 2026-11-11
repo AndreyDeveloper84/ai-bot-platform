@@ -863,6 +863,28 @@ class MasterService(models.Model):
         verbose_name="Автор (идентификатор в Ayla)",
     )
 
+    #: Цена и длительность ребра из фида ``specialist-services`` (11.11.2026).
+    #: Пишет только синк; у операторской строки — пусто. Из них
+    #: :func:`apps.catalog.services.upserter.derive_service_prices_from_edges`
+    #: выводит ``CatalogService.price_from`` / ``duration_min`` для услуг, у
+    #: которых фид ``salon-services`` цены не знает (соло).
+    price = models.DecimalField(
+        max_digits=10, decimal_places=2, null=True, blank=True, verbose_name="Цена ребра, ₽"
+    )
+    duration_min = models.IntegerField(
+        null=True, blank=True, verbose_name="Длительность ребра, мин"
+    )
+    #: Цена и длительность ребра из фида ``specialist-services`` (11.11.2026).
+    #: Пишет только синк; у операторской строки — пусто. Из них
+    #: :func:`apps.catalog.services.upserter.derive_service_prices_from_edges`
+    #: выводит ``CatalogService.price_from`` / ``duration_min`` для услуг, у
+    #: которых фид ``salon-services`` цены не знает (соло).
+    price = models.DecimalField(
+        max_digits=10, decimal_places=2, null=True, blank=True, verbose_name="Цена ребра, ₽"
+    )
+    duration_min = models.IntegerField(
+        null=True, blank=True, verbose_name="Длительность ребра, мин"
+    )
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="Заведена")
     updated_at = models.DateTimeField(auto_now=True, verbose_name="Изменена")
 

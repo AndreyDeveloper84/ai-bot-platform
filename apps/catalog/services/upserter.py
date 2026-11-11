@@ -534,8 +534,83 @@ def upsert_master_services(
                 had_errors=bool(result.errors),
                 edge_model=MasterService,
             )
+        derive_service_prices_from_edges(
+            tenant, service_model=CatalogService, edge_model=MasterService
+        )
 
     return result
+
+
+#: Ключи строки фида ``salon-services`` (``CatalogService.raw``), по которым
+#: видно, знает ли фид цену/длительность сам. Соло-кабинет: ``base_price`` и
+#: обе длительности — ``null``, цена живёт на ребре.
+_FEED_PRICE_KEY = "base_price"
+_FEED_DURATION_KEYS = ("resolved_duration", "duration_minutes")
+
+
+def _feed_knows_price(raw: Any) -> bool:
+    return isinstance(raw, dict) and raw.get(_FEED_PRICE_KEY) is not None
+
+
+def _feed_knows_duration(raw: Any) -> bool:
+    return isinstance(raw, dict) and any(raw.get(k) is not None for k in _FEED_DURATION_KEYS)
+
+
+def derive_service_prices_from_edges(
+    tenant: "Tenant", *, service_model: Any, edge_model: Any
+) -> int:
+    """``CatalogService.price_from`` / ``duration_min`` из рёбер — там, где фид
+    ``salon-services`` цены не знает (11.11.2026, прогон настройки соло).
+
+    У соло-мастера ``SalonService.base_price`` пуст: цена и длительность — на
+    ребре ``SpecialistService`` (экран «Услуги и цены» пишет именно туда). До
+    этого зеркало показывало такие услуги без цены, и клиент в боте читал
+    «точную цену озвучит администратор». Правило:
+
+    * фид назвал цену (``base_price``) — она и остаётся, рёбра не трогают её;
+    * фид цены не знает — ``price_from`` = минимум по продаваемым рёбрам синка
+      (это и есть «от»: у салона с несколькими мастерами — самая низкая);
+      продаваемость — ``sellable`` и цена ≥ 1 ₽ (DRF-1962); рёбер нет — ``None``;
+    * длительность — так же: ``min`` по рёбрам, когда фид её не знает.
+
+    Операторские рёбра (``ayla_specialist_service_id`` пуст) цены не несут и в
+    расчёт не входят. Возвращает число изменённых услуг.
+    """
+    changed_rows = 0
+    for service in service_model.objects.filter(tenant=tenant):
+        raw = service.raw
+        knows_price = _feed_knows_price(raw)
+        knows_duration = _feed_knows_duration(raw)
+        if knows_price and knows_duration:
+            continue
+        edges = list(
+            edge_model.objects.filter(
+                tenant=tenant, service=service, ayla_specialist_service_id__isnull=False
+            ).values_list("price", "duration_min", "sellable")
+        )
+        update_fields: list[str] = []
+        if not knows_price:
+            prices = [p for p, _d, sellable in edges if sellable and p is not None and p >= 1]
+            price_from = min(prices) if prices else None
+            if service.price_from != price_from:
+                service.price_from = price_from
+                update_fields.append("price_from")
+        if not knows_duration:
+            durations = [d for _p, d, _s in edges if d]
+            duration_min = min(durations) if durations else None
+            if service.duration_min != duration_min:
+                service.duration_min = duration_min
+                update_fields.append("duration_min")
+        if update_fields:
+            service.save(update_fields=update_fields)
+            changed_rows += 1
+            logger.info(
+                "catalog.upsert.service_price_from_edges service=%s tenant_id=%s %s",
+                service.pk,
+                tenant.id,
+                " ".join(f"{f}={getattr(service, f)}" for f in update_fields),
+            )
+    return changed_rows
 
 
 def _sellable_fields(dto: "CatalogSpecialistServiceDTO") -> dict[str, Any]:
@@ -706,6 +781,8 @@ def _upsert_one_master_service(
             # the model's tri-state NULL means "unknown", and the booking
             # gate keeps such an edge closed.
             resolved_requires_health_check=dto.resolved_requires_health_check,
+            price=dto.price,
+            duration_min=dto.effective_duration,
             **_sellable_fields(dto),
         )
         result.created += 1
@@ -751,6 +828,10 @@ def _upsert_one_master_service(
         changed.append("resolved_requires_health_check")
     # DRF-1964a — только при присланном ключе, только изменившееся поле.
     for name, value in _sellable_fields(dto).items():
+        if getattr(existing, name) != value:
+            setattr(existing, name, value)
+            changed.append(name)
+    for name, value in (("price", dto.price), ("duration_min", dto.effective_duration)):
         if getattr(existing, name) != value:
             setattr(existing, name, value)
             changed.append(name)
