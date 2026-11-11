@@ -462,8 +462,16 @@ export function PlanLiteScreen() {
         if (cancelled) return;
         const goal = doc.known.goal;
         if (!goal) return;
+        // Порядок — как у Главной (`wellness/today`): слова человека, затем
+        // подпись цели из документа (`label`, DRF-2177), затем прежний ряд
+        // `suggestions`. `label` читать обязательно: при выбранной цели ряд
+        // `suggestions` пуст, и цель из списка оставалась без названия —
+        // заголовок плана был «Мой план». Ключа в цепочке нет (DRF-2355).
         setGoalLabel(
-          goal.goal_text ?? doc.suggestions.find((s) => s.key === goal.goal_key)?.label ?? null,
+          goal.goal_text ||
+            goal.label ||
+            doc.suggestions.find((s) => s.key === goal.goal_key)?.label ||
+            null,
         );
       })
       .catch(() => {

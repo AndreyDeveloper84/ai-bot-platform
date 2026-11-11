@@ -325,6 +325,57 @@ describe("служебный ключ на экран не попадает (DRF
     expect(screen.queryByText(/tone_up/)).toBeNull();
   });
 
+  it("цель из списка: подпись берётся из документа, даже когда ряд вариантов пуст (DRF-2951)", async () => {
+    // Так отвечает каталог при выбранной цели: `suggestions` пуст, подпись —
+    // в `known.goal.label`. Раньше экран искал её только в ряду и оставался
+    // с заголовком «Мой план».
+    mockedGet.mockResolvedValue(PLAN);
+    mockedDoc.mockResolvedValue({
+      ...DOC,
+      suggestions: [],
+      known: { goal: { ...DOC.known.goal!, goal_text: null, label: "Подтянуть фигуру" } },
+    });
+
+    renderScreen();
+    await settleScenario();
+
+    expect(screen.getByRole("heading", { level: 2, name: "Подтянуть фигуру" })).toBeInTheDocument();
+    expect(screen.queryByText(/tone_up/)).toBeNull();
+  });
+
+  it("слова человека старше подписи из списка", async () => {
+    mockedGet.mockResolvedValue(PLAN);
+    mockedDoc.mockResolvedValue({
+      ...DOC,
+      suggestions: [],
+      known: {
+        goal: { ...DOC.known.goal!, goal_text: "хочу высыпаться", label: "Восстановить силы" },
+      },
+    });
+
+    renderScreen();
+    await settleScenario();
+
+    expect(screen.getByRole("heading", { level: 2, name: "хочу высыпаться" })).toBeInTheDocument();
+    expect(screen.queryByText("Восстановить силы")).toBeNull();
+  });
+
+  it("документ пришёл без подписи и без ряда — ключ не показывается, заголовок прежний", async () => {
+    mockedGet.mockResolvedValue(PLAN);
+    mockedDoc.mockResolvedValue({
+      ...DOC,
+      suggestions: [],
+      known: { goal: { ...DOC.known.goal!, goal_text: null } },
+    });
+
+    renderScreen();
+    await settleScenario();
+
+    expect(screen.getByTestId("plan-lite-card")).toBeInTheDocument();
+    expect(screen.queryByText(/tone_up/)).toBeNull();
+    expect(screen.getByRole("heading", { level: 2, name: PLAN_LITE_COPY.title })).toBeInTheDocument();
+  });
+
   it("метка есть — цель зовётся словами человека", async () => {
     mockedGet.mockResolvedValue(PLAN);
     mockedDoc.mockResolvedValue({
