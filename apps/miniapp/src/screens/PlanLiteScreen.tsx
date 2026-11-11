@@ -19,8 +19,9 @@
  *     выбрать 1–3 → «Составить план» → POST только `actions` (активную
  *     цель знает каталог);
  *   - план есть → карточка: «{метка}» без подписи (п. 7 решений 28.09,
- *     DRF-2576: «Никаких „Твоя цель:“»; метка — из
- *     decision-context, как на экране цели; иначе ключ) и по обязательству
+ *     DRF-2576: «Никаких „Твоя цель:“»; метка — из decision-context в
+ *     порядке Главной; без неё — «Мой план», ключ не показывается) и по
+ *     обязательству
  *     «N из M» за текущее ведро — и ничего о результате: ни процента цели,
  *     ни шкалы, ни «ты пропустил» (В-5, DRF-1332); у дневника при
  *     подтверждённом ориентире — ещё «в ориентире N» (DRF-2124: второй
@@ -79,6 +80,8 @@ import {
 import { screenRoot } from "../lib/screen-back";
 import { CustomerAvatarEntry } from "../components/CustomerAvatarEntry";
 import { CustomerTabBar } from "../components/CustomerTabBar";
+import { RecordIcon } from "../components/records/RecordIcons";
+import { RecordButton } from "../components/records/RecordsState";
 
 export const PLAN_LITE_ROUTE = "/customer/plan";
 const GOAL_ROUTE = "/customer/goal-select";
@@ -447,8 +450,8 @@ export function PlanLiteScreen() {
     void load();
   }, [load]);
 
-  // Метка цели — как на экране цели: текст человека, иначе подпись
-  // курируемой цели из документа; сервер отдаёт лишь ключ.
+  // Метка цели — в порядке Главной: текст человека, иначе подпись
+  // курируемой цели из документа; сервер плана отдаёт лишь ключ.
   //
   // DRF-2355: не смогли спросить — метки просто нет, и заголовок обходится
   // без имени цели. Ключ (`tone_up`) — адрес внутри системы, а не слово,
@@ -467,15 +470,16 @@ export function PlanLiteScreen() {
         // `suggestions`. `label` читать обязательно: при выбранной цели ряд
         // `suggestions` пуст, и цель из списка оставалась без названия —
         // заголовок плана был «Мой план». Ключа в цепочке нет (DRF-2355).
+        // Пробельная строка — не название: обрезаем, как это делает Главная.
         setGoalLabel(
-          goal.goal_text ||
-            goal.label ||
+          goal.goal_text?.trim() ||
+            goal.label?.trim() ||
             doc.suggestions.find((s) => s.key === goal.goal_key)?.label ||
             null,
         );
       })
       .catch(() => {
-        /* метка — украшение; ключ покажется и без неё */
+        /* метка — украшение: без неё заголовок обходится словами «Мой план» */
       });
     return () => {
       cancelled = true;
@@ -595,16 +599,16 @@ export function PlanLiteScreen() {
   };
 
   return (
-    <div className="food-scanner-screen food-scanner-screen--tab-root">
-      <header className="records-screen__header">
-        <h1 className="records-screen__title">{PLAN_LITE_COPY.title}</h1>
+    <div className="plan-screen">
+      <header className="plan-head">
+        <h1 className="plan-head__title">{PLAN_LITE_COPY.title}</h1>
         {/* Вход в профиль — §77 п.60. Стоит на всех экранах нижней
             панели: вход, который есть не везде, читается как «иногда
             можно». Имя компонент берёт сам — у этого экрана его нет. */}
         <CustomerAvatarEntry />
       </header>
 
-      <main className="food-scanner-screen__main">
+      <main className="plan-main">
         <div className="food-scanner-diary__notice-slot" aria-live="polite">
           {notice && (
             <div className="food-scanner-diary__notice">
@@ -614,71 +618,93 @@ export function PlanLiteScreen() {
         </div>
 
         {status.kind === "loading" && (
-          <p className="food-scanner-diary__caption" role="status">
+          <p className="plan-loading" role="status">
             {PLAN_LITE_COPY.loading}
           </p>
         )}
 
+        {/* Состояния — значок в круге, фраза, кнопка (вид общих состояний
+            клиента, `cr-state`). Фраза — прежняя и целиком, роль прежняя:
+            это сообщение о положении дел, а не новый заголовок экрана. */}
         {status.kind === "unavailable" && (
-          <div className="food-scanner-diary__unreadable" role="status">
-            <p>{PLAN_LITE_COPY.unavailable}</p>
+          <div className="cr-state plan-state" role="status">
+            <span className="cr-state__badge cr-state__badge--info">
+              <RecordIcon name="info" size={44} />
+            </span>
+            <p className="plan-state__text">{PLAN_LITE_COPY.unavailable}</p>
           </div>
         )}
 
         {status.kind === "error" && (
-          <div className="food-scanner-diary__unreadable" role="status">
-            <p>{PLAN_LITE_COPY.transient}</p>
-            <button type="button" className="btn-secondary" onClick={() => void load()}>
-              {PLAN_LITE_COPY.retry}
-            </button>
+          <div className="cr-state plan-state" role="status">
+            <span className="cr-state__badge cr-state__badge--info">
+              <RecordIcon name="alert" size={44} />
+            </span>
+            <p className="plan-state__text">{PLAN_LITE_COPY.transient}</p>
+            <div className="cr-state__actions">
+              <RecordButton variant="primary" onClick={() => void load()}>
+                {PLAN_LITE_COPY.retry}
+              </RecordButton>
+            </div>
           </div>
         )}
 
         {status.kind === "need_goal" && (
-          <div className="food-scanner-diary__unreadable" role="status">
-            <p>{PLAN_LITE_COPY.needGoal}</p>
-            <button
-              type="button"
-              className="btn-secondary"
-              onClick={() => navigate(GOAL_ROUTE, { state: { returnTo: PLAN_LITE_ROUTE } })}
-            >
-              {PLAN_LITE_COPY.chooseGoal}
-            </button>
+          <div className="cr-state plan-state" role="status">
+            <span className="cr-state__badge cr-state__badge--accent">
+              <PlanMarkIcon kind="step" size={44} />
+            </span>
+            <p className="plan-state__text">{PLAN_LITE_COPY.needGoal}</p>
+            <div className="cr-state__actions">
+              <RecordButton
+                variant="primary"
+                onClick={() => navigate(GOAL_ROUTE, { state: { returnTo: PLAN_LITE_ROUTE } })}
+              >
+                {PLAN_LITE_COPY.chooseGoal}
+              </RecordButton>
+            </div>
           </div>
         )}
 
         {status.kind === "proposal" && (
-          <section data-testid="plan-lite-proposal" aria-label={PLAN_LITE_COPY.title}>
-            <h2 className="food-scanner-diary__caption">
+          <section
+            className="plan-section"
+            data-testid="plan-lite-proposal"
+            aria-label={PLAN_LITE_COPY.title}
+          >
+            <h2 className="plan-heading">
               {goalLabel ? PLAN_LITE_COPY.proposalTitle(goalLabel) : PLAN_LITE_COPY.title}
             </h2>
-            <p className="food-scanner-diary__unreadable-hint">{status.proposal.why}</p>
-            <p className="food-scanner-diary__caption">{PLAN_LITE_COPY.proposalHint}</p>
-            <ul className="food-scanner-diary__list">
+            <p className="plan-lead">{status.proposal.why}</p>
+            <ul className="plan-list">
               {rows.map((row) => {
                 // Запрет — только на явное «нет»: при «не знаю» строка
                 // остаётся в руках человека (DRF-2354).
                 const needsConsent = row.action_type === "log_food" && diaryConsent === false;
                 const on = rowEffective(row);
                 return (
-                  <li key={row.action_type} className="food-scanner-diary__entry">
-                    <div className="food-scanner-diary__entry-main">
-                      <label className={`chip${on ? " chip--active" : ""}`}>
+                  <li key={row.action_type} className="plan-pick">
+                    <div className="plan-pick__head">
+                      <PlanMark kind={ACTION_MARKS[row.action_type]} />
+                      {/* В подписи флажка — только название действия: период,
+                          согласие и степпер стоят рядом, а не внутри. */}
+                      <label className="plan-pick__label">
                         <input
                           type="checkbox"
+                          className="plan-pick__box"
                           checked={on}
                           disabled={needsConsent}
                           onChange={() => toggleRow(row.action_type)}
                         />
                         {ACTION_LABELS[row.action_type]}
                       </label>
-                      <span className="food-scanner-diary__entry-time">{cadenceLabel(row)}</span>
+                      <span className="plan-pick__cadence">{cadenceLabel(row)}</span>
                     </div>
                     {needsConsent && (
-                      <div className="food-scanner-diary__entry-actions">
+                      <div className="plan-row__links">
                         <button
                           type="button"
-                          className="food-scanner-diary__entry-action"
+                          className="plan-link"
                           onClick={() =>
                             navigate(CONSENT_GATE_ROUTE, { state: { returnTo: PLAN_LITE_ROUTE } })
                           }
@@ -700,85 +726,114 @@ export function PlanLiteScreen() {
                 );
               })}
             </ul>
-            <div className="food-scanner-screen__cta-stack">
-              <button
-                type="button"
-                className="btn-primary"
+            {/* Заметка под списком — место «Это только начало…» на кадре 5;
+                слова прежние. */}
+            <p className="plan-note">{PLAN_LITE_COPY.proposalHint}</p>
+            <div className="plan-actions">
+              <RecordButton
+                variant="primary"
                 disabled={busy || proposalActions().length === 0}
                 onClick={() => void confirmProposal()}
               >
                 {busy ? PLAN_LITE_COPY.confirming : PLAN_LITE_COPY.confirm}
-              </button>
-              <button type="button" className="btn-secondary" disabled={busy} onClick={toBuilder}>
+              </RecordButton>
+              <RecordButton variant="soft" disabled={busy} onClick={toBuilder}>
                 {PLAN_LITE_COPY.byHand}
-              </button>
+              </RecordButton>
             </div>
           </section>
         )}
 
         {status.kind === "builder" && (
-          <section aria-label={PLAN_LITE_COPY.builderTitle}>
-            {goalLabel && <p className="food-scanner-diary__caption">{goalLabel}</p>}
-            <h2 className="food-scanner-diary__caption">{PLAN_LITE_COPY.builderTitle}</h2>
-            <p className="food-scanner-diary__unreadable-hint">{PLAN_LITE_COPY.builderHint}</p>
-            <div className="chip-row" role="group" aria-label={PLAN_LITE_COPY.builderTitle}>
-              <label className={`chip${book ? " chip--active" : ""}`}>
-                <input type="checkbox" checked={book} onChange={() => setBook((b) => !b)} />
-                {PLAN_LITE_COPY.chipBook}
-              </label>
-              <label className={`chip${foodDays !== null ? " chip--active" : ""}`}>
-                <input
-                  type="checkbox"
-                  checked={foodDays !== null}
-                  onChange={() => setFoodDays((d) => (d === null ? FOOD_DAYS.initial : null))}
-                />
-                {PLAN_LITE_COPY.chipFood(foodDays ?? FOOD_DAYS.initial)}
-              </label>
-              <label className={`chip${waterTimes !== null ? " chip--active" : ""}`}>
-                <input
-                  type="checkbox"
-                  checked={waterTimes !== null}
-                  onChange={() => setWaterTimes((t) => (t === null ? WATER_TIMES.initial : null))}
-                />
-                {PLAN_LITE_COPY.chipWater(waterTimes ?? WATER_TIMES.initial)}
-              </label>
+          <section className="plan-section" aria-label={PLAN_LITE_COPY.builderTitle}>
+            {goalLabel && <p className="plan-overline">{goalLabel}</p>}
+            <h2 className="plan-heading">{PLAN_LITE_COPY.builderTitle}</h2>
+            <p className="plan-lead">{PLAN_LITE_COPY.builderHint}</p>
+            <div className="plan-list" role="group" aria-label={PLAN_LITE_COPY.builderTitle}>
+              <div className="plan-pick">
+                <div className="plan-pick__head">
+                  <PlanMark kind="book" />
+                  <label className="plan-pick__label">
+                    <input
+                      type="checkbox"
+                      className="plan-pick__box"
+                      checked={book}
+                      onChange={() => setBook((b) => !b)}
+                    />
+                    {PLAN_LITE_COPY.chipBook}
+                  </label>
+                </div>
+              </div>
+              <div className="plan-pick">
+                <div className="plan-pick__head">
+                  <PlanMark kind="food" />
+                  <label className="plan-pick__label">
+                    <input
+                      type="checkbox"
+                      className="plan-pick__box"
+                      checked={foodDays !== null}
+                      onChange={() => setFoodDays((d) => (d === null ? FOOD_DAYS.initial : null))}
+                    />
+                    {PLAN_LITE_COPY.chipFood(foodDays ?? FOOD_DAYS.initial)}
+                  </label>
+                </div>
+                {foodDays !== null && (
+                  <Stepper
+                    label={PLAN_LITE_COPY.labelFood}
+                    value={foodDays}
+                    min={FOOD_DAYS.min}
+                    max={FOOD_DAYS.max}
+                    onChange={setFoodDays}
+                  />
+                )}
+              </div>
+              <div className="plan-pick">
+                <div className="plan-pick__head">
+                  <PlanMark kind="water" />
+                  <label className="plan-pick__label">
+                    <input
+                      type="checkbox"
+                      className="plan-pick__box"
+                      checked={waterTimes !== null}
+                      onChange={() =>
+                        setWaterTimes((t) => (t === null ? WATER_TIMES.initial : null))
+                      }
+                    />
+                    {PLAN_LITE_COPY.chipWater(waterTimes ?? WATER_TIMES.initial)}
+                  </label>
+                </div>
+                {waterTimes !== null && (
+                  <Stepper
+                    label={PLAN_LITE_COPY.labelWater}
+                    value={waterTimes}
+                    min={WATER_TIMES.min}
+                    max={WATER_TIMES.max}
+                    onChange={setWaterTimes}
+                  />
+                )}
+              </div>
             </div>
-            {foodDays !== null && (
-              <Stepper
-                label={PLAN_LITE_COPY.labelFood}
-                value={foodDays}
-                min={FOOD_DAYS.min}
-                max={FOOD_DAYS.max}
-                onChange={setFoodDays}
-              />
-            )}
-            {waterTimes !== null && (
-              <Stepper
-                label={PLAN_LITE_COPY.labelWater}
-                value={waterTimes}
-                min={WATER_TIMES.min}
-                max={WATER_TIMES.max}
-                onChange={setWaterTimes}
-              />
-            )}
-            <div className="food-scanner-screen__cta-stack">
-              <button
-                type="button"
-                className="btn-primary"
+            <div className="plan-actions">
+              <RecordButton
+                variant="primary"
                 disabled={busy || selectedActions().length === 0}
                 onClick={() => void compose()}
               >
                 {busy ? PLAN_LITE_COPY.composing : PLAN_LITE_COPY.compose}
-              </button>
+              </RecordButton>
             </div>
           </section>
         )}
 
         {status.kind === "saved" && (
-          <section data-testid="plan-saved-card" aria-label={PLAN_LITE_COPY.title}>
-            <h2 className="food-scanner-diary__caption">{goalLabel || PLAN_LITE_COPY.title}</h2>
+          <section
+            className="plan-section"
+            data-testid="plan-saved-card"
+            aria-label={PLAN_LITE_COPY.title}
+          >
+            <h2 className="plan-heading">{goalLabel || PLAN_LITE_COPY.title}</h2>
             {/* Только подписи каталога: без номеров, счётчиков и шкал. */}
-            <ul className="food-scanner-diary__list">
+            <ul className="plan-list">
               {status.plan.steps.map((step, index) => (
                 <SavedPlanStepRow
                   key={step.step_id}
@@ -798,30 +853,32 @@ export function PlanLiteScreen() {
         {/* DRF-2876 — предложение рядом с действующим планом: его шаги и
             вопрос владельца. Нажатие кнопки — само подтверждение (п.15). */}
         {status.kind === "saved" && status.proposal && (
-          <section data-testid="plan-proposal-card" aria-label={PLAN_LITE_COPY.replaceQuestion}>
-            <ul className="food-scanner-diary__list">
+          <section
+            className="plan-ask"
+            data-testid="plan-proposal-card"
+            aria-label={PLAN_LITE_COPY.replaceQuestion}
+          >
+            <ul className="plan-list">
               {status.proposal.steps.map((step) => (
                 <SavedPlanStepRow key={step.step_id} step={step} />
               ))}
             </ul>
-            <p className="food-scanner-diary__caption">{PLAN_LITE_COPY.replaceQuestion}</p>
-            <div className="food-scanner-screen__cta-stack">
-              <button
-                type="button"
-                className="btn-primary"
+            <p className="plan-ask__question">{PLAN_LITE_COPY.replaceQuestion}</p>
+            <div className="plan-actions">
+              <RecordButton
+                variant="primary"
                 disabled={busy}
                 onClick={() => void answerProposal(status.proposal as PlanProposal, "replace")}
               >
                 {PLAN_LITE_COPY.replaceYes}
-              </button>
-              <button
-                type="button"
-                className="btn-secondary"
+              </RecordButton>
+              <RecordButton
+                variant="soft"
                 disabled={busy}
                 onClick={() => void answerProposal(status.proposal as PlanProposal, "keep")}
               >
                 {PLAN_LITE_COPY.replaceNo}
-              </button>
+              </RecordButton>
             </div>
           </section>
         )}
@@ -830,8 +887,12 @@ export function PlanLiteScreen() {
             и вопрос владельца. Пока идёт загрузка или экран в ошибке — не
             показывается: сохранять можно только то, что прочитано сейчас. */}
         {draft && status.kind !== "loading" && status.kind !== "error" && (
-          <section data-testid="plan-draft-card" aria-label={PLAN_LITE_COPY.saveQuestion}>
-            <ul className="food-scanner-diary__list">
+          <section
+            className="plan-ask"
+            data-testid="plan-draft-card"
+            aria-label={PLAN_LITE_COPY.saveQuestion}
+          >
+            <ul className="plan-list">
               {draft.steps.map((step, index) => (
                 <SavedPlanStepRow
                   key={`${draft.token}-${index}`}
@@ -839,60 +900,62 @@ export function PlanLiteScreen() {
                 />
               ))}
             </ul>
-            <p className="food-scanner-diary__caption">{PLAN_LITE_COPY.saveQuestion}</p>
-            <div className="food-scanner-screen__cta-stack">
-              <button
-                type="button"
-                className="btn-primary"
-                disabled={busy}
-                onClick={() => void saveShownDraft(draft)}
-              >
+            <p className="plan-ask__question">{PLAN_LITE_COPY.saveQuestion}</p>
+            <div className="plan-actions">
+              <RecordButton variant="primary" disabled={busy} onClick={() => void saveShownDraft(draft)}>
                 {PLAN_LITE_COPY.saveYes}
-              </button>
+              </RecordButton>
             </div>
           </section>
         )}
 
         {status.kind === "card" && (
-          <section data-testid="plan-lite-card" aria-label={PLAN_LITE_COPY.title}>
-            <h2 className="food-scanner-diary__caption">
-              {goalLabel || PLAN_LITE_COPY.title}
-            </h2>
-            <ul className="food-scanner-diary__list">
+          <section
+            className="plan-section"
+            data-testid="plan-lite-card"
+            aria-label={PLAN_LITE_COPY.title}
+          >
+            <h2 className="plan-heading">{goalLabel || PLAN_LITE_COPY.title}</h2>
+            <ul className="plan-list">
               {status.plan.actions.map((action) => (
-                <li key={action.action_type} className="food-scanner-diary__entry">
-                  <div className="food-scanner-diary__entry-main">
-                    <span className="food-scanner-diary__entry-dish">{ACTION_LABELS[action.action_type]}</span>
-                    <span className="food-scanner-diary__entry-time">{bucketLabel(action)}</span>
+                // Вид строки НЕ зависит от счёта: ни цветом, ни знаком экран
+                // не говорит «сделано» — он показывает, сколько из скольких.
+                <li key={action.action_type} className="plan-row">
+                  <PlanMark kind={ACTION_MARKS[action.action_type]} />
+                  <div className="plan-row__text">
+                    <span className="plan-row__title">{ACTION_LABELS[action.action_type]}</span>
+                    <span className="plan-row__meta">
+                      <span className="plan-row__bucket">{bucketLabel(action)}</span>
+                      <span className="plan-row__count">
+                        {PLAN_LITE_COPY.ofTotal(action.done_count, action.target_count)}
+                        {action.action_type === "log_food" &&
+                          typeof action.within_target_count === "number" && (
+                            <>
+                              {", "}
+                              {PLAN_LITE_COPY.withinTarget(action.within_target_count)}
+                            </>
+                          )}
+                      </span>
+                    </span>
                   </div>
-                  <span className="food-scanner-diary__entry-cal">
-                    {PLAN_LITE_COPY.ofTotal(action.done_count, action.target_count)}
-                    {action.action_type === "log_food" && typeof action.within_target_count === "number" && (
-                      <>
-                        {", "}
-                        {PLAN_LITE_COPY.withinTarget(action.within_target_count)}
-                      </>
-                    )}
-                  </span>
                   {shouldOfferGo(action, pathname) && (
-                    <div className="food-scanner-diary__entry-actions">
-                      <button
-                        type="button"
-                        className="food-scanner-diary__entry-action"
-                        aria-label={`${PLAN_LITE_COPY.go}: ${ACTION_LABELS[action.action_type]}`}
-                        onClick={() => navigate(ACTION_ROUTES[action.action_type])}
-                      >
-                        {PLAN_LITE_COPY.go}
-                      </button>
-                    </div>
+                    <button
+                      type="button"
+                      className="plan-row__go"
+                      aria-label={`${PLAN_LITE_COPY.go}: ${ACTION_LABELS[action.action_type]}`}
+                      onClick={() => navigate(ACTION_ROUTES[action.action_type])}
+                    >
+                      {PLAN_LITE_COPY.go}
+                      <RecordIcon name="chevron" size={16} />
+                    </button>
                   )}
                 </li>
               ))}
             </ul>
-            <div className="food-scanner-screen__cta-stack">
-              <button type="button" className="btn-secondary" disabled={busy} onClick={() => void change()}>
+            <div className="plan-actions">
+              <RecordButton variant="text" disabled={busy} onClick={() => void change()}>
                 {busy ? PLAN_LITE_COPY.changing : PLAN_LITE_COPY.change}
-              </button>
+              </RecordButton>
             </div>
           </section>
         )}
@@ -902,6 +965,72 @@ export function PlanLiteScreen() {
           состояние ошибки не убирает навигацию (#1918). */}
       <CustomerTabBar active="plan" />
     </div>
+  );
+}
+
+/** Значок строки плана: три действия Plan Lite и шаг нового плана. */
+type PlanMarkKind = "book" | "food" | "water" | "step";
+
+const ACTION_MARKS: Record<PlanLiteActionType, PlanMarkKind> = {
+  book_service: "book",
+  log_food: "food",
+  log_water: "water",
+};
+
+/**
+ * Рисунок значка. Линейный, цвет — `currentColor`. У шага нового плана типа
+ * нет (каталог шлёт только подпись), поэтому значок у всех шагов один:
+ * угадывать тип по словам подписи экран не вправе.
+ */
+function PlanMarkIcon({ kind, size = 22 }: { kind: PlanMarkKind; size?: number }) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+      focusable="false"
+    >
+      {kind === "book" && (
+        <>
+          <rect x="3.5" y="5" width="17" height="15.5" rx="3" />
+          {/* Без галочки внутри: знак «сделано» экран плана не рисует. */}
+          <path d="M3.5 10h17M8 3v4M16 3v4" />
+        </>
+      )}
+      {kind === "food" && (
+        <>
+          <path d="M4 12h16a8 8 0 01-16 0z" />
+          <path d="M9 4.5c0 1.2 1 1.6 1 2.8M13 4c0 1.4 1 1.8 1 3.3M8 20.5h8" />
+        </>
+      )}
+      {kind === "water" && <path d="M12 3.5s6 6.2 6 10.5a6 6 0 01-12 0c0-4.3 6-10.5 6-10.5z" />}
+      {kind === "step" && (
+        <>
+          <circle cx="12" cy="12" r="8.5" />
+          <circle cx="12" cy="12" r="4" />
+          <circle cx="12" cy="12" r="0.8" />
+        </>
+      )}
+    </svg>
+  );
+}
+
+/**
+ * Значок в круге. Круг у всех действий одного цвета: в палитре есть только
+ * акцент и статусные цвета, а зелёный, красный и жёлтый круг читались бы как
+ * «сделано», «ошибка» и «внимание» — состояния, которых экран не утверждает.
+ */
+function PlanMark({ kind }: { kind: PlanMarkKind }) {
+  return (
+    <span className="plan-mark">
+      <PlanMarkIcon kind={kind} />
+    </span>
   );
 }
 
@@ -937,16 +1066,17 @@ function SavedPlanStepRow({
   // названий услуги и мастера каталог у шага не хранит.
   const canOpen = Boolean(onOpen) && !bookedAt;
   return (
-    <li className="food-scanner-diary__entry">
-      <div className="food-scanner-diary__entry-main">
-        <span className="food-scanner-diary__entry-dish">{step.label}</span>
+    <li className="plan-row">
+      <PlanMark kind="step" />
+      <div className="plan-row__text">
+        <span className="plan-row__title">{step.label}</span>
         {bookedAt && (
-          <span className="food-scanner-diary__entry-time" data-testid="plan-step-booked-at">
+          <span className="plan-row__sub" data-testid="plan-step-booked-at">
             {formatDayMonthTime(bookedAt)}
           </span>
         )}
         {why && open && (
-          <span id={whyId} className="food-scanner-diary__entry-time">
+          <span id={whyId} className="plan-row__sub">
             {why}
           </span>
         )}
@@ -960,33 +1090,33 @@ function SavedPlanStepRow({
             onBook={onBook}
           />
         )}
+        {(why || canOpen) && (
+          <div className="plan-row__links">
+            {why && (
+              <button
+                type="button"
+                className="plan-link"
+                aria-expanded={open}
+                aria-controls={whyId}
+                onClick={() => setOpen((value) => !value)}
+              >
+                {PLAN_LITE_COPY.whyThisStep}
+              </button>
+            )}
+            {canOpen && (
+              <button
+                type="button"
+                className="plan-link"
+                disabled={busy}
+                aria-label={`${PLAN_LITE_COPY.chooseService}: ${step.label}`}
+                onClick={onOpen}
+              >
+                {PLAN_LITE_COPY.chooseService}
+              </button>
+            )}
+          </div>
+        )}
       </div>
-      {(why || canOpen) && (
-        <div className="food-scanner-diary__entry-actions">
-          {why && (
-            <button
-              type="button"
-              className="food-scanner-diary__entry-action"
-              aria-expanded={open}
-              aria-controls={whyId}
-              onClick={() => setOpen((value) => !value)}
-            >
-              {PLAN_LITE_COPY.whyThisStep}
-            </button>
-          )}
-          {canOpen && (
-            <button
-              type="button"
-              className="food-scanner-diary__entry-action"
-              disabled={busy}
-              aria-label={`${PLAN_LITE_COPY.chooseService}: ${step.label}`}
-              onClick={onOpen}
-            >
-              {PLAN_LITE_COPY.chooseService}
-            </button>
-          )}
-        </div>
-      )}
     </li>
   );
 }
@@ -1058,18 +1188,18 @@ function StepPathPanel({
 }) {
   if (path.chosen) {
     return (
-      <div role="group" aria-label={label} data-testid="plan-step-slots">
+      <div className="plan-path" role="group" aria-label={label} data-testid="plan-step-slots">
         {optionLines(path.chosen).map((line) => (
-          <span key={line} className="food-scanner-diary__entry-time">
+          <span key={line} className="plan-row__sub">
             {line}
           </span>
         ))}
-        <div className="food-scanner-screen__cta-stack">
+        <div className="plan-path__choices">
           {path.slots.map((iso, index) => (
             <button
               key={iso}
               type="button"
-              className="btn-secondary"
+              className="cr-btn cr-btn--soft"
               disabled={busy}
               onClick={() => onBook(path, index)}
             >
@@ -1080,13 +1210,13 @@ function StepPathPanel({
         {/* Остальные дни со свободным временем — датами; показанный день
             кнопкой не дублируется. Слов владельца для этого места нет. */}
         {path.days.some((day) => day !== path.day) && (
-          <div className="food-scanner-screen__cta-stack" data-testid="plan-step-days">
+          <div className="plan-row__links" data-testid="plan-step-days">
             {path.days.map((day, index) =>
               day === path.day ? null : (
                 <button
                   key={day}
                   type="button"
-                  className="food-scanner-diary__entry-action"
+                  className="plan-link"
                   disabled={busy}
                   onClick={() => onDay(path, index)}
                 >
@@ -1100,15 +1230,20 @@ function StepPathPanel({
     );
   }
   return (
-    <div role="group" aria-label={label} data-testid="plan-step-offers">
+    <div className="plan-path" role="group" aria-label={label} data-testid="plan-step-offers">
       {path.options.map((option, index) => (
-        <div key={`${path.token}-${index}`} className="food-scanner-screen__cta-stack">
+        <div key={`${path.token}-${index}`} className="plan-path__choices">
           {optionLines(option).map((line) => (
-            <span key={line} className="food-scanner-diary__entry-time">
+            <span key={line} className="plan-row__sub">
               {line}
             </span>
           ))}
-          <button type="button" className="btn-secondary" disabled={busy} onClick={() => onChoose(path, index)}>
+          <button
+            type="button"
+            className="cr-btn cr-btn--soft"
+            disabled={busy}
+            onClick={() => onChoose(path, index)}
+          >
             {`${option.service_name} · ${option.master_name}`}
           </button>
         </div>
@@ -1137,20 +1272,20 @@ function Stepper({
   onChange: (v: number) => void;
 }) {
   return (
-    <div className="food-scanner-diary__entry-actions" role="group" aria-label={label}>
+    <div className="plan-stepper" role="group" aria-label={label}>
       <button
         type="button"
-        className="food-scanner-diary__entry-action"
+        className="plan-stepper__btn"
         aria-label={`${label}: ${PLAN_LITE_COPY.less}`}
         disabled={value <= min}
         onClick={() => onChange(Math.max(min, value - 1))}
       >
         −
       </button>
-      <span className="food-scanner-diary__entry-time">{value}</span>
+      <span className="plan-stepper__value">{value}</span>
       <button
         type="button"
-        className="food-scanner-diary__entry-action"
+        className="plan-stepper__btn"
         aria-label={`${label}: ${PLAN_LITE_COPY.more}`}
         disabled={value >= max}
         onClick={() => onChange(Math.min(max, value + 1))}
