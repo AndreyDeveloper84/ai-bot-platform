@@ -82,6 +82,42 @@ export function markRead<T>(data: T, meta: Omit<ProofMeta, "seq">): Read<T> {
   return data as Read<T>;
 }
 
+/**
+ * Перенести метку конверта на вложенное значение. Зовётся ТОЛЬКО из обёрток
+ * клиента (`lib/api.ts`), как и :func:`markRead`.
+ *
+ * Зачем (DRF-2952): `requestWithStatus` метит тело ответа целиком, а экраны
+ * утверждают исход по ВЛОЖЕННОЙ записи — `{ booking }`, `{ new_booking }`.
+ * У вложенного объекта метки не было, и `verifyClaim` на нём отвечал
+ * «доказательство без метки» всегда: в бою — молча, в тестах — нет, потому
+ * что тесты метили вложенную запись руками. Экран, который ветвится по
+ * вердикту, в бою не показал бы исход никогда.
+ *
+ * Метка та же, с тем же номером чтения: вложенная запись прочитана тем же
+ * ответом. Конверт без метки (подменённый в тесте клиент) ничего не даёт —
+ * подделать доказательство этим путём нельзя.
+ */
+export function carryProof<T>(envelope: unknown, nested: T): T {
+  const meta = proofOf(envelope);
+  if (!meta || nested === null || typeof nested !== "object") return nested;
+  if (proofOf(nested)) return nested;
+  Object.defineProperty(nested, PROOF, { value: meta, enumerable: false, configurable: true });
+  return nested;
+}
+
+/**
+ * Значение как доказательство — или `null`, если клиент API его не читал.
+ * Сужение типа без приведения: `Read<T>` получается только у меченого.
+ */
+export function readOf<T>(value: T): Read<T> | null {
+  return proofOf(value) ? (value as Read<T>) : null;
+}
+
+/** Номер последнего чтения — граница «исход именно этого нажатия». */
+export function lastReadSeq(): number {
+  return readSeq;
+}
+
 export function proofOf(value: unknown): ProofMeta | null {
   if (value === null || typeof value !== "object") return null;
   const meta = (value as Record<symbol, unknown>)[PROOF];

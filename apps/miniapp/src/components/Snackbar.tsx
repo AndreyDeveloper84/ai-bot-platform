@@ -43,6 +43,13 @@ export function Snackbar({
   onDismiss,
 }: Props) {
   const timerRef = useRef<number | null>(null);
+  // Обработчик истечения читается через ссылку, а не через зависимость
+  // эффекта: экраны передают сюда свежую стрелку на каждом рендере, и таймер
+  // перезапускался бы при любой перерисовке (пришла сеть, сменилось
+  // состояние). Для окна возврата отмены это значило подтверждение позже
+  // серверного окна (DRF-2952).
+  const onTimeoutRef = useRef(onTimeout);
+  onTimeoutRef.current = onTimeout;
 
   // Сверка утверждения с прочитанным (DRF-2347) — при отрисовке, а не в
   // эффекте: несоответствие обязано останавливать ТАМ ЖЕ, где сообщение
@@ -61,7 +68,7 @@ export function Snackbar({
     }
     timerRef.current = window.setTimeout(() => {
       timerRef.current = null;
-      onTimeout?.();
+      onTimeoutRef.current?.();
     }, durationMs);
     return () => {
       if (timerRef.current !== null) {
@@ -69,7 +76,7 @@ export function Snackbar({
         timerRef.current = null;
       }
     };
-  }, [visible, durationMs, onTimeout]);
+  }, [visible, durationMs]);
 
   if (!visible) return null;
 
