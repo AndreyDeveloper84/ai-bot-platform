@@ -61,12 +61,19 @@ _BOOKING_FIELDS = (
 
 _MASTER_ON_BOOKING = third_party(
     "master_name",
+    # DRF-2952 — the «Записи» board shows the master's face and trade on the
+    # booking card. Both are what the salon already publishes on the master
+    # card of the catalog (``_master_to_dict``); the photo travels as our
+    # proxied path (``master_photo_path``), never as the storage link.
+    "master_photo_url",
+    "master_specialization",
     via=V + "_booking_to_dict",
     whose="the master assigned to the customer's booking",
     why=(
-        "the customer needs to know who receives them; the name is the one the salon "
-        "publishes on the master card, and the proxy shape resolves it through the "
-        "catalog mirror (_proxy_booking_to_dict) so both paths show the same name"
+        "the customer needs to know who receives them; the name, photo and trade are "
+        "the ones the salon publishes on the master card, and the proxy shape resolves "
+        "them through the catalog mirror (_proxy_booking_to_dict) so both paths show "
+        "the same master"
     ),
 )
 

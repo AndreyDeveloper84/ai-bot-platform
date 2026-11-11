@@ -489,3 +489,98 @@ class TestFlagOff:
         proxy = _proxy(tenant, bot_user)
         resp = _get(client, f"/api/v1/customer/bookings/{proxy.appointment_id}")
         assert resp.status_code == 404
+
+
+# ─── DRF-2952 — лицо мастера и ключ услуги каталога в строке записи ─────────
+
+
+def _local_booking(tenant, bot_user, service, master, *, days: int = 7) -> BookingRequest:
+    return BookingRequest.all_tenants.create(
+        tenant=tenant,
+        bot_user=bot_user,
+        service=service,
+        master=master,
+        service_name=service.name,
+        master_name=master.name,
+        client_name="Test",
+        client_phone="+7-000",
+        visit_at=timezone.now() + timedelta(days=days),
+        duration_min=60,
+        status=BookingRequest.Status.CONFIRMED,
+        source="bot",
+        booking_source="ai_direct",
+        billable=True,
+        attribution_metadata={"actor_type": "customer", "created_by": "execute_confirm"},
+    )
+
+
+class TestMasterFaceAndCatalogKeyOnTheBooking:
+    """Макет «Записи» (DRF-2952) рисует фото и специализацию мастера, а экран
+    переноса ищет свободное время по ключу услуги в каталоге бота. Все три
+    значения едут в строке записи на обоих путях; «пусто» значит «нет»."""
+
+    RAW_PHOTO = "https://storage.example/masters/a.jpg?X-Amz-Signature=abc"
+
+    def test_ayla_path_carries_photo_specialization_and_both_service_keys(
+        self, client, tenant, bot_user, service, master
+    ) -> None:
+        CatalogMaster.all_tenants.filter(id=master.id).update(photo_url=self.RAW_PHOTO)
+        proxy = _proxy(tenant, bot_user, service_id=SERVICE_AYLA_ID, specialist_id=master.id)
+
+        (item,) = _get(client, LIST_URL).json()["items"]
+        assert item["master_specialization"] == "Маникюр"
+        # Адрес фото — наш путь с версией, а не подписанная ссылка хранилища.
+        assert item["master_photo_url"].startswith(f"/api/v1/customer/media/masters/{master.id}/")
+        assert "storage.example" not in item["master_photo_url"]
+        # Два ключа услуги под двумя именами: перенос ждёт id Ayla, ``/slots`` —
+        # ключ каталога бота. Раньше экран слал в ``/slots`` первый.
+        assert item["service_id"] == str(SERVICE_AYLA_ID)
+        assert item["catalog_service_id"] == str(service.id)
+        assert item["catalog_service_id"] != item["service_id"]
+
+        detail = _get(client, f"/api/v1/customer/bookings/{proxy.appointment_id}").json()["booking"]
+        assert detail["master_photo_url"] == item["master_photo_url"]
+        assert detail["catalog_service_id"] == str(service.id)
+
+    def test_ayla_path_without_photo_and_without_mirror_is_empty_not_a_guess(
+        self, client, tenant, bot_user, service, master
+    ) -> None:
+        _proxy(tenant, bot_user, service_id=SERVICE_AYLA_ID, specialist_id=master.id)
+        _proxy(tenant, bot_user, days_ahead=8)  # ни услуги, ни мастера в зеркале
+
+        known, orphan = _get(client, LIST_URL).json()["items"]
+        assert known["master_photo_url"] == ""
+        assert orphan["master_photo_url"] == ""
+        assert orphan["master_specialization"] == ""
+        assert orphan["catalog_service_id"] is None
+
+    @override_settings(BOOKING_VIA_AYLA_REST=False)
+    def test_local_path_carries_the_same_fields(
+        self, client, tenant, bot_user, service, master
+    ) -> None:
+        CatalogMaster.all_tenants.filter(id=master.id).update(photo_url=self.RAW_PHOTO)
+        local = _local_booking(tenant, bot_user, service, master)
+
+        (item,) = _get(client, LIST_URL).json()["items"]
+        assert item["master_specialization"] == "Маникюр"
+        assert item["master_photo_url"].startswith(f"/api/v1/customer/media/masters/{master.id}/")
+        assert item["catalog_service_id"] == item["service_id"] == str(service.id)
+
+        detail = _get(client, f"/api/v1/customer/bookings/{local.id}").json()["booking"]
+        assert detail["master_specialization"] == "Маникюр"
+
+    @override_settings(BOOKING_VIA_AYLA_REST=False)
+    def test_local_list_does_not_pay_a_query_per_row_for_the_master(
+        self, client, tenant, bot_user, service, master
+    ) -> None:
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        _local_booking(tenant, bot_user, service, master, days=3)
+        with CaptureQueriesContext(connection) as one:
+            assert len(_get(client, LIST_URL).json()["items"]) == 1
+        _local_booking(tenant, bot_user, service, master, days=4)
+        _local_booking(tenant, bot_user, service, master, days=5)
+        with CaptureQueriesContext(connection) as three:
+            assert len(_get(client, LIST_URL).json()["items"]) == 3
+        assert len(three) == len(one), (len(one), len(three))
