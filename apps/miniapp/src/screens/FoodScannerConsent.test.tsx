@@ -153,6 +153,14 @@ describe("после согласия — куда (DRF-2954)", () => {
 });
 
 describe("«не смогли спросить» ≠ «согласия нет»", () => {
+  it("сбой чтения согласия навигацию не снимает: стрелка «Назад» на месте (DRF-2954, #1918)", async () => {
+    mockedFetch.mockRejectedValue(new Error("[502] upstream"));
+    renderScreen();
+
+    expect(await screen.findByRole("button", { name: /Повторить|снова/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Назад" })).toBeInTheDocument();
+  });
+
   it("отказ чтения не показывает гейт и не переспрашивает согласие", async () => {
     mockedFetch.mockRejectedValue(new Error("[502] upstream"));
     renderScreen();

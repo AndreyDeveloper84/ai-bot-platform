@@ -147,3 +147,27 @@ describe("фото выключено флагом — DRF-2109", () => {
     expect(screen.getByRole("button", { name: "Написать вручную" })).toBeInTheDocument();
   });
 });
+
+describe("вид ошибки распознавания (DRF-2954)", () => {
+  function badgeOf(heading: HTMLElement): Element | null {
+    return heading.closest("main")?.querySelector(".cr-state__badge") ?? null;
+  }
+
+  it("сбой — красный знак; заголовок получает фокус: экран подменён на месте", async () => {
+    mockedScan.mockRejectedValue(new FoodNotRecognizedError());
+    renderScreen();
+    const heading = await screen.findByRole("heading", { level: 1, name: "Не разобралась" });
+    expect(badgeOf(heading)).toHaveClass("cr-state__badge--danger");
+    expect(heading).toHaveFocus();
+    // Заголовок — один: шапка его не повторяет.
+    expect(screen.getAllByText("Не разобралась")).toHaveLength(1);
+  });
+
+  it("нет разрешения и «выключено» — нейтральный круг, не сбой", async () => {
+    mockedScan.mockRejectedValue(new ApiError(403, "food_diary_consent_required", ""));
+    renderScreen();
+    const consent = await screen.findByRole("heading", { level: 1, name: "Нужно разрешение" });
+    expect(badgeOf(consent)).toHaveClass("cr-state__badge--info");
+    expect(badgeOf(consent)).not.toHaveClass("cr-state__badge--danger");
+  });
+});

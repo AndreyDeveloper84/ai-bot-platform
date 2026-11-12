@@ -28,7 +28,8 @@ export type RecordIconName =
   | "gone"
   | "bowl"
   | "camera"
-  | "text";
+  | "text"
+  | "image";
 
 const PATHS: Record<RecordIconName, ReactNode> = {
   back: <path d="M15 5l-7 7 7 7" />,
@@ -131,6 +132,13 @@ const PATHS: Record<RecordIconName, ReactNode> = {
     <>
       <rect x="4.5" y="3.5" width="15" height="17" rx="2.5" />
       <path d="M8 8.5h8M8 12h8M8 15.5h5" />
+    </>
+  ),
+  image: (
+    <>
+      <rect x="3.5" y="4.5" width="17" height="15" rx="2.5" />
+      <circle cx="9" cy="9.5" r="1.6" />
+      <path d="M4 17.5l5-5 3.5 3.5 2.5-2.5 5 5" />
     </>
   ),
 };

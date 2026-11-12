@@ -21,6 +21,11 @@
  *   ↳ meal-type chip selection (default by local time bucket)
  *   ↳ photo picker (camera OR gallery)
  *   ↳ on file pick → navigate F2 with the photo in router state
+ *
+ * DRF-2954 — вид по доске «Дневник» (кадр 3), решения владельца 12.11: своего
+ * видоискателя нет (п.11) — снимает системная камера; две плитки «Сделать
+ * фото» / «Из галереи», выбор приёма — равными кнопками. Слова, условия и
+ * переходы прежние.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -28,8 +33,6 @@ import { useLocation, useNavigate } from "react-router-dom";
 
 import {
   ImageStripUnsupportedError,
-  MEAL_TYPE_ICON,
-  MEAL_TYPE_LABEL,
   defaultMealTypeForHour,
   fetchDiaryConsentGate,
   grantConsent,
@@ -43,18 +46,14 @@ import {
   DISCLOSURE_HEADLINE,
   FOOD_DIARY_DISCLOSURE_VERSION,
 } from "../lib/food-diary-disclosure";
+import { MealTypePicker } from "../components/diary/MealTypePicker";
+import { DiaryLoadError } from "../components/diary/DiaryState";
+import { RecordIcon } from "../components/records/RecordIcons";
+import { RecordButton } from "../components/records/RecordsState";
 import { Skeleton } from "../components/Skeleton";
 import { MANUAL_ROUTE } from "./FoodScannerManualScreen";
-import { StateError } from "../components/StateError";
 import { useScreenBack } from "../hooks/useScreenBack";
 import { backToOrigin } from "../lib/screen-back";
-
-const MEAL_TYPES: ReadonlyArray<MealType> = [
-  "breakfast",
-  "lunch",
-  "dinner",
-  "snack",
-];
 
 interface RouterIn {
   /** When set, consent-accept bounces back here instead of staying on F1. */
@@ -233,17 +232,34 @@ export function FoodScannerCaptureScreen() {
   //   ошибка чтения — «не смогли спросить»: говорим об этом и даём
   //                   повтор, но согласие НЕ переспрашиваем;
   //   `null`      — согласия нет: гейт.
+  // Шапка со стрелкой — и на загрузке, и на сбое: ошибка навигацию не
+  // снимает (#1918).
+  const topbar = (
+    <header className="cr-topbar diary-topbar">
+      <button type="button" className="cr-back" aria-label="Назад" onClick={onBack}>
+        <RecordIcon name="back" size={24} />
+      </button>
+      <h1 className="diary-topbar__title">Скан еды</h1>
+    </header>
+  );
+
   if (consentErr !== null) {
     return (
-      <div className="food-scanner-screen">
-        <StateError err={consentErr} onRetry={loadConsent} />
+      <div className="cr-screen cr-screen--nested diary-screen">
+        {topbar}
+        <main className="diary-main">
+          <DiaryLoadError err={consentErr} onRetry={() => void loadConsent()} />
+        </main>
       </div>
     );
   }
   if (consentAt === undefined) {
     return (
-      <div className="food-scanner-screen">
-        <Skeleton width="70%" height="1.1em" />
+      <div className="cr-screen cr-screen--nested diary-screen">
+        {topbar}
+        <main className="diary-main">
+          <Skeleton width="70%" height="1.1em" />
+        </main>
       </div>
     );
   }
@@ -259,153 +275,96 @@ export function FoodScannerCaptureScreen() {
   }
 
   return (
-    <div className="food-scanner-screen">
-      <header className="records-screen__header">
-        <button
-          type="button"
-          className="records-screen__back"
-          aria-label="Назад"
-          onClick={onBack}
-        >
-          <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
-            <path
-              d="M12 4l-6 6 6 6"
-              stroke="currentColor"
-              strokeWidth="2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            />
-          </svg>
-        </button>
-        <h1 className="records-screen__title">Скан еды</h1>
-      </header>
+    <div className="cr-screen cr-screen--nested diary-screen">
+      {topbar}
 
-      {offline && (
-        <div className="records-screen__offline-banner" role="status">
-          Для распознавания нужна сеть. Попробуй когда вернётся.
-        </div>
-      )}
+      <main className="diary-main">
+        {offline && (
+          <p className="diary-notice diary-notice--offline" role="status">
+            <RecordIcon name="offline" />
+            <span className="diary-notice__text">
+              Для распознавания нужна сеть. Попробуй когда вернётся.
+            </span>
+          </p>
+        )}
 
-      <main className="food-scanner-screen__main">
-        <h2 className="food-scanner-screen__greeting">Что ешь сейчас?</h2>
+        <h2 className="diary-lead">Что ешь сейчас?</h2>
 
-        <section
-          className="food-scanner-screen__section"
-          aria-labelledby="food-meal-type-h2"
-        >
-          <h3
-            id="food-meal-type-h2"
-            className="food-scanner-screen__section-heading"
-          >
+        <section className="diary-section" aria-labelledby="food-meal-type-h2">
+          <h3 id="food-meal-type-h2" className="diary-section__heading">
             Когда
           </h3>
-          <div
-            className="food-scanner-screen__meal-chips"
-            role="radiogroup"
-            aria-labelledby="food-meal-type-h2"
-          >
-            {MEAL_TYPES.map((mt) => (
-              <button
-                key={mt}
-                type="button"
-                role="radio"
-                aria-checked={mealType === mt}
-                className={`food-scanner-screen__chip${
-                  mealType === mt ? " food-scanner-screen__chip--active" : ""
-                }`}
-                onClick={() => setMealType(mt)}
-              >
-                <span aria-hidden="true">{MEAL_TYPE_ICON[mt]}</span>
-                <span>{MEAL_TYPE_LABEL[mt]}</span>
-              </button>
-            ))}
-          </div>
+          <MealTypePicker value={mealType} onChange={setMealType} labelledBy="food-meal-type-h2" />
         </section>
 
-        <section
-          className="food-scanner-screen__section"
-          aria-labelledby="food-photo-h2"
-        >
-          <h3
-            id="food-photo-h2"
-            className="food-scanner-screen__section-heading"
-          >
+        <section className="diary-section" aria-labelledby="food-photo-h2">
+          <h3 id="food-photo-h2" className="diary-section__heading">
             Фото
           </h3>
-          <div className="food-scanner-screen__capture-zone">
-            <p className="food-scanner-screen__capture-hint">
-              Сделай фото или выбери из галереи
-            </p>
-            <div
-              className="food-scanner-screen__capture-actions"
-              aria-busy={processing}
+          <p className="diary-caption">Сделай фото или выбери из галереи</p>
+          <div className="diary-ways" aria-busy={processing}>
+            <button
+              type="button"
+              className="diary-way"
+              disabled={offline || processing}
+              onClick={() => cameraInputRef.current?.click()}
             >
-              <button
-                type="button"
-                className="btn-primary food-scanner-screen__capture-btn"
-                disabled={offline || processing}
-                onClick={() => cameraInputRef.current?.click()}
-              >
+              <span className="diary-way__icon">
+                <RecordIcon name="camera" size={28} />
+              </span>
+              <span className="diary-way__label">
                 {processing ? "Обрабатываю фото…" : "Сделать фото"}
-              </button>
-              <button
-                type="button"
-                className="btn-secondary food-scanner-screen__capture-btn"
-                disabled={offline || processing}
-                onClick={() => galleryInputRef.current?.click()}
-              >
-                Из галереи
-              </button>
-            </div>
-            {/* Camera input — iOS uses `capture` to open the native
-                Camera app; if ignored (some iOS Safari versions),
-                falls back to file picker silently. */}
-            <input
-              ref={cameraInputRef}
-              type="file"
-              accept="image/*"
-              capture="environment"
-              style={{ display: "none" }}
-              onChange={(e) => handleFile(e.target.files?.[0])}
-              aria-hidden="true"
-            />
-            <input
-              ref={galleryInputRef}
-              type="file"
-              accept="image/*"
-              style={{ display: "none" }}
-              onChange={(e) => handleFile(e.target.files?.[0])}
-              aria-hidden="true"
-            />
+              </span>
+            </button>
+            <button
+              type="button"
+              className="diary-way"
+              disabled={offline || processing}
+              onClick={() => galleryInputRef.current?.click()}
+            >
+              <span className="diary-way__icon">
+                <RecordIcon name="image" size={28} />
+              </span>
+              <span className="diary-way__label">Из галереи</span>
+            </button>
           </div>
+          {/* Camera input — iOS uses `capture` to open the native
+              Camera app; if ignored (some iOS Safari versions),
+              falls back to file picker silently. */}
+          <input
+            ref={cameraInputRef}
+            type="file"
+            accept="image/*"
+            capture="environment"
+            style={{ display: "none" }}
+            onChange={(e) => handleFile(e.target.files?.[0])}
+            aria-hidden="true"
+          />
+          <input
+            ref={galleryInputRef}
+            type="file"
+            accept="image/*"
+            style={{ display: "none" }}
+            onChange={(e) => handleFile(e.target.files?.[0])}
+            aria-hidden="true"
+          />
         </section>
 
         {error && (
-          <div
-            className="callout callout--danger food-scanner-screen__error"
-            role="alert"
-          >
+          <p className="diary-alert" role="alert">
             {error}
-          </div>
+          </p>
         )}
 
         {/* DRF-2289 — фото не единственный путь: вход с Главной ведёт
-            сюда, а ввод текстом — эта ссылка. Подпись — черновик для
-            владельца. */}
-        <button
-          type="button"
-          className="food-scanner-screen__text-link"
-          disabled={processing}
-          onClick={() => navigate(MANUAL_ROUTE)}
-        >
+            сюда, а ввод текстом — эта кнопка. */}
+        <RecordButton variant="soft" icon="text" disabled={processing} onClick={() => navigate(MANUAL_ROUTE)}>
           Записать текстом
-        </button>
+        </RecordButton>
 
         {/* DRF-2869 — здесь стояло «…— удаляю сразу». Снимок хранится по
             сроку, а не удаляется сразу; обещание убрано. */}
-        <p className="food-scanner-screen__privacy">
-          Фото нужно только чтобы узнать блюдо.
-        </p>
+        <p className="diary-privacy">Фото нужно только чтобы узнать блюдо.</p>
       </main>
     </div>
   );
@@ -442,54 +401,38 @@ function ConsentGate({
   onDecline: () => void;
 }) {
   return (
-    <div className="food-scanner-screen">
-      <header className="records-screen__header">
-        <button
-          type="button"
-          className="records-screen__back"
-          aria-label="Назад"
-          onClick={onBack}
-        >
-          <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
-            <path
-              d="M12 4l-6 6 6 6"
-              stroke="currentColor"
-              strokeWidth="2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            />
-          </svg>
+    <div className="cr-screen cr-screen--nested diary-screen">
+      <header className="cr-topbar diary-topbar">
+        <button type="button" className="cr-back" aria-label="Назад" onClick={onBack}>
+          <RecordIcon name="back" size={24} />
         </button>
-        <h1 className="records-screen__title">Скан еды</h1>
+        <h1 className="diary-topbar__title">Скан еды</h1>
       </header>
-      <main className="food-scanner-screen__main">
-        <section
-          className="food-scanner-consent"
-          aria-labelledby="food-consent-h2"
-        >
+      <main className="diary-main">
+        <section className="diary-consent" aria-labelledby="food-consent-h2">
+          <span className="cr-state__badge cr-state__badge--accent diary-consent__badge">
+            <RecordIcon name="lock" size={36} />
+          </span>
           {canonical ? (
             <>
-              <h2 id="food-consent-h2" className="food-scanner-consent__headline">
+              <h2 id="food-consent-h2" className="diary-consent__headline">
                 {DISCLOSURE_HEADLINE}
               </h2>
               {/* Текст берётся из единственного источника, а не пишется здесь:
                   Gate A требует совпадения на всех поверхностях, а скопированный
                   абзац расходится с оригиналом молча. */}
               {DISCLOSURE_BODY.map((paragraph) => (
-                <p className="food-scanner-consent__body" key={paragraph}>
+                <p className="diary-consent__body" key={paragraph}>
                   {paragraph}
                 </p>
               ))}
-              <p
-                className="food-scanner-consent__version"
-                data-testid="food-diary-disclosure-version"
-              >
+              <p className="diary-consent__version" data-testid="food-diary-disclosure-version">
                 {FOOD_DIARY_DISCLOSURE_VERSION}
               </p>
             </>
           ) : (
             <>
-              <h2 id="food-consent-h2" className="food-scanner-consent__headline">
+              <h2 id="food-consent-h2" className="diary-consent__headline">
                 Можно показать тебе фото-скан?
               </h2>
               {/* DRF-2869 — здесь стояло «Удаляю фото сразу после
@@ -498,31 +441,23 @@ function ConsentGate({
                   обещать немедленное удаление владелец запретил прямо.
                   Обещание убрано; сколько снимок живёт, говорит раскрытие
                   дневника — его включение без флага не дело этого экрана. */}
-              <p className="food-scanner-consent__body">
+              <p className="diary-consent__body">
                 Я возьму фото только чтобы узнать блюдо — посчитаю примерные
                 калории и БЖУ. Мастер и салон его не видят.
               </p>
             </>
           )}
-          <p className="food-scanner-consent__body">
+          <p className="diary-consent__body">
             Если ты не хочешь — это нормально. Можно вернуться на главную
             и продолжать без сканера.
           </p>
-          <div className="food-scanner-consent__actions">
-            <button
-              type="button"
-              className="btn-primary food-scanner-consent__accept"
-              onClick={onAccept}
-            >
+          <div className="cr-actions diary-actions">
+            <RecordButton variant="primary" onClick={onAccept}>
               {canonical ? BUTTON_GRANT : "Хорошо, разрешаю"}
-            </button>
-            <button
-              type="button"
-              className="btn-secondary"
-              onClick={onDecline}
-            >
+            </RecordButton>
+            <RecordButton variant="soft" onClick={onDecline}>
               {canonical ? BUTTON_DECLINE : "Не сейчас"}
-            </button>
+            </RecordButton>
           </div>
         </section>
       </main>

@@ -86,6 +86,23 @@ describe("FoodScannerResultScreen — запись по скану", () => {
     expect(await screen.findByText("saved-screen")).toBeInTheDocument();
   });
 
+  it("выбор приёма — радиогруппа с одним выбранным; «Ужин» уходит в запись (DRF-2954)", async () => {
+    renderResult();
+    const group = await screen.findByRole("radiogroup", { name: "Когда" });
+    const checked = () =>
+      Array.from(group.querySelectorAll('[role="radio"]')).filter(
+        (r) => r.getAttribute("aria-checked") === "true",
+      );
+    expect(checked().map((r) => r.textContent)).toEqual(["Обед"]);
+
+    fireEvent.click(screen.getByRole("radio", { name: "Ужин" }));
+    expect(checked().map((r) => r.textContent)).toEqual(["Ужин"]);
+    fireEvent.click(screen.getByRole("button", { name: /Записать в дневник/ }));
+
+    await waitFor(() => expect(mockedLog).toHaveBeenCalledTimes(1));
+    expect(mockedLog.mock.calls[0]?.[0]?.meal_type).toBe("dinner");
+  });
+
   it("переименование оставляет scan_id рядом с новым названием", async () => {
     renderResult();
     fireEvent.click(await screen.findByRole("button", { name: "Уточнить" }));

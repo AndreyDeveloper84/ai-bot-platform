@@ -17,14 +17,18 @@
  * Per spec §6 + memory `project_cross_domain_insight_safety_gap` —
  * REMOVED from MVP. Anti-medical safety filter not in production yet.
  * Re-introduce post-pilot after Alpha safety audit.
+ *
+ * DRF-2954 — вид по доске «Дневник» (кадр 8), решение владельца 12.11 п.7:
+ * экран остаётся «Записано», слова прежние; галочка в круге, итог блюда и
+ * «Сегодня» карточками. Полоса — только при ориентире (§82, §85).
  */
 
 import { useCallback, useEffect, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 
-import { StateError } from "../components/StateError";
-import {
-} from "../lib/food-scanner";
+import { DiaryLoadError } from "../components/diary/DiaryState";
+import { RecordIcon } from "../components/records/RecordIcons";
+import { RecordButton } from "../components/records/RecordsState";
 import {
   DIARY_OFF_TEXT,
   diaryIsOff,
@@ -104,52 +108,26 @@ export function FoodScannerSavedScreen() {
       : null;
 
   return (
-    <div className="food-scanner-screen">
-      <header className="records-screen__header">
-        <button
-          type="button"
-          className="records-screen__back"
-          aria-label="На главную"
-          onClick={onBack}
-        >
-          <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
-            <path
-              d="M12 4l-6 6 6 6"
-              stroke="currentColor"
-              strokeWidth="2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            />
-          </svg>
+    <div className="cr-screen cr-screen--nested diary-screen">
+      <header className="cr-topbar diary-topbar">
+        <button type="button" className="cr-back" aria-label="На главную" onClick={onBack}>
+          <RecordIcon name="back" size={24} />
         </button>
-        <h1 className="records-screen__title">Записано</h1>
+        <h1 className="diary-topbar__title">Записано</h1>
       </header>
 
-      <main className="food-scanner-screen__main">
-        <div className="food-scanner-saved__check" role="status">
-          <svg width="32" height="32" viewBox="0 0 32 32" fill="none">
-            <circle
-              cx="16"
-              cy="16"
-              r="14"
-              stroke="currentColor"
-              strokeWidth="2"
-            />
-            <path
-              d="M9 16l5 5 9-10"
-              stroke="currentColor"
-              strokeWidth="2.5"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            />
-          </svg>
-          <span className="food-scanner-saved__check-text">Записала</span>
+      <main className="diary-main">
+        <div className="diary-saved__check" role="status">
+          <span className="diary-saved__badge">
+            <RecordIcon name="check" size={40} />
+          </span>
+          <span className="diary-saved__check-text">Записала</span>
         </div>
 
         {edMode ? (
-          <p className="food-scanner-saved__recap">{dishName} — записала.</p>
+          <p className="diary-saved__recap">{dishName} — записала.</p>
         ) : (
-          <p className="food-scanner-saved__recap">
+          <p className="diary-saved__recap">
             {dishName}
             {recapCalories != null ? ` — ~${recapCalories} ккал.` : "."}
           </p>
@@ -159,57 +137,50 @@ export function FoodScannerSavedScreen() {
             с маркером и без чисел (edMode остаётся true — ключа нет). Не сбой,
             повтор ничего не даст; «записала» выше остаётся правдой. */}
         {diaryOff && (
-          <p className="food-scanner-saved__recap" role="status">{DIARY_OFF_TEXT}</p>
+          <p className="diary-caption" role="status">
+            {DIARY_OFF_TEXT}
+          </p>
         )}
 
         {!edMode && (
-          <section
-            className="food-scanner-saved__daily"
-            aria-labelledby="food-saved-daily-h2"
-          >
-            <h2
-              id="food-saved-daily-h2"
-              className="food-scanner-screen__section-heading"
-            >
+          <section className="diary-totals" aria-labelledby="food-saved-daily-h2">
+            <h2 id="food-saved-daily-h2" className="diary-group__heading">
               Сегодня
             </h2>
-            {err !== null && <StateError err={err} onRetry={load} />}
+            {err !== null && <DiaryLoadError err={err} onRetry={load} />}
             {err === null && summary && (
               <>
                 {eaten !== undefined && (
-                  <p className="food-scanner-saved__total" data-testid="saved-kcal-total">
+                  <p className="diary-totals__total" data-testid="saved-kcal-total">
                     {target !== undefined ? `${approx}${eaten} / ${target} ккал` : `${approx}${eaten} ккал`}
                     {marks.approx ? `, ${KCAL_TOTAL_AI_NOTE}` : ""}
                   </p>
                 )}
                 {eaten === undefined && marks.incomplete && (
-                  <p className="food-scanner-saved__total" data-testid="saved-kcal-total">
+                  <p className="diary-totals__total" data-testid="saved-kcal-total">
                     {KCAL_TOTAL_UNKNOWN}
                   </p>
                 )}
                 {eaten !== undefined && marks.incomplete && (
-                  <p className="food-scanner-saved__macros">{KCAL_TOTAL_INCOMPLETE}</p>
+                  <p className="diary-totals__note">{KCAL_TOTAL_INCOMPLETE}</p>
                 )}
                 {progressPct !== null && (
                   <>
                     <div
-                      className="food-scanner-saved__bar"
+                      className="diary-bar"
                       role="progressbar"
                       aria-valuenow={progressPct}
                       aria-valuemin={0}
                       aria-valuemax={100}
                       aria-label={`Прогресс по калориям: ${progressPct} процентов`}
                     >
-                      <div
-                        className="food-scanner-saved__bar-fill"
-                        style={{ width: `${progressPct}%` }}
-                      />
+                      <div className="diary-bar__fill" style={{ width: `${progressPct}%` }} />
                     </div>
-                    <p className="food-scanner-saved__pct">{progressPct} %</p>
+                    <p className="diary-totals__note">{progressPct} %</p>
                   </>
                 )}
                 {summary.pfc && (
-                  <p className="food-scanner-saved__macros">
+                  <p className="diary-totals__note">
                     Б {summary.pfc.protein_g} · Ж {summary.pfc.fat_g} · У{" "}
                     {summary.pfc.carbs_g} г
                   </p>
@@ -219,25 +190,20 @@ export function FoodScannerSavedScreen() {
           </section>
         )}
 
-        <div className="food-scanner-screen__cta-stack">
+        <div className="cr-actions diary-actions">
           {/* DRF-2071 — при выключенном контуре дневник не открывается:
               кнопка вела бы на экран с той же фразой «недоступен». */}
           {!diaryOff && (
-            <button
-              type="button"
-              className="btn-primary"
-              onClick={() => navigate("/customer/food-scanner/diary")}
-            >
+            <RecordButton variant="primary" onClick={() => navigate("/customer/food-scanner/diary")}>
               Открыть дневник
-            </button>
+            </RecordButton>
           )}
-          <button
-            type="button"
-            className="btn-secondary"
+          <RecordButton
+            variant="soft"
             onClick={() => navigate(originFrom(location.state) ?? "/customer/main")}
           >
             Готово
-          </button>
+          </RecordButton>
         </div>
       </main>
     </div>

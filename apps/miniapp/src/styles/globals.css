@@ -7618,430 +7618,14 @@ a {
   border: 0;
 }
 
-/* ──────────────────────────────────────────────────────────────────
- * Customer food scanner (Tier 1 Priority 7 Phase B) — Tau F1-F4
- * wizard + /дневник + manual fallback per docs/screens/customer-
- * food-scanner-flow.md. WCAG 2.2 AA inline via radio group, role=
- * status on F2, prefers-reduced-motion gate on F2 pulsing dots.
- * ────────────────────────────────────────────────────────────────── */
-
-.food-scanner-screen {
-  min-height: 100vh;
-  background: var(--c-bg);
-  color: var(--c-text-primary);
-}
-/* DRF-2201 — экран-корень вкладки несёт нижнюю панель: контент не должен
-   уезжать под неё. Высота панели — та же, что у `.wellness-dash__nav`, и та
-   же запись, что у `.records-screen` / `.profile-screen`. */
-.food-scanner-screen--tab-root {
-  padding-bottom: calc(56px + var(--safe-bottom) + var(--s-3));
-}
-/* Отступ под панель уже дан выше; у `__main` он тогда лишний — иначе
-   `--safe-bottom` считается дважды и под последним элементом остаётся
-   пустая полоса (на экранах без панели `__main` свой отступ сохраняет). */
-.food-scanner-screen--tab-root .food-scanner-screen__main {
-  padding-bottom: var(--s-4);
-}
-.food-scanner-screen__main {
-  padding: var(--s-3) var(--s-4) calc(var(--s-6) + var(--safe-bottom));
-  display: flex;
-  flex-direction: column;
-  gap: var(--s-4);
-}
-.food-scanner-screen__greeting {
-  margin: 0;
-  font-size: var(--font-size-400, 1.5rem);
-  font-weight: 600;
-  color: var(--c-text-primary);
-}
-.food-scanner-screen__section {
-  background: var(--c-surface-1);
-  border: 1px solid var(--c-divider);
-  border-radius: var(--r-md);
-  padding: var(--s-3) var(--s-4);
-  display: flex;
-  flex-direction: column;
-  gap: var(--s-2);
-}
-/* DRF-2091 — запись еды текстом: карточка «Я распознала так». */
-.food-text-card {
-  display: flex;
-  flex-direction: column;
-  gap: var(--s-1);
-}
-
-.food-text-card__line {
-  margin: 0;
-  font-size: var(--font-size-200);
-  color: var(--c-text-primary);
-}
-
-.food-text-card__grams {
-  display: flex;
-  flex-direction: column;
-  gap: var(--s-2);
-}
-
-.food-scanner-screen__hint {
-  margin: var(--s-1) 0 0;
-  font-size: var(--font-size-100);
-  color: var(--c-text-secondary);
-}
-
-.food-scanner-screen__section-heading {
-  margin: 0;
-  font-size: var(--font-size-200);
-  font-weight: 600;
-  color: var(--c-text-secondary);
-  letter-spacing: 0.02em;
-  text-transform: none;
-}
-.food-scanner-screen__error {
-  margin: 0;
-}
-/* DRF-2289 — «Записать текстом» под съёмкой: ссылка, не третья кнопка. */
-.food-scanner-screen__text-link {
-  align-self: center;
-  background: transparent;
-  border: none;
-  color: var(--c-accent);
-  padding: var(--s-2) var(--s-1);
-  min-height: 44px;
-  font-family: var(--font-sans);
-  font-size: var(--font-size-200);
-  font-weight: 500;
-  cursor: pointer;
-}
-.food-scanner-screen__text-link:focus-visible {
-  outline: 2px solid var(--c-accent);
-  outline-offset: 2px;
-  border-radius: var(--r-sm);
-}
-.food-scanner-screen__text-link:disabled {
-  opacity: 0.5;
-  cursor: default;
-}
-.food-scanner-screen__privacy {
-  margin: 0;
-  font-size: var(--font-size-100);
-  color: var(--c-text-secondary);
-  text-align: center;
-}
+/* Остатки прежнего сканера еды (DRF-2954, часть 2 перевела экраны на
+   `diary-*`): столбец кнопок — экран цели, лист «Что поправить?» —
+   результат распознавания, уведомление — «Мой план». */
 .food-scanner-screen__cta-stack {
   display: flex;
   flex-direction: column;
   gap: var(--s-2);
   margin-top: var(--s-3);
-}
-
-/* Meal-type chips (F1 + F3 + manual entry) */
-.food-scanner-screen__meal-chips {
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: var(--s-2);
-}
-@media (max-width: 360px) {
-  .food-scanner-screen__meal-chips {
-    grid-template-columns: repeat(2, 1fr);
-  }
-}
-.food-scanner-screen__chip {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 4px;
-  padding: var(--s-2);
-  min-height: 64px;
-  background: var(--c-surface-2);
-  border: 1px solid var(--c-divider);
-  border-radius: var(--r-md);
-  color: var(--c-text-primary);
-  font-size: var(--font-size-100);
-  cursor: pointer;
-}
-.food-scanner-screen__chip:focus-visible {
-  outline: 2px solid var(--c-accent);
-  outline-offset: 2px;
-}
-.food-scanner-screen__chip--active {
-  background: color-mix(in srgb, var(--c-success) 14%, var(--c-surface-1));
-  border-color: var(--c-success);
-  color: var(--c-text-primary);
-  font-weight: 600;
-}
-
-/* F1 capture zone */
-.food-scanner-screen__capture-zone {
-  display: flex;
-  flex-direction: column;
-  gap: var(--s-3);
-  padding: var(--s-3) 0;
-}
-.food-scanner-screen__capture-hint {
-  margin: 0;
-  font-size: var(--font-size-200);
-  color: var(--c-text-secondary);
-  text-align: center;
-}
-.food-scanner-screen__capture-actions {
-  display: flex;
-  flex-direction: column;
-  gap: var(--s-2);
-}
-.food-scanner-screen__capture-btn {
-  min-height: 48px;
-  width: 100%;
-}
-
-/* F0 consent gate */
-.food-scanner-consent {
-  background: var(--c-surface-1);
-  border: 1px solid var(--c-divider);
-  border-radius: var(--r-md);
-  padding: var(--s-4);
-  display: flex;
-  flex-direction: column;
-  gap: var(--s-3);
-}
-.food-scanner-consent__headline {
-  margin: 0;
-  font-size: var(--font-size-300);
-  font-weight: 600;
-  color: var(--c-text-primary);
-}
-.food-scanner-consent__body {
-  margin: 0;
-  font-size: var(--font-size-200);
-  color: var(--c-text-secondary);
-  line-height: var(--leading-normal);
-}
-/* Версия раскрытия под текстом согласия — Z9. Строка служебная: человек
-   читает её, только если ищет, ПОЭТОМУ она приглушена и мельче тела. Но
-   она обязана быть видимой и контрастной — это единственное место, где
-   видно, на какой именно текст человек согласился. */
-.food-scanner-consent__version {
-  margin: 0;
-  font-size: var(--font-size-100);
-  color: var(--c-text-secondary);
-}
-.food-scanner-consent__actions {
-  display: flex;
-  flex-direction: column;
-  gap: var(--s-2);
-  margin-top: var(--s-2);
-}
-.food-scanner-consent__accept {
-  min-height: 48px;
-}
-
-/* F2 processing */
-.food-scanner-processing {
-  align-items: center;
-  text-align: center;
-}
-.food-scanner-processing__preview {
-  width: 140px;
-  height: 140px;
-  border-radius: var(--r-md);
-  overflow: hidden;
-  background: var(--c-surface-2);
-  border: 1px solid var(--c-divider);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-.food-scanner-processing__photo {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-}
-.food-scanner-processing__line {
-  margin: 0;
-  font-size: var(--font-size-300);
-  font-weight: 600;
-  color: var(--c-text-primary);
-}
-.food-scanner-processing__dots {
-  display: inline-flex;
-  gap: 6px;
-  margin-top: var(--s-2);
-}
-.food-scanner-processing__dots span {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--c-success);
-  animation: foodDotPulse 1.4s ease-in-out infinite both;
-}
-.food-scanner-processing__dots span:nth-child(2) {
-  animation-delay: 0.2s;
-}
-.food-scanner-processing__dots span:nth-child(3) {
-  animation-delay: 0.4s;
-}
-@keyframes foodDotPulse {
-  0%,
-  80%,
-  100% {
-    transform: scale(0.7);
-    opacity: 0.5;
-  }
-  40% {
-    transform: scale(1.1);
-    opacity: 1;
-  }
-}
-@media (prefers-reduced-motion: reduce) {
-  .food-scanner-processing__dots span {
-    animation: none;
-    opacity: 0.85;
-  }
-}
-.food-scanner-processing__hint {
-  margin: var(--s-3) 0 0;
-  font-size: var(--font-size-200);
-  color: var(--c-text-secondary);
-  max-width: 320px;
-}
-.food-scanner-processing__cancel {
-  min-height: 44px;
-}
-
-/* F3 result */
-.food-scanner-result__photo-row {
-  display: flex;
-  justify-content: center;
-}
-.food-scanner-result__photo {
-  width: 80px;
-  height: 80px;
-  border-radius: var(--r-md);
-  object-fit: cover;
-  border: 1px solid var(--c-divider);
-}
-.food-scanner-result__lead {
-  margin: 0;
-  font-size: var(--font-size-300);
-  font-weight: 600;
-  color: var(--c-text-primary);
-}
-.food-scanner-result__hedge {
-  margin: 0;
-  font-size: var(--font-size-200);
-  color: var(--c-text-secondary);
-  font-style: italic;
-}
-.food-scanner-result__name-input {
-  width: 100%;
-  font: inherit;
-  padding: var(--s-2) var(--s-3);
-  border: 1px solid var(--c-divider);
-  border-radius: var(--r-sm);
-  background: var(--c-surface-1);
-  color: var(--c-text-primary);
-}
-.food-scanner-result__metrics {
-  background: var(--c-surface-1);
-  border: 1px solid var(--c-divider);
-  border-radius: var(--r-md);
-  padding: var(--s-3) var(--s-4);
-  display: flex;
-  flex-direction: column;
-  gap: var(--s-2);
-}
-.food-scanner-result__portion-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--s-3);
-}
-.food-scanner-result__portion-label {
-  font-size: var(--font-size-200);
-  color: var(--c-text-primary);
-}
-.food-scanner-result__portion-controls {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--s-2);
-}
-.food-scanner-result__portion-btn {
-  width: 44px;
-  height: 44px;
-  border-radius: var(--r-md);
-  background: var(--c-surface-2);
-  border: 1px solid var(--c-divider);
-  font-size: var(--font-size-300);
-  font-weight: 600;
-  color: var(--c-text-primary);
-  cursor: pointer;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-}
-.food-scanner-result__portion-btn:focus-visible {
-  outline: 2px solid var(--c-accent);
-  outline-offset: 2px;
-}
-.food-scanner-result__portion-btn:disabled {
-  opacity: 0.4;
-  cursor: not-allowed;
-}
-.food-scanner-result__portion-value {
-  min-width: 60px;
-  text-align: center;
-  font-weight: 600;
-  color: var(--c-text-primary);
-}
-.food-scanner-result__nutrition {
-  display: flex;
-  flex-direction: column;
-  gap: var(--s-1);
-  border-top: 1px solid var(--c-divider);
-  padding-top: var(--s-2);
-}
-.food-scanner-result__calories {
-  margin: 0;
-  font-size: var(--font-size-200);
-  font-weight: 600;
-  color: var(--c-text-primary);
-}
-.food-scanner-result__macros {
-  margin: 0;
-  font-size: var(--font-size-200);
-  color: var(--c-text-secondary);
-}
-.food-scanner-result__ed-note {
-  margin: 0;
-  font-size: var(--font-size-200);
-  color: var(--c-text-secondary);
-}
-.food-scanner-result__note {
-  width: 100%;
-  font: inherit;
-  resize: vertical;
-  min-height: 56px;
-  padding: var(--s-2) var(--s-3);
-  border: 1px solid var(--c-divider);
-  border-radius: var(--r-sm);
-  background: var(--c-surface-1);
-  color: var(--c-text-primary);
-}
-.food-scanner-result__beauty {
-  background: color-mix(in srgb, var(--c-success) 8%, var(--c-surface-1));
-  border-radius: var(--r-md);
-  padding: var(--s-3) var(--s-4);
-  display: flex;
-  flex-direction: column;
-  gap: var(--s-2);
-}
-.food-scanner-result__beauty-line {
-  margin: 0;
-  font-size: var(--font-size-200);
-  color: var(--c-text-primary);
-  line-height: var(--leading-normal);
-}
-.food-scanner-result__cta--hint {
-  border-color: var(--c-success);
 }
 
 /* F3-Clarify modal extras (reuses .profile-support-backdrop/sheet) */
@@ -8060,314 +7644,6 @@ a {
   margin-top: var(--s-2);
 }
 
-/* F4 saved */
-.food-scanner-saved__check {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--s-2);
-  align-self: center;
-  color: var(--c-success);
-  font-size: var(--font-size-300);
-  font-weight: 600;
-}
-.food-scanner-saved__check-text {
-  font-size: var(--font-size-300);
-  font-weight: 600;
-}
-.food-scanner-saved__recap {
-  margin: 0;
-  text-align: center;
-  font-size: var(--font-size-200);
-  color: var(--c-text-primary);
-}
-.food-scanner-saved__daily {
-  background: var(--c-surface-1);
-  border: 1px solid var(--c-divider);
-  border-radius: var(--r-md);
-  padding: var(--s-3) var(--s-4);
-  display: flex;
-  flex-direction: column;
-  gap: var(--s-2);
-}
-.food-scanner-saved__total {
-  margin: 0;
-  font-size: var(--font-size-300);
-  font-weight: 600;
-  color: var(--c-text-primary);
-}
-.food-scanner-saved__bar {
-  position: relative;
-  width: 100%;
-  height: 8px;
-  background: var(--c-divider);
-  border-radius: 4px;
-  overflow: hidden;
-}
-.food-scanner-saved__bar-fill {
-  height: 100%;
-  background: var(--c-success);
-  border-radius: 4px;
-  transition: width 240ms ease;
-}
-@media (prefers-reduced-motion: reduce) {
-  .food-scanner-saved__bar-fill {
-    transition: none;
-  }
-}
-.food-scanner-saved__pct {
-  margin: 0;
-  font-size: var(--font-size-200);
-  color: var(--c-text-secondary);
-}
-.food-scanner-saved__macros {
-  margin: 0;
-  font-size: var(--font-size-200);
-  color: var(--c-text-secondary);
-}
-
-/* /дневник */
-.food-scanner-diary__skeleton {
-  background: var(--c-surface-1);
-  border: 1px solid var(--c-divider);
-  border-radius: var(--r-md);
-  padding: var(--s-3) var(--s-4);
-}
-.food-scanner-diary__caption {
-  margin: 0;
-  font-size: var(--font-size-200);
-  color: var(--c-text-secondary);
-}
-/* «Ответ пришёл, но записей в нём нет» — своё состояние, не ошибка и
-   не пустой день. Выглядит как карточка соседних групп, чтобы человек
-   читал это как часть дневника, а не как сломанный экран. */
-.food-scanner-diary__unreadable {
-  background: var(--c-surface-1);
-  border: 1px solid var(--c-divider);
-  border-radius: var(--r-md);
-  padding: var(--s-4);
-  display: flex;
-  flex-direction: column;
-  gap: var(--s-2);
-  align-items: flex-start;
-}
-.food-scanner-diary__unreadable p {
-  margin: 0;
-  font-size: var(--font-size-200);
-  color: var(--c-text-primary);
-}
-.food-scanner-diary__unreadable-hint {
-  color: var(--c-text-secondary);
-}
-
-.food-scanner-diary__group {
-  background: var(--c-surface-1);
-  border: 1px solid var(--c-divider);
-  border-radius: var(--r-md);
-  padding: var(--s-3) var(--s-4);
-  display: flex;
-  flex-direction: column;
-  gap: var(--s-2);
-}
-.food-scanner-diary__group-heading {
-  margin: 0;
-  font-size: var(--font-size-200);
-  font-weight: 600;
-  color: var(--c-text-primary);
-}
-.food-scanner-diary__list {
-  margin: 0;
-  padding: 0;
-  list-style: none;
-  display: flex;
-  flex-direction: column;
-  gap: var(--s-1);
-}
-.food-scanner-diary__entry {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--s-2);
-  padding: var(--s-2) 0;
-  border-bottom: 1px solid var(--c-divider);
-}
-.food-scanner-diary__entry:last-child {
-  border-bottom: none;
-}
-.food-scanner-diary__entry-main {
-  display: flex;
-  align-items: baseline;
-  gap: var(--s-2);
-  flex: 1 1 auto;
-  min-width: 0;
-}
-/* DRF-2455 — миниатюра блюда слева в строке дневника (решение владельца
-   28.09, п.14: «небольшая миниатюра слева, данные справа, дневник остаётся
-   компактным списком»). Вида в словаре не было. С макета (экран 2
-   «Ближайшая запись» презентации клиента) взяты ПРОПОРЦИЯ снимка
-   116:68 = 1,71 и зазор до текста 16 pt; высота — по списку (решение
-   главного окна 28.09, §6-омега-кватер): 82×48, строка растёт с 36 до 64 px, а не вдвое.
-   Отступление от буквальной геометрии экрана 2 вынесено владельцу.
-
-   Раскладка — МОДИФИКАТОР строки, а не `:has(> img)`: нижний порог движка
-   вебвью MAX не измерен, а модификатор проверяем без этого знания. Строка
-   без модификатора (записи без фото и старше 30 суток) не получает ни
-   одного нового объявления — рефакторинг ≠ редизайн (п.10).
-
-   Снимок вынесен из потока, данные строки остаются тем же flex-рядом с
-   переносом, только правее снимка: перенесённый хвост не уезжает под
-   картинку. */
-.food-scanner-diary__entry--with-thumb {
-  position: relative;
-  min-height: calc(48px + 2 * var(--s-2));
-  padding-inline-start: calc(82px + var(--s-4));
-}
-
-.food-scanner-diary__entry--with-thumb > .food-scanner-diary__entry-thumb {
-  position: absolute;
-  inset-inline-start: 0;
-  top: 50%;
-  transform: translateY(-50%);
-}
-
-/* Кнопки строки (`flex: 0 0 auto`, без переноса) в месте справа от
-   снимка не помещаются: блок «Граммы / В избранное / Убрать» 227 px против
-   196 (строка 294 при экране 360) и 226 (390). Под модификатором им
-   разрешён перенос, а блоку — ширина не больше места справа: одного
-   переноса мало, блок с `flex: 0 0 auto` держит ширину содержимого и
-   вылезал бы по-прежнему (замер: 31 и 1 px). Кнопки остаются справа,
-   строка растёт до 90 px (решение главного окна 28.09, буква «а»; плата
-   вынесена владельцу, §6-омега-кватер). */
-.food-scanner-diary__entry--with-thumb .food-scanner-diary__entry-actions {
-  flex-wrap: wrap;
-  max-width: 100%;
-}
-
-.food-scanner-diary__entry-thumb {
-  width: 82px;
-  height: 48px;
-  border-radius: var(--r-md);
-  object-fit: cover;
-  display: block;
-  background: var(--c-surface-2);
-}
-
-.food-scanner-diary__entry-time {
-  font-size: var(--font-size-100);
-  color: var(--c-text-secondary);
-  flex: 0 0 auto;
-}
-.food-scanner-diary__entry-dish {
-  font-size: var(--font-size-200);
-  color: var(--c-text-primary);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.food-scanner-diary__entry-cal {
-  font-size: var(--font-size-200);
-  color: var(--c-text-secondary);
-  flex: 0 0 auto;
-}
-/* DRF-2455 — БЖУ рядом с калориями: §77 п.40 просит показывать запись
-   целиком. Тише калорий на ступень размером, а цвет тот же: токена
-   «третьего» уровня текста в наборе нет, и выдумывать его здесь значило
-   бы завести цвет мимо палитры. */
-.food-scanner-diary__entry-macros {
-  font-size: var(--font-size-100);
-  color: var(--c-text-secondary);
-  flex: 0 0 auto;
-}
-.food-scanner-diary__totals {
-  background: var(--c-surface-1);
-  border: 1px solid var(--c-divider);
-  border-radius: var(--r-md);
-  padding: var(--s-3) var(--s-4);
-  display: flex;
-  flex-direction: column;
-  gap: var(--s-2);
-}
-/* DRF-1897 — строка диетолога под итогами. Карточкой, как соседние группы:
-   это часть дневника, а не всплывающая подсказка. */
-.food-scanner-diary__observation {
-  margin: 0;
-  background: var(--c-surface-1);
-  border: 1px solid var(--c-divider);
-  border-radius: var(--r-md);
-  padding: var(--s-3) var(--s-4);
-  font-size: var(--font-size-200);
-  color: var(--c-text-primary);
-}
-/* DRF-1838 — правка и удаление записи в дневнике. Кнопки строки — тихие,
-   как подпись времени; форма граммов — на всю ширину строки под записью. */
-.food-scanner-diary__entry-actions {
-  display: flex;
-  gap: var(--s-1);
-  flex: 0 0 auto;
-}
-/* DRF-2099 — неделя дневника: стрелки и строка дня как кнопка. */
-.food-scanner-week__nav {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--s-2);
-}
-.food-scanner-week__period {
-  font-size: var(--font-size-200);
-  color: var(--c-text-secondary);
-}
-.food-scanner-week__day {
-  flex: 1;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--s-2);
-  padding: var(--s-2) 0;
-  background: none;
-  border: 0;
-  font: inherit;
-  color: inherit;
-  text-align: left;
-}
-.food-scanner-diary__entry-action:disabled {
-  opacity: 0.4;
-}
-.food-scanner-diary__entry-action {
-  padding: 0 var(--s-2);
-  background: none;
-  color: var(--c-text-secondary);
-  border: 1px solid var(--c-divider);
-  border-radius: var(--r-sm);
-  font: inherit;
-  font-size: var(--font-size-100);
-}
-.food-scanner-diary__grams {
-  flex-basis: 100%;
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--s-2);
-}
-.food-scanner-diary__grams-label {
-  flex-basis: 100%;
-  font-size: var(--font-size-100);
-  color: var(--c-text-secondary);
-}
-.food-scanner-diary__grams-input {
-  width: 6em;
-  padding: var(--s-1) var(--s-2);
-  border: 1px solid var(--c-divider);
-  border-radius: var(--r-sm);
-  background: var(--c-surface-1);
-  color: var(--c-text-primary);
-  font: inherit;
-}
-.food-scanner-diary__grams-error {
-  flex-basis: 100%;
-  margin: 0;
-  font-size: var(--font-size-100);
-  color: var(--c-text-secondary);
-}
 /* Живая область уведомлений дневника — всегда в дереве, в раскладке не
    участвует (DRF-1838, ревью: область, вставленная вместе с текстом,
    часть экранных дикторов пропускает). */
@@ -8386,21 +7662,6 @@ a {
   padding: var(--s-2) var(--s-3);
   border-radius: var(--r-sm);
   font-size: var(--font-size-200);
-}
-.food-scanner-diary__notice-action {
-  padding: 0 var(--s-2);
-  background: none;
-  color: inherit;
-  border: 1px solid currentColor;
-  border-radius: var(--r-sm);
-  font: inherit;
-  font-weight: 600;
-}
-.food-scanner-diary__comment {
-  margin: var(--s-2) 0 0;
-  font-size: var(--font-size-200);
-  color: var(--c-text-secondary);
-  font-style: italic;
 }
 
 /* DRF-1061 block 2.4 — staff access codes (`/admin/team/access`).
@@ -13438,8 +12699,9 @@ button.ss-card {
    Дневник питания — доска владельца «Дневник» (DRF-2954, часть 1: дневник,
    день, неделя, избранное).
 
-   Свой блок `diary-*` поверх общих частей клиента (`cr-*`). Прежние классы
-   `food-scanner-*` остаются: их носят экраны пути записи (часть 2) и «План».
+   Свой блок `diary-*` поверх общих частей клиента (`cr-*`). Прежних классов
+   `food-scanner-*` после части 2 осталось три живых семейства: уведомление
+   «Плана», столбец кнопок экрана цели и лист «Что поправить?» результата.
    =========================================================================== */
 
 .diary-screen {
@@ -13978,4 +13240,478 @@ button.ss-card {
 .diary-week-row__text {
   color: var(--c-text-secondary);
   overflow-wrap: anywhere;
+}
+
+/* ===========================================================================
+   Дневник питания, часть 2 — путь записи: съёмка, согласие, распознавание,
+   ошибка распознавания, результат, «Записано», запись текстом (DRF-2954).
+   =========================================================================== */
+
+/* Столбец кнопок экрана: та же сетка, что `cr-actions`, без верхнего отступа
+   (экраны дневника держат ритм зазором ленты). */
+.diary-actions {
+  margin-top: 0;
+}
+
+/* Крупная строка-вопрос экрана: «Что ешь сейчас?», «Что съела?». */
+.diary-lead {
+  margin: 0;
+  font-size: var(--font-size-400);
+  font-weight: 700;
+  color: var(--c-text-primary);
+}
+
+.diary-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+
+.diary-section__heading {
+  margin: 0;
+  font-size: var(--font-size-200);
+  font-weight: 600;
+  color: var(--c-text-secondary);
+}
+
+.diary-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  padding: var(--s-3);
+  background: var(--c-surface-1);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-lg);
+}
+
+/* Поле ввода пути записи: 16px и больше — без увеличения страницы на iOS. */
+.diary-input {
+  width: 100%;
+  min-height: 48px;
+  padding: var(--s-2) var(--s-3);
+  font: inherit;
+  font-size: var(--font-size-300);
+  color: var(--c-text-primary);
+  background: var(--c-surface-1);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-md);
+  box-sizing: border-box;
+}
+
+.diary-input:focus {
+  border-color: var(--c-accent);
+  outline: 2px solid var(--c-accent-subtle);
+  outline-offset: 1px;
+}
+
+.diary-input:disabled {
+  opacity: 0.6;
+}
+
+.diary-alert {
+  margin: 0;
+  padding: var(--s-3);
+  color: var(--c-danger);
+  background: color-mix(in srgb, var(--c-danger) 8%, var(--c-surface-1));
+  border: 1px solid color-mix(in srgb, var(--c-danger) 30%, var(--c-surface-1));
+  border-radius: var(--r-lg);
+}
+
+.diary-notice--offline {
+  margin: 0;
+  color: var(--c-text-secondary);
+}
+
+/* Подсказка со значком: «Прикинула приблизительно…». */
+.diary-hint {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s-2);
+  margin: 0;
+  padding: var(--s-3);
+  color: var(--c-text-secondary);
+  background: var(--c-accent-subtle);
+  border-radius: var(--r-lg);
+}
+
+.diary-hint > .cr-icon {
+  color: var(--c-accent-pressed);
+  margin-top: 2px;
+}
+
+.diary-privacy {
+  margin: 0;
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+  text-align: center;
+}
+
+/* Выбор приёма пищи: четыре равные кнопки, 2×2 на узком экране. Выбранная —
+   рамкой акцента и мягким фоном, не заливкой: это отметка выбора. */
+.diary-meals {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--s-2);
+}
+
+@media (max-width: 360px) {
+  .diary-meals {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.diary-meal {
+  min-height: 44px;
+  padding: 0 var(--s-1);
+  font: inherit;
+  font-size: var(--font-size-200);
+  color: var(--c-text-primary);
+  background: var(--c-surface-1);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-md);
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+
+.diary-meal:active {
+  background: var(--c-surface-2);
+}
+
+/* Рамка выбора — внутренней тенью: толще рамки не меняет размер кнопки. */
+.diary-meal--on {
+  font-weight: 600;
+  color: var(--c-accent-pressed);
+  background: var(--c-accent-subtle);
+  border-color: var(--c-accent);
+  box-shadow: inset 0 0 0 1px var(--c-accent);
+}
+
+.diary-meal:focus-visible,
+.diary-portion__btn:focus-visible {
+  outline: 2px solid var(--c-accent);
+  outline-offset: 2px;
+}
+
+.diary-way:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Согласие — карточкой: значок, заголовок, абзацы раскрытия, кнопки. */
+.diary-consent {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+  padding: var(--s-4);
+  background: var(--c-surface-1);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-lg);
+}
+
+.diary-consent__badge {
+  width: 72px;
+  height: 72px;
+  margin: 0 auto var(--s-1);
+}
+
+.diary-consent__headline {
+  margin: 0;
+  font-size: var(--font-size-400);
+  font-weight: 700;
+  text-align: center;
+}
+
+.diary-consent__body {
+  margin: 0;
+  color: var(--c-text-primary);
+}
+
+.diary-consent__version {
+  margin: 0;
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+
+/* Шапка без стрелки: заголовок с тем же отступом, что у текста экрана. */
+.diary-topbar--bare {
+  padding-inline: var(--s-4);
+}
+
+/* Распознавание — по центру: снимок, строка, точки. */
+.diary-processing {
+  align-items: center;
+  padding-top: var(--s-6);
+  text-align: center;
+}
+
+.diary-processing__preview {
+  width: 160px;
+  height: 160px;
+  overflow: hidden;
+  border-radius: var(--r-lg);
+  background: var(--c-accent-subtle);
+}
+
+.diary-processing__photo {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.diary-processing__line {
+  margin: 0;
+  font-size: var(--font-size-400);
+  font-weight: 700;
+}
+
+.diary-processing__dots {
+  display: inline-flex;
+  gap: 6px;
+}
+
+.diary-processing__dots span {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--c-accent-pressed);
+  animation: diary-dot 1.2s ease-in-out infinite;
+}
+
+.diary-processing__dots span:nth-child(2) {
+  animation-delay: 0.15s;
+}
+
+.diary-processing__dots span:nth-child(3) {
+  animation-delay: 0.3s;
+}
+
+@keyframes diary-dot {
+  0%,
+  80%,
+  100% {
+    opacity: 0.35;
+  }
+  40% {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .diary-processing__dots span {
+    animation: none;
+  }
+}
+
+.diary-processing__hint {
+  margin: 0;
+  max-width: 320px;
+  padding: var(--s-3);
+  color: var(--c-text-secondary);
+  background: var(--c-surface-1);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-lg);
+}
+
+/* Ошибка распознавания — по центру: значок, заголовок, тело, кнопки. */
+.diary-scan-error {
+  align-items: center;
+  padding-top: var(--s-5);
+  text-align: center;
+}
+
+.diary-scan-error__badge {
+  margin-bottom: 0;
+}
+
+.diary-scan-error__title {
+  margin: 0;
+  font-size: var(--font-size-400);
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.diary-scan-error__body {
+  margin: 0;
+  max-width: 340px;
+  color: var(--c-text-secondary);
+}
+
+.diary-scan-error .diary-actions {
+  align-self: stretch;
+}
+
+/* Результат: снимок по центру, блюдо крупно, карточка «Примерно». */
+.diary-result__photo-row {
+  display: flex;
+  justify-content: center;
+}
+
+.diary-result__photo {
+  display: block;
+  width: 180px;
+  height: 120px;
+  object-fit: cover;
+  border-radius: var(--r-lg);
+}
+
+.diary-result__lead {
+  margin: 0;
+  font-size: var(--font-size-400);
+  font-weight: 700;
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+
+.diary-result__name-input {
+  display: block;
+  margin-top: var(--s-2);
+  text-align: start;
+}
+
+.diary-result__metrics {
+  gap: var(--s-3);
+}
+
+.diary-result__nutrition {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+}
+
+.diary-result__kcal {
+  margin: 0;
+  font-size: var(--font-size-300);
+  font-weight: 600;
+}
+
+.diary-result__macros {
+  margin: 0;
+  font-size: var(--font-size-200);
+  color: var(--c-text-secondary);
+}
+
+.diary-result__note {
+  min-height: 72px;
+  resize: vertical;
+}
+
+/* При низкой уверенности «Уточнить» обведена — уточнить здесь уместнее всего. */
+.diary-result__hint {
+  border: 2px solid var(--c-accent);
+}
+
+/* Порция: подпись слева, круглые «−» и «+» вокруг процента справа. */
+.diary-portion {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-2);
+}
+
+.diary-portion__label {
+  font-size: var(--font-size-300);
+}
+
+.diary-portion__controls {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-2);
+}
+
+.diary-portion__btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  font: inherit;
+  font-size: var(--font-size-400);
+  color: var(--c-accent-pressed);
+  background: var(--c-accent-subtle);
+  border: none;
+  border-radius: 50%;
+  cursor: pointer;
+}
+
+.diary-portion__btn:active {
+  background: color-mix(in srgb, var(--c-accent) 22%, var(--c-surface-1));
+}
+
+.diary-portion__btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.diary-portion__value {
+  min-width: 3.5em;
+  font-weight: 600;
+  text-align: center;
+}
+
+/* «Записано»: галочка в круге и итог блюда — по центру. */
+.diary-saved__check {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--s-2);
+  padding-top: var(--s-4);
+}
+
+.diary-saved__badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 96px;
+  height: 96px;
+  color: var(--c-success);
+  background: color-mix(in srgb, var(--c-success) 14%, var(--c-surface-1));
+  border-radius: 50%;
+}
+
+.diary-saved__check-text {
+  font-size: var(--font-size-400);
+  font-weight: 700;
+}
+
+.diary-saved__recap {
+  margin: 0;
+  padding: var(--s-3);
+  text-align: center;
+  background: var(--c-surface-1);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-lg);
+  overflow-wrap: anywhere;
+}
+
+/* Полоса калорий — только при ориентире (§82, §85); после 100% не краснеет.
+   Заливка — отметка, не кнопка (primaryPress.build.test.ts, NOT_BUTTONS). */
+.diary-bar {
+  height: 8px;
+  overflow: hidden;
+  background: var(--c-surface-2);
+  border-radius: var(--r-pill);
+}
+
+.diary-bar__fill {
+  height: 100%;
+  background: var(--c-accent);
+  border-radius: var(--r-pill);
+}
+
+/* Карточка оценки текста: строки, вопрос, кнопки. */
+.diary-estimate {
+  gap: var(--s-2);
+}
+
+.diary-estimate__line {
+  margin: 0;
+  color: var(--c-text-primary);
+  overflow-wrap: anywhere;
+}
+
+.diary-estimate__question {
+  margin: var(--s-1) 0 0;
+  font-weight: 600;
 }
