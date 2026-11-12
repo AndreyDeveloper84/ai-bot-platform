@@ -291,6 +291,95 @@ describe("отказы и флаг", () => {
   });
 });
 
+describe("вид строки плана не говорит «сделано» (DRF-2951)", () => {
+  // Тесты выше читают текст; состояние, выраженное ВИДОМ (цвет, приглушение,
+  // зачёркивание, зелёный круг, добавленный значок), они не видят. Здесь одно
+  // и то же действие показано при разном счёте: строка обязана отличаться
+  // только цифрами.
+  async function waterRowAt(done: number): Promise<string> {
+    mockedGet.mockResolvedValue({
+      ...PLAN,
+      actions: [
+        { action_type: "log_water", cadence: "per_day", target_count: 7, done_count: done, bucket: { start: "2026-09-18", end: "2026-09-19" } },
+      ],
+    });
+    mockedDoc.mockResolvedValue(DOC);
+    const view = renderScreen();
+    await settleScenario();
+
+    const row = within(screen.getByTestId("plan-lite-card")).getByRole("listitem");
+    // Наличие: строка собрана целиком — иначе сравнивать нечего.
+    expect(row.querySelector(".plan-mark")).not.toBeNull();
+    expect(row.querySelector(".plan-row__title")).toHaveTextContent(PLAN_LITE_COPY.labelWater);
+    const count = row.querySelector(".plan-row__count");
+    expect(count).toHaveTextContent(PLAN_LITE_COPY.ofTotal(done, 7));
+    // Ни у строки, ни внутри неё — встроенных стилей.
+    expect(row.matches("[style]") || row.querySelector("[style]") !== null).toBe(false);
+    const html = row.outerHTML.replace(PLAN_LITE_COPY.ofTotal(done, 7), "СЧЁТ");
+    view.unmount();
+    return html;
+  }
+
+  it("ноль, половина и полная норма — одна и та же строка, кроме цифр", async () => {
+    const empty = await waterRowAt(0);
+    const half = await waterRowAt(4);
+    const full = await waterRowAt(7);
+
+    expect(empty).toContain("СЧЁТ");
+    expect(half).toBe(empty);
+    expect(full).toBe(empty);
+  });
+});
+
+describe("состояния объявлены как сообщение о положении дел, а не как ошибка (DRF-2951)", () => {
+  it("«недоступно», «не получилось» и «нужна цель» — role=status с прежней фразой", async () => {
+    mockedGet.mockRejectedValue(new ApiError(404, "plan_lite_disabled", ""));
+    let view = renderScreen();
+    await settleScenario();
+    expect(screen.getByRole("status")).toHaveTextContent(PLAN_LITE_COPY.unavailable);
+    view.unmount();
+
+    mockedGet.mockRejectedValue(new ApiError(502, "ayla_unavailable", ""));
+    view = renderScreen();
+    await settleScenario();
+    expect(screen.getByRole("status")).toHaveTextContent(PLAN_LITE_COPY.transient);
+    expect(screen.getByRole("button", { name: PLAN_LITE_COPY.retry })).toBeInTheDocument();
+    view.unmount();
+
+    mockedGet.mockResolvedValue(null);
+    mockedProposal.mockRejectedValue(new ApiError(404, "no_active_goal", ""));
+    renderScreen();
+    await settleScenario();
+    expect(screen.getByRole("status")).toHaveTextContent(PLAN_LITE_COPY.needGoal);
+    expect(screen.getByRole("button", { name: PLAN_LITE_COPY.chooseGoal })).toBeInTheDocument();
+  });
+});
+
+describe("конструктор: счётчик стоит в своей строке и доезжает до запроса (DRF-2951)", () => {
+  it("«Дневник: больше» меняет число в подписи и в теле POST", async () => {
+    mockedGet.mockResolvedValue(null);
+    mockedProposal.mockRejectedValue(new ApiError(404, "no_template", ""));
+    mockedCreate.mockResolvedValue(PLAN);
+    renderScreen();
+    await settleScenario();
+
+    fireEvent.click(screen.getByLabelText(PLAN_LITE_COPY.chipFood(3)));
+    const stepper = screen.getByRole("group", { name: PLAN_LITE_COPY.labelFood });
+    fireEvent.click(within(stepper).getByRole("button", { name: /больше/ }));
+
+    // Подпись флажка — прежние слова с новым числом; счётчик — в той же строке.
+    const box = screen.getByLabelText(PLAN_LITE_COPY.chipFood(4));
+    expect(box.closest(".plan-pick")).toContainElement(stepper);
+
+    fireEvent.click(screen.getByRole("button", { name: PLAN_LITE_COPY.compose }));
+    await settleScenario();
+    expect(mockedCreate).toHaveBeenCalledTimes(1);
+    expect(mockedCreate.mock.calls[0]?.[0]).toEqual([
+      { action_type: "log_food", cadence: "per_week", target_count: 4 },
+    ]);
+  });
+});
+
 describe("служебный ключ на экран не попадает (DRF-2355)", () => {
   // Метка цели тянется ВТОРЫМ запросом. Раньше при его сбое подставлялся
   // `goal_key` — человеку показывался слаг вида «tone_up». Ключ — адрес
@@ -323,6 +412,83 @@ describe("служебный ключ на экран не попадает (DRF
 
     expect(screen.getByTestId("plan-lite-proposal")).toBeInTheDocument();
     expect(screen.queryByText(/tone_up/)).toBeNull();
+  });
+
+  it("цель из списка: подпись берётся из документа, даже когда ряд вариантов пуст (DRF-2951)", async () => {
+    // Так отвечает каталог при выбранной цели: `suggestions` пуст, подпись —
+    // в `known.goal.label`. Раньше экран искал её только в ряду и оставался
+    // с заголовком «Мой план».
+    mockedGet.mockResolvedValue(PLAN);
+    mockedDoc.mockResolvedValue({
+      ...DOC,
+      suggestions: [],
+      known: { goal: { ...DOC.known.goal!, goal_text: null, label: "Подтянуть фигуру" } },
+    });
+
+    renderScreen();
+    await settleScenario();
+
+    expect(screen.getByRole("heading", { level: 2, name: "Подтянуть фигуру" })).toBeInTheDocument();
+    expect(screen.queryByText(/tone_up/)).toBeNull();
+  });
+
+  it("цель из списка названа и в предложении плана", async () => {
+    mockedGet.mockResolvedValue(null);
+    mockedProposal.mockResolvedValue({
+      goal_key: "tone_up",
+      why: "Под твою цель",
+      template_version: 1,
+      actions: [{ action_type: "log_water", cadence: "per_day", target_count: 7 }],
+    });
+    mockedDoc.mockResolvedValue({
+      ...DOC,
+      suggestions: [],
+      known: { goal: { ...DOC.known.goal!, goal_text: "   ", label: "Подтянуть фигуру" } },
+    });
+
+    renderScreen();
+    await settleScenario();
+
+    // Пробелы вместо слов — не название: берётся подпись из документа.
+    expect(
+      screen.getByRole("heading", {
+        level: 2,
+        name: PLAN_LITE_COPY.proposalTitle("Подтянуть фигуру"),
+      }),
+    ).toBeInTheDocument();
+  });
+
+  it("слова человека старше подписи из списка", async () => {
+    mockedGet.mockResolvedValue(PLAN);
+    mockedDoc.mockResolvedValue({
+      ...DOC,
+      suggestions: [],
+      known: {
+        goal: { ...DOC.known.goal!, goal_text: "хочу высыпаться", label: "Восстановить силы" },
+      },
+    });
+
+    renderScreen();
+    await settleScenario();
+
+    expect(screen.getByRole("heading", { level: 2, name: "хочу высыпаться" })).toBeInTheDocument();
+    expect(screen.queryByText("Восстановить силы")).toBeNull();
+  });
+
+  it("документ пришёл без подписи и без ряда — ключ не показывается, заголовок прежний", async () => {
+    mockedGet.mockResolvedValue(PLAN);
+    mockedDoc.mockResolvedValue({
+      ...DOC,
+      suggestions: [],
+      known: { goal: { ...DOC.known.goal!, goal_text: null } },
+    });
+
+    renderScreen();
+    await settleScenario();
+
+    expect(screen.getByTestId("plan-lite-card")).toBeInTheDocument();
+    expect(screen.queryByText(/tone_up/)).toBeNull();
+    expect(screen.getByRole("heading", { level: 2, name: PLAN_LITE_COPY.title })).toBeInTheDocument();
   });
 
   it("метка есть — цель зовётся словами человека", async () => {
