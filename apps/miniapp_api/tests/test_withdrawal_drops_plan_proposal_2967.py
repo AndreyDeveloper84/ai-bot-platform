@@ -76,6 +76,8 @@ def _state_keys() -> set[str]:
 
 def _composed_and_discussing(client: Client, tenant) -> None:
     record_global_consent(_bare_person_shell(tenant, PERSON), source="test")
+    # §174: нажатие несёт вердикт последнего ТЕКСТОВОГО хода — разговор с него и начинается.
+    _ask(client, "привет", as_user=PERSON)
     _ask(client, card.CB_COMPOSE, as_user=PERSON)
     _ask(client, DISCUSS, as_user=PERSON)
     assert _state_keys() >= PLAN_KEYS  # предложение и обсуждение лежат в состоянии
@@ -137,6 +139,8 @@ def test_w3_the_replace_question_survives_so_the_proposal_can_be_declined(
     идентификаторами планов отзыв не трогает."""
     record_global_consent(_bare_person_shell(tenant, PERSON), source="test")
     catalog.active_plan_id = ACTIVE_ID
+    # §174: нажатие несёт вердикт последнего ТЕКСТОВОГО хода — разговор с него и начинается.
+    _ask(client, "привет", as_user=PERSON)
     _ask(client, card.CB_COMPOSE, as_user=PERSON)
     _ask(client, SAVE, as_user=PERSON)
     assert card.REPLACE_KEY in _state_keys()

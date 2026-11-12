@@ -206,13 +206,13 @@ def test_e1_from_my_plan_to_a_booking_each_action_with_its_own_turns_verdict(
         PLAN_ID,
         "s-sleep",
     )
-    # Три действия — три хода: ревизия вердикта растёт от нажатия к нажатию.
+    # §174: три нажатия — один вердикт, вердикт текстового хода «мой план».
     revisions = [
         asked["evaluated_at_revision"],
         resolved["evaluated_at_revision"],
         block["evaluated_at_revision"],
     ]
-    assert revisions == sorted(set(revisions)), revisions
+    assert len(set(revisions)) == 1, revisions
     assert {asked["safety_state"], resolved["safety_state"], block["safety_state"]} == {"NORMAL"}
     assert {asked["s1_restriction"], resolved["s1_restriction"], block["s1_restriction"]} == {
         "none"
@@ -272,8 +272,54 @@ def test_e4_a_second_tap_on_the_time_sends_the_same_idempotency_key(
     assert again.json()["answer"].endswith("PLAN_STEP_BOOKED · тест")
     assert len(booking.created) == 2
     assert booking.created[0]["idempotency_key"] == booking.created[1]["idempotency_key"]
-    # Вердикт при этом — уже другого хода: повтор не переиспользует прежний.
+    # §174: повторное нажатие несёт тот же вердикт последнего текстового хода.
     assert (
         booking.created[1]["provenance"]["evaluated_at_revision"]
-        > booking.created[0]["provenance"]["evaluated_at_revision"]
+        == booking.created[0]["provenance"]["evaluated_at_revision"]
     )
+
+
+# ─── §174 (DRF-2877): нажатие несёт вердикт последнего текста ──────────────
+
+
+def test_s174_a_after_an_alarming_phrase_the_step_tap_carries_stop_to_the_catalog(
+    client: Client, tenant, wire, person: str, catalog: StepCatalog, booking: Booking
+) -> None:
+    """Находка приёмки 11.11: тревога → «мой план» → шаг. Нажатие не чеканит
+    «нормально»: каталогу уходит «стоп» тревожного хода, и отказывает он."""
+    plan = _ask(client, "мой план", as_user=person)
+    alarm = _ask(client, "давит в груди", as_user=person)
+    assert alarm.status_code == 200, alarm.content[:300]
+
+    _ask(client, _payload(plan, "Режим сна"), as_user=person)
+
+    assert catalog.asked, "шаг спрошен у каталога — отказ его, а не наш"
+    assert catalog.asked[-1]["safety_state"] == "STOP"
+
+
+def test_s174_b_the_screen_after_a_chat_tap_still_reads_stop(
+    client: Client, tenant, wire, person: str, catalog: StepCatalog, booking: Booking
+) -> None:
+    """Экран Mini App читает вердикт последнего хода. Нажатие в чате после
+    тревоги больше его не затирает."""
+    from apps.conversations.models import Conversation
+    from apps.orchestrator.safety.plan_turn import last_turn_safety
+
+    plan = _ask(client, "мой план", as_user=person)
+    _ask(client, "давит в груди", as_user=person)
+    _ask(client, _payload(plan, "Режим сна"), as_user=person)
+
+    conversation = Conversation.all_tenants.filter(bot_user__channel_user_id=person).latest("id")
+    got = last_turn_safety(conversation.id)
+    assert got is not None and got.safety_state == "STOP"
+
+
+def test_s174_v_a_calm_message_after_the_alarm_opens_the_step_again(
+    client: Client, tenant, wire, person: str, catalog: StepCatalog, booking: Booking
+) -> None:
+    _ask(client, "давит в груди", as_user=person)
+    plan = _ask(client, "мой план", as_user=person)
+
+    _ask(client, _payload(plan, "Режим сна"), as_user=person)
+
+    assert catalog.asked[-1]["safety_state"] == "NORMAL"

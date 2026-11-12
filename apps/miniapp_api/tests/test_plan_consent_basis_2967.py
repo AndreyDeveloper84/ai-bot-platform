@@ -168,6 +168,8 @@ def test_b5_the_basis_rides_with_compose_and_save(
     expected = plan_gate.plan_consent_basis(shell)
     assert expected is not None
 
+    # §174: нажатие несёт вердикт последнего ТЕКСТОВОГО хода — разговор с него и начинается.
+    _ask(client, "привет", as_user=PERSON)
     _ask(client, card.CB_COMPOSE, as_user=PERSON)
     saved = _ask(client, SAVE, as_user=PERSON)
 
@@ -212,6 +214,8 @@ def test_b6_a_catalog_refusal_on_compose_is_named_like_the_bots_own(
 
     monkeypatch.setattr(catalog, "compose_decision", _refuse)
 
+    # §174: нажатие несёт вердикт последнего ТЕКСТОВОГО хода — разговор с него и начинается.
+    _ask(client, "привет", as_user=PERSON)
     answer = _ask(client, card.CB_COMPOSE, as_user=PERSON).json()["answer"]
 
     assert answer == f"{name} · {card.TEST_MARK}"
@@ -222,6 +226,8 @@ def test_b6_a_catalog_refusal_on_save_is_named_like_the_bots_own(
     error: Exception, name: str, client: Client, tenant, wire, catalog: FakeCatalog
 ) -> None:
     _grant(_bare_person_shell(tenant, PERSON))
+    # §174: нажатие несёт вердикт последнего ТЕКСТОВОГО хода — разговор с него и начинается.
+    _ask(client, "привет", as_user=PERSON)
     _ask(client, card.CB_COMPOSE, as_user=PERSON)
     catalog.save_error = error
 
@@ -255,6 +261,8 @@ def _waiting_replacement(client: Client, tenant, catalog: FakeCatalog) -> BotUse
     shell = _bare_person_shell(tenant, PERSON)
     _grant(shell)
     catalog.active_plan_id = ACTIVE_ID
+    # §174: нажатие несёт вердикт последнего ТЕКСТОВОГО хода — разговор с него и начинается.
+    _ask(client, "привет", as_user=PERSON)
     _ask(client, card.CB_COMPOSE, as_user=PERSON)
     _ask(client, SAVE, as_user=PERSON)
     return shell

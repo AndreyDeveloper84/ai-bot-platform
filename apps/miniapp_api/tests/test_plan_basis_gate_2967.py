@@ -147,6 +147,8 @@ def _person_in(state: str, client: Client, tenant, catalog: FakeCatalog) -> str:
     if state == NEVER_CONSENTED:
         return person
     record_global_consent(shell, source="test")
+    # §174: нажатие несёт вердикт последнего ТЕКСТОВОГО хода — разговор с него и начинается.
+    _ask(client, "привет", as_user=person)
     shown = _ask(client, card.CB_COMPOSE, as_user=person)
     assert shown.json()["answer"].endswith(card.QUESTION_SAVE)  # предложение на экране
     if state == CONSENT_WITHDRAWN:
@@ -220,6 +222,8 @@ def test_g4_a_consenting_person_composes_and_saves(
 ) -> None:
     record_global_consent(_bare_person_shell(tenant, CONSENTING), source="test")
 
+    # §174: нажатие несёт вердикт последнего ТЕКСТОВОГО хода — разговор с него и начинается.
+    _ask(client, "привет", as_user=CONSENTING)
     shown = _answer(_ask(client, card.CB_COMPOSE, as_user=CONSENTING))
     saved = _answer(_ask(client, PROCESSING_TAPS["save"], as_user=CONSENTING))
 
@@ -303,6 +307,8 @@ def _person_with_a_waiting_replacement(
     person = ACCOUNTS[state]
     record_global_consent(_bare_person_shell(tenant, person), source="test")
     catalog.active_plan_id = ACTIVE_ID
+    # §174: нажатие несёт вердикт последнего ТЕКСТОВОГО хода — разговор с него и начинается.
+    _ask(client, "привет", as_user=person)
     _ask(client, card.CB_COMPOSE, as_user=person)
     asked = _ask(client, PROCESSING_TAPS["save"], as_user=person).json()
     assert [button["payload"] for button in asked["buttons"]][:2] == [REPLACE, KEEP]
@@ -415,6 +421,8 @@ def test_g8_an_open_discussion_stops_feeding_the_plan_to_the_model(
         return DiscoveryReply(text="ок")
 
     _concierge.side_effect = _model
+    # §174: нажатие несёт вердикт последнего ТЕКСТОВОГО хода — разговор с него и начинается.
+    _ask(client, "привет", as_user=person)
     _ask(client, card.CB_COMPOSE, as_user=person)
     opened = _answer(_ask(client, PROCESSING_TAPS["discuss"], as_user=person))
     assert opened == card.DISCUSS_OPENING
