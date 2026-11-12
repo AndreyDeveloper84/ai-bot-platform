@@ -556,6 +556,8 @@ describe("Сбой и повтор", () => {
     await waitFor(() => expect(asked).toHaveLength(5));
     const alert = await screen.findByRole("alert");
     expect(within(alert).getByText(RECORDS_ERROR_COPY.failedBody)).toBeInTheDocument();
+    // Заголовок кадра 15 — и у «исход неизвестен».
+    expect(within(alert).getByRole("heading", { name: CLIENT_CHAT_COPY.failedTitle })).toBeInTheDocument();
     expect(screen.queryByText(CLIENT_CHAT_COPY.failed)).not.toBeInTheDocument();
     expect(screen.queryByText(DUPLICATE)).not.toBeInTheDocument();
     expect(new Set(asked.map((a) => a.request_id)).size).toBe(1);
@@ -872,6 +874,58 @@ describe("Сбой и повтор", () => {
     const list = await screen.findByRole("list", { name: "Варианты ответа" });
     expect(within(list).getByRole("button", { name: "Мой план" })).toBeInTheDocument();
     expect(screen.getAllByText("Про питание.")).toHaveLength(1);
+    // Строки памяти в истории нет — она не теряется: дописана к своей реплике,
+    // ровно один раз (анонс говорится один раз на факт, §52 В3).
+    expect(screen.getAllByText("Запомнила: без молочного.")).toHaveLength(1);
+  });
+
+  it("брошенный вопрос: короткая чужая реплика «Хорошо.» не становится якорем ответа", async () => {
+    // Новый вопрос — тап кнопки: в историю он не пишется, и последней
+    // реплике человека в истории предшествует чужой ответ.
+    const after = [
+      { id: "s1", role: "user", content: "мне плохо", tool: "", created_at: "2026-09-20T09:00:00+00:00" },
+      { id: "s2", role: "assistant", content: "Хорошо.", tool: "", created_at: "2026-09-20T09:00:04+00:00" },
+    ];
+    wire(
+      [[], after],
+      [
+        new TypeError("Failed to fetch"),
+        answer("Хорошо, подберу.\n\nВыбери день.", [{ label: "Мой план", open_app: "open_plan" }]),
+      ],
+    );
+    renderScreen();
+    await screen.findByText(GREETING);
+
+    ask("мне плохо");
+    await screen.findByRole("alert");
+    ask("а когда можно?");
+
+    // Ответ нового хода дописан целиком и с кнопками; вопрос — тоже.
+    expect(await screen.findByText("Хорошо, подберу.")).toBeInTheDocument();
+    expect(screen.getByText("Выбери день.")).toBeInTheDocument();
+    expect(screen.getByText("а когда можно?")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Мой план" })).toBeInTheDocument();
+  });
+
+  it("брошенный вопрос: после нашего ответа в истории легла ещё реплика — кнопки не пропадают", async () => {
+    const after = [
+      { id: "s1", role: "user", content: "а про питание?", tool: "", created_at: "2026-09-20T09:01:00+00:00" },
+      { id: "s2", role: "assistant", content: "Про питание.", tool: "", created_at: "2026-09-20T09:01:04+00:00" },
+      { id: "s3", role: "assistant", content: "Ответ на прежний вопрос.", tool: "", created_at: "2026-09-20T09:01:06+00:00" },
+    ];
+    wire(
+      [[], after],
+      [new TypeError("Failed to fetch"), answer("Про питание.", [{ label: "Мой план", open_app: "open_plan" }])],
+    );
+    renderScreen();
+    await screen.findByText(GREETING);
+
+    ask("мне плохо");
+    await screen.findByRole("alert");
+    ask("а про питание?");
+
+    expect(await screen.findByText("Ответ на прежний вопрос.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Мой план" })).toBeInTheDocument();
   });
 
   it("новый вопрос поверх сбоя — новый ход своим ключом, карточка сбоя снята", async () => {

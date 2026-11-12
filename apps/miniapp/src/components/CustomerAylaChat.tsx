@@ -286,32 +286,60 @@ export function CustomerAylaChat({ greeting, onOpen, runningPollMs = RUNNING_POL
         const seen: Turn[] = visibleMessages((await customerAylaApi.history()).messages);
         if (!aliveRef.current) return;
         // Реплики Ayla после последнего вопроса — ответ нового хода. `answer`
-        // склеен из реплик хода через пустую строку и может нести строку
-        // памяти, которой в истории нет (`memory_announce`): поэтому
-        // «входит в ответ», а не «равен» и не «хвост» (ревью #2463).
+        // склеен из обрезанных реплик хода через пустую строку и может нести
+        // строку памяти, которой в истории нет (`memory_announce` дописывает её
+        // после записи консьержа). Поэтому реплика ищется ЦЕЛЫМ абзацем ответа —
+        // не «равна», не «хвост» и не просто подстрока: короткое чужое
+        // «Хорошо.» входит в любой ответ (ревью #2463).
+        const framed = `\n\n${answer}\n\n`;
         const lastAsk = seen.map((t) => t.role).lastIndexOf("user");
-        const fresh = seen
+        const ours = seen
           .slice(lastAsk + 1)
-          .filter((t) => t.role === "assistant" && t.content.trim() !== "");
-        const ours = fresh.filter((t) => answer.includes(t.content.trim()));
+          .filter(
+            (t) =>
+              t.role === "assistant" &&
+              t.content.trim() !== "" &&
+              framed.includes(`\n\n${t.content.trim()}\n\n`),
+          );
         const anchor = ours.at(-1);
-        if (anchor !== undefined) {
-          // Кнопок история не несёт — возвращаем их к нашей последней реплике.
-          setTurns(seen.map((t) => (t === anchor ? { ...t, buttons } : t)));
+        // Кнопки рисуются только у последней реплики ленты: якорь годится,
+        // только если после него в истории нет ничего видимого.
+        const lastShown = seen.map((t) => t.content.trim() !== "").lastIndexOf(true);
+        if (anchor !== undefined && seen[lastShown] === anchor) {
+          // Чего из ответа нет в истории (строка памяти, вопрос памяти), —
+          // остаток ответа: дописываем его к якорю, а не теряем. Анонс
+          // говорится один раз на факт, повтора не будет (§52 В3).
+          const rest = ours
+            .reduce((left, t) => left.replace(t.content.trim(), ""), answer)
+            .split(/\n{2,}/)
+            .map((part) => part.trim())
+            .filter(Boolean)
+            .join("\n\n");
+          const merged: Turn = {
+            ...anchor,
+            content: rest ? `${anchor.content}\n\n${rest}` : anchor.content,
+            buttons,
+          };
+          setTurns(seen.slice(0, lastShown + 1).map((t) => (t === anchor ? merged : t)));
           return;
         }
         // Ответа нового хода в истории не нашлось (запись консьержа — по
-        // возможности, ответ без текста, только с кнопками): ленту берём из
-        // истории, а ответ дописываем сами. Дубль лучше потери.
-        if (answer.trim() !== "" || buttons.length > 0) {
-          const at = new Date().toISOString();
-          setTurns([
-            ...seen,
-            { id: nextLocalId(), role: "assistant", content: answer, tool: "", created_at: at, buttons },
-          ]);
-        } else {
-          setTurns(seen);
-        }
+        // возможности; ответ без текста, только с кнопками; после него в
+        // истории легло что-то ещё): ленту берём из истории, а ответ — и
+        // вопрос, если его там нет, — дописываем сами. Дубль лучше потери.
+        const at = new Date().toISOString();
+        setTurns((prev) => {
+          const mine = prev.find((t) => t.id === attempt.localId);
+          const known =
+            mine !== undefined &&
+            seen.some((t) => t.role === "user" && t.content.trim() === mine.content.trim());
+          const question = mine !== undefined && !known ? [{ ...mine, created_at: at }] : [];
+          const reply: Turn[] =
+            answer.trim() !== "" || buttons.length > 0
+              ? [{ id: nextLocalId(), role: "assistant", content: answer, tool: "", created_at: at, buttons }]
+              : [];
+          return [...seen, ...question, ...reply];
+        });
         return;
       } catch {
         // Дочитать не вышло — ответ на новый вопрос всё равно показываем.
@@ -360,7 +388,7 @@ export function CustomerAylaChat({ greeting, onOpen, runningPollMs = RUNNING_POL
               // раз. Ключ прежний занят упавшим ходом.
               attempt.requestId = newRequestId();
               if (rekeyed) {
-                setFailure(failureOf(new Error("rekeyed twice")));
+                setFailure({ kind: "retry", text: CLIENT_CHAT_COPY.failed });
                 return;
               }
               rekeyed = true;
