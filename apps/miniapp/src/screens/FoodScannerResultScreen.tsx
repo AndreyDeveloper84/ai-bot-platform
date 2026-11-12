@@ -23,6 +23,10 @@
  * `result.beauty_insights` MAY be null — render nothing for that
  * section, never crash. When present, render the 3-field block (vitamin
  * deficits / beauty_impact / recommendation) below the primary CTAs.
+ *
+ * DRF-2954 — вид по доске «Дневник» (кадр 5), решения владельца 12.11:
+ * блюдо одно (п.4 — ингредиентов нет), слова «Я распознала так», «Похоже
+ * на / Узнала», «Примерно» и условия чисел прежние.
  */
 
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
@@ -31,11 +35,12 @@ import { useLocation, useNavigate } from "react-router-dom";
 import { useScreenBack } from "../hooks/useScreenBack";
 import { backByAction, originFrom } from "../lib/screen-back";
 
+import { MealTypePicker } from "../components/diary/MealTypePicker";
+import { RecordIcon } from "../components/records/RecordIcons";
+import { RecordButton } from "../components/records/RecordsState";
 import { Snackbar } from "../components/Snackbar";
 import { DIARY_OFF_TEXT, diaryIsOff, getWellnessToday } from "../lib/customer-wellness";
 import {
-  MEAL_TYPE_ICON,
-  MEAL_TYPE_LABEL,
   PORTION_STEPS,
   FoodLogAnswerUnreadableError,
   logMeal,
@@ -56,13 +61,6 @@ interface RouterState {
   /** DRF-2349 — откуда вошли в поток; здесь поток заканчивается. */
   returnTo?: string;
 }
-
-const MEAL_TYPES: ReadonlyArray<MealType> = [
-  "breakfast",
-  "lunch",
-  "dinner",
-  "snack",
-];
 
 type ClarifyPath = "rename" | "portion" | "rephoto";
 
@@ -366,45 +364,28 @@ export function FoodScannerResultScreen() {
   );
 
   return (
-    <div className="food-scanner-screen">
-      <header className="records-screen__header">
-        <button
-          type="button"
-          className="records-screen__back"
-          aria-label="Назад"
-          onClick={onBack}
-        >
-          <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
-            <path
-              d="M12 4l-6 6 6 6"
-              stroke="currentColor"
-              strokeWidth="2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            />
-          </svg>
+    <div className="cr-screen cr-screen--nested diary-screen">
+      <header className="cr-topbar diary-topbar">
+        <button type="button" className="cr-back" aria-label="Назад" onClick={onBack}>
+          <RecordIcon name="back" size={24} />
         </button>
-        <h1 className="records-screen__title">Я распознала так</h1>
+        <h1 className="diary-topbar__title">Я распознала так</h1>
       </header>
 
-      <main className="food-scanner-screen__main">
+      <main className="diary-main">
         {previewUrl && (
-          <div className="food-scanner-result__photo-row">
-            <img
-              src={previewUrl}
-              alt="Фото блюда"
-              className="food-scanner-result__photo"
-            />
+          <div className="diary-result__photo-row">
+            <img src={previewUrl} alt="Фото блюда" className="diary-result__photo" />
           </div>
         )}
 
-        <h2 className="food-scanner-result__lead">
+        <h2 className="diary-result__lead">
           {leadVerb}:{" "}
           {editingName ? (
             <input
               id="food-dish-rename"
               type="text"
-              className="food-scanner-result__name-input"
+              className="diary-input diary-result__name-input"
               value={dishName}
               onChange={(e) => setDishName(e.target.value)}
               aria-label="Название блюда"
@@ -415,38 +396,28 @@ export function FoodScannerResultScreen() {
         </h2>
 
         {isLowConf && (
-          <p className="food-scanner-result__hedge">
-            Прикинула приблизительно — давай уточним вместе.
+          <p className="diary-hint">
+            <RecordIcon name="info" />
+            <span>Прикинула приблизительно — давай уточним вместе.</span>
           </p>
         )}
 
-        <section
-          className="food-scanner-result__metrics"
-          aria-labelledby="food-result-metrics-h2"
-        >
-          <h3
-            id="food-result-metrics-h2"
-            className="food-scanner-screen__section-heading"
-          >
+        <section className="diary-card diary-result__metrics" aria-labelledby="food-result-metrics-h2">
+          <h3 id="food-result-metrics-h2" className="diary-section__heading">
             Примерно
           </h3>
-          <div
-            ref={portionRowRef}
-            className="food-scanner-result__portion-row"
-          >
-            <span className="food-scanner-result__portion-label">
+          <div ref={portionRowRef} className="diary-portion">
+            <span className="diary-portion__label">
               Порция:{" "}
               {portionGrams != null ? `${portionGrams} г` : "—"}
             </span>
-            <div className="food-scanner-result__portion-controls">
+            <div className="diary-portion__controls">
               <button
                 type="button"
-                className="food-scanner-result__portion-btn"
+                className="diary-portion__btn"
                 aria-label="Уменьшить порцию"
                 disabled={portionMultiplier <= PORTION_STEPS[0]!}
-                onClick={() =>
-                  setPortionMultiplier((p) => nextPortion(p, "down"))
-                }
+                onClick={() => setPortionMultiplier((p) => nextPortion(p, "down"))}
               >
                 −
               </button>
@@ -458,20 +429,15 @@ export function FoodScannerResultScreen() {
                 lives on the metrics block so NVDA reads one coherent
                 sentence per portion change.
                */}
-              <span className="food-scanner-result__portion-value">
+              <span className="diary-portion__value">
                 {Math.round(portionMultiplier * 100)}%
               </span>
               <button
                 type="button"
-                className="food-scanner-result__portion-btn"
+                className="diary-portion__btn"
                 aria-label="Увеличить порцию"
-                disabled={
-                  portionMultiplier >=
-                  PORTION_STEPS[PORTION_STEPS.length - 1]!
-                }
-                onClick={() =>
-                  setPortionMultiplier((p) => nextPortion(p, "up"))
-                }
+                disabled={portionMultiplier >= PORTION_STEPS[PORTION_STEPS.length - 1]!}
+                onClick={() => setPortionMultiplier((p) => nextPortion(p, "up"))}
               >
                 +
               </button>
@@ -479,79 +445,43 @@ export function FoodScannerResultScreen() {
           </div>
           {showNumbers && (
             <div
-              className="food-scanner-result__nutrition"
+              className="diary-result__nutrition"
               role="status"
               aria-live="polite"
               aria-label={`Примерно ${
                 portionGrams ?? ""
               } граммов, ${calories} килокалорий.${macrosLabel}`}
             >
-              <p className="food-scanner-result__calories" aria-hidden="true">
+              <p className="diary-result__kcal" aria-hidden="true">
                 Калории: ~{calories} ккал
               </p>
               {macrosLine && (
-                <p className="food-scanner-result__macros" aria-hidden="true">
+                <p className="diary-result__macros" aria-hidden="true">
                   {macrosLine}
                 </p>
               )}
             </div>
           )}
           {hideNumbers && (
-            <p
-              className="food-scanner-result__ed-note"
-              role="status"
-              aria-live="polite"
-            >
+            <p className="diary-result__macros" role="status" aria-live="polite">
               Примерно — записала.
             </p>
           )}
         </section>
 
-        <section
-          className="food-scanner-screen__section"
-          aria-labelledby="food-result-mealtype-h3"
-        >
-          <h3
-            id="food-result-mealtype-h3"
-            className="food-scanner-screen__section-heading"
-          >
+        <section className="diary-section" aria-labelledby="food-result-mealtype-h3">
+          <h3 id="food-result-mealtype-h3" className="diary-section__heading">
             Когда
           </h3>
-          <div
-            className="food-scanner-screen__meal-chips"
-            role="radiogroup"
-            aria-labelledby="food-result-mealtype-h3"
-          >
-            {MEAL_TYPES.map((mt) => (
-              <button
-                key={mt}
-                type="button"
-                role="radio"
-                aria-checked={mealType === mt}
-                className={`food-scanner-screen__chip${
-                  mealType === mt ? " food-scanner-screen__chip--active" : ""
-                }`}
-                onClick={() => setMealType(mt)}
-              >
-                <span aria-hidden="true">{MEAL_TYPE_ICON[mt]}</span>
-                <span>{MEAL_TYPE_LABEL[mt]}</span>
-              </button>
-            ))}
-          </div>
+          <MealTypePicker value={mealType} onChange={setMealType} labelledBy="food-result-mealtype-h3" />
         </section>
 
-        <section
-          className="food-scanner-screen__section"
-          aria-labelledby="food-result-note-h3"
-        >
-          <h3
-            id="food-result-note-h3"
-            className="food-scanner-screen__section-heading"
-          >
+        <section className="diary-section" aria-labelledby="food-result-note-h3">
+          <h3 id="food-result-note-h3" className="diary-section__heading">
             Заметка
           </h3>
           <textarea
-            className="food-scanner-result__note"
+            className="diary-input diary-result__note"
             placeholder="(необязательно)"
             value={note}
             onChange={(e) => setNote(e.target.value)}
@@ -572,39 +502,38 @@ export function FoodScannerResultScreen() {
           backend can pre-wire; frontend ignores it for now.
          */}
 
-        <div className="food-scanner-screen__cta-stack">
+        <div className="cr-actions diary-actions">
           {diaryOff && (
-            <p className="food-scanner-diary__caption" role="status">{DIARY_OFF_TEXT}</p>
+            <p className="diary-caption" role="status">
+              {DIARY_OFF_TEXT}
+            </p>
           )}
           {!diaryOff && (
-            <button
-              type="button"
-              className="btn-primary"
-              disabled={busy}
-              onClick={onSave}
-            >
+            <RecordButton variant="primary" disabled={busy} onClick={onSave}>
               Записать в дневник
-            </button>
+            </RecordButton>
           )}
           {!diaryOff && (
+            // Свой `<button>`, а не `RecordButton`: фокус возвращается сюда,
+            // когда лист «Что поправить?» закрыт, — нужен `ref`. При низкой
+            // уверенности кнопка обведена: уточнить здесь уместнее всего.
             <button
               ref={clarifyTriggerRef}
               type="button"
-              className={`btn-secondary${
-                isLowConf ? " food-scanner-result__cta--hint" : ""
-              }`}
+              className={isLowConf ? "cr-btn cr-btn--soft diary-result__hint" : "cr-btn cr-btn--soft"}
+              disabled={busy}
               onClick={openClarify}
             >
-              Уточнить
+              <span>Уточнить</span>
             </button>
           )}
           {askForWeight && (
             // DRF-2371 — вместо числа, которого нет, дорога к числу: тот же
             // ручной ввод, что предлагает экран обработки при отказе. Имя
             // блюда переносим, чтобы не набирать заново.
-            <button
-              type="button"
-              className="btn-secondary"
+            <RecordButton
+              variant="soft"
+              disabled={busy}
               onClick={() =>
                 navigate("/customer/food-scanner/manual", {
                   state: {
@@ -616,15 +545,11 @@ export function FoodScannerResultScreen() {
               }
             >
               Написать вручную
-            </button>
+            </RecordButton>
           )}
-          <button
-            type="button"
-            className="btn-secondary"
-            onClick={onReject}
-          >
+          <RecordButton variant="text" disabled={busy} onClick={onReject}>
             Не то
-          </button>
+          </RecordButton>
         </div>
       </main>
 

@@ -18,6 +18,10 @@
  *   t≥10000ms     timeout — treat as NutritionUnavailableError
  *
  * Pulsing dot animation respects `prefers-reduced-motion` via CSS.
+ *
+ * DRF-2954 — вид по доске «Дневник» (кадры 4, 9), решения владельца 12.11:
+ * слова и переходы прежние; списка шагов распознавания нет (п.11): экран не
+ * знает, чем занят сервер.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -34,6 +38,8 @@ import {
   scanPhoto,
   type MealType,
 } from "../lib/food-scanner";
+import { RecordIcon } from "../components/records/RecordIcons";
+import { RecordButton } from "../components/records/RecordsState";
 import { ApiError } from "../lib/api";
 import { useScreenBack } from "../hooks/useScreenBack";
 import { backToOrigin } from "../lib/screen-back";
@@ -166,49 +172,37 @@ export function FoodScannerProcessingScreen() {
         err={phase.err}
         photo={photo ?? null}
         mealType={mealType}
-        previewUrl={previewUrl}
       />
     );
   }
 
   return (
-    <div className="food-scanner-screen">
-      <header className="records-screen__header">
-        <span className="records-screen__title">Распознавание</span>
+    <div className="cr-screen cr-screen--nested diary-screen">
+      <header className="cr-topbar diary-topbar diary-topbar--bare">
+        {/* Стрелки нет: распознавание идёт секунды и отменяется кнопкой. */}
+        <h1 className="diary-topbar__title">Распознавание</h1>
       </header>
-      <main
-        className="food-scanner-screen__main food-scanner-processing"
-        role="status"
-        aria-live="polite"
-      >
+      <main className="diary-main diary-processing" role="status" aria-live="polite">
         {previewUrl && (
-          <div className="food-scanner-processing__preview">
-            <img
-              src={previewUrl}
-              alt="Фото блюда"
-              className="food-scanner-processing__photo"
-            />
+          <div className="diary-processing__preview">
+            <img src={previewUrl} alt="Фото блюда" className="diary-processing__photo" />
           </div>
         )}
-        <p className="food-scanner-processing__line">Узнаю что на фото</p>
-        <div className="food-scanner-processing__dots" aria-hidden="true">
+        <p className="diary-processing__line">Узнаю что на фото</p>
+        <div className="diary-processing__dots" aria-hidden="true">
           <span />
           <span />
           <span />
         </div>
         {phase.kind === "showCancel" && (
           <>
-            <p className="food-scanner-processing__hint">
+            <p className="diary-processing__hint">
               Если занимает дольше обычного, можно отменить — фото останется на
               месте.
             </p>
-            <button
-              type="button"
-              className="btn-secondary food-scanner-processing__cancel"
-              onClick={cancel}
-            >
+            <RecordButton variant="soft" onClick={cancel}>
               Отменить
-            </button>
+            </RecordButton>
           </>
         )}
       </main>
@@ -225,7 +219,6 @@ function ScanErrorScreen({
   err,
   photo,
   mealType,
-  previewUrl,
   returnTo,
 }: {
   /**
@@ -244,9 +237,12 @@ function ScanErrorScreen({
   returnTo: string | undefined;
   photo: File | null;
   mealType: MealType;
-  previewUrl: string | null;
 }) {
   const navigate = useNavigate();
+  const titleRef = useRef<HTMLHeadingElement | null>(null);
+  useEffect(() => {
+    titleRef.current?.focus();
+  }, []);
   const isNotRecognized = err instanceof FoodNotRecognizedError;
   const isPhotoFailed = err instanceof PhotoBytesMissingError;
   // Ручки `/api/v1/customer/food/{scan,log,daily}` на боевом контуре
@@ -319,48 +315,49 @@ function ScanErrorScreen({
               : isNotWired
                 ? "Распознавание еды по фото в приложении ещё не работает. Дневник питания сейчас ведёт Ayla в чате."
                 : "Сервис распознавания временно недоступен. Попробуй через минуту.";
+  // Значок различает природу отказа, как состояния дневника (часть 1):
+  // нет разрешения — замок; выключено, исчерпано, не подключено — «i»;
+  // не распознано и сбои — красный знак (кадр 9). Иначе «нет согласия», «выключено» и «сбой» сливаются.
+  const badge = isConsentGate
+    ? { icon: "lock" as const, tone: "info" }
+    : isPhotoOff || isBudget || isNotWired
+      ? { icon: "info" as const, tone: "info" }
+      : { icon: "alert" as const, tone: "danger" };
+
+  // Кнопки — прежний набор и прежние условия; вид — столбцом (кадр 9).
+  // Главная — та, что ведёт дальше по рабочей дороге.
   return (
-    <div className="food-scanner-screen">
-      <header className="records-screen__header">
-        <button
-          type="button"
-          className="records-screen__back"
-          aria-label="Назад"
-          onClick={onBack}
-        >
-          <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
-            <path
-              d="M12 4l-6 6 6 6"
-              stroke="currentColor"
-              strokeWidth="2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            />
-          </svg>
+    <div className="cr-screen cr-screen--nested diary-screen">
+      <header className="cr-topbar diary-topbar">
+        <button type="button" className="cr-back" aria-label="Назад" onClick={onBack}>
+          <RecordIcon name="back" size={24} />
         </button>
-        <h1 className="records-screen__title">{headline}</h1>
       </header>
-      <main className="food-scanner-screen__main">
-        {previewUrl && (
-          <div className="food-scanner-processing__preview">
-            <img
-              src={previewUrl}
-              alt="Фото блюда"
-              className="food-scanner-processing__photo"
-            />
-          </div>
-        )}
-        <div className="callout food-scanner-screen__error" role="alert">
+      <main className="diary-main diary-scan-error">
+        <span
+          className={
+            badge.tone === "danger"
+              ? "cr-state__badge cr-state__badge--danger diary-scan-error__badge"
+              : "cr-state__badge cr-state__badge--info diary-scan-error__badge"
+          }
+        >
+          <RecordIcon name={badge.icon} size={40} />
+        </span>
+        {/* Заголовок ошибки — заголовком экрана: шапка его больше не несёт.
+            Экран подменяет распознавание на месте — фокус уводится сюда. */}
+        <h1 ref={titleRef} tabIndex={-1} className="diary-scan-error__title">
+          {headline}
+        </h1>
+        <p className="diary-scan-error__body" role="alert">
           {body}
-        </div>
-        <div className="food-scanner-screen__cta-stack">
+        </p>
+        <div className="cr-actions diary-actions">
           {/* Когда ручек нет, «Переснять» и «Написать вручную» ведут в ту
               же стену: `logMeal` закрыт тем же `guardProd`. Предлагать их
               значило бы врать второй раз, уже действием. */}
           {!isPhotoFailed && !isNotWired && !isPhotoOff && !isBudget && (
-            <button
-              type="button"
-              className="btn-primary"
+            <RecordButton
+              variant="primary"
               onClick={() =>
                 navigate("/customer/food-scanner/capture", {
                   replace: true,
@@ -369,25 +366,19 @@ function ScanErrorScreen({
               }
             >
               Переснять
-            </button>
+            </RecordButton>
           )}
           {(isPhotoFailed || isTooLarge || isConsentGate) && (
-            <button
-              type="button"
-              className="btn-primary"
-              onClick={() =>
-                navigate("/customer/food-scanner/capture", { replace: true })
-              }
+            <RecordButton
+              variant="primary"
+              onClick={() => navigate("/customer/food-scanner/capture", { replace: true })}
             >
               {isConsentGate ? "К сканеру" : "Сделать заново"}
-            </button>
+            </RecordButton>
           )}
           {!isPhotoFailed && !isNotWired && !isTooLarge && !isConsentGate && (
-            <button
-              type="button"
-              className={
-                isPhotoOff || isBudget ? "btn-primary" : "btn-secondary"
-              }
+            <RecordButton
+              variant={isPhotoOff || isBudget ? "primary" : "soft"}
               onClick={() =>
                 navigate("/customer/food-scanner/manual", {
                   state: { mealType, returnTo },
@@ -395,11 +386,11 @@ function ScanErrorScreen({
               }
             >
               Написать вручную
-            </button>
+            </RecordButton>
           )}
-          <button type="button" className="btn-secondary" onClick={onBack}>
+          <RecordButton variant="text" onClick={onBack}>
             Назад на главную
-          </button>
+          </RecordButton>
         </div>
       </main>
     </div>

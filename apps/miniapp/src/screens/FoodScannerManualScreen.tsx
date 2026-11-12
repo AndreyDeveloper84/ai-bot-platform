@@ -25,6 +25,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 
+import { RecordIcon } from "../components/records/RecordIcons";
+import { RecordButton } from "../components/records/RecordsState";
 import { Snackbar } from "../components/Snackbar";
 import { useScreenBack } from "../hooks/useScreenBack";
 import {
@@ -286,25 +288,26 @@ export function FoodScannerManualScreen() {
     }
   };
 
+  // DRF-2954 — вид по доске «Дневник» (кадры 6–7), решения владельца 12.11:
+  // слова прежние («Что съела?», «Оценить»), примеров-чипов и счётчика нет
+  // (п.11), блюдо одно (п.4).
   return (
-    <div className="food-scanner-screen">
-      <header className="records-screen__header">
-        <button type="button" className="records-screen__back" aria-label="Назад" onClick={onBack}>
-          <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
-            <path d="M12 4l-6 6 6 6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-          </svg>
+    <div className="cr-screen cr-screen--nested diary-screen">
+      <header className="cr-topbar diary-topbar">
+        <button type="button" className="cr-back" aria-label="Назад" onClick={onBack}>
+          <RecordIcon name="back" size={24} />
         </button>
-        <h1 className="records-screen__title">{MANUAL_COPY.title}</h1>
+        <h1 className="diary-topbar__title">{MANUAL_COPY.title}</h1>
       </header>
 
-      <main className="food-scanner-screen__main">
-        <section className="food-scanner-screen__section" aria-labelledby="food-manual-name-h3">
-          <h3 id="food-manual-name-h3" className="food-scanner-screen__section-heading">
+      <main className="diary-main">
+        <section className="diary-section" aria-labelledby="food-manual-name-h3">
+          <h2 id="food-manual-name-h3" className="diary-lead">
             {MANUAL_COPY.whatField}
-          </h3>
+          </h2>
           <input
             type="text"
-            className="food-scanner-result__name-input"
+            className="diary-input"
             value={text}
             onChange={(e) => {
               setText(e.target.value);
@@ -314,57 +317,55 @@ export function FoodScannerManualScreen() {
             aria-label={MANUAL_COPY.whatInputLabel}
             disabled={busy !== "idle"}
           />
-          <p className="food-scanner-screen__hint">{MANUAL_COPY.whatHint}</p>
+          <p className="diary-caption">{MANUAL_COPY.whatHint}</p>
           {!card && (
-            <div className="food-scanner-screen__cta-stack">
-              <button type="button" className="btn-primary" disabled={busy !== "idle"} onClick={() => void estimate()}>
-                {busy === "estimating" ? MANUAL_COPY.estimating : MANUAL_COPY.estimate}
-              </button>
-            </div>
+            <RecordButton variant="primary" disabled={busy !== "idle"} onClick={() => void estimate()}>
+              {busy === "estimating" ? MANUAL_COPY.estimating : MANUAL_COPY.estimate}
+            </RecordButton>
           )}
         </section>
 
         {card && (
-          <section className="food-scanner-screen__section food-text-card" aria-label="Я распознала так" data-testid="estimate-card">
+          <section className="diary-card diary-estimate" aria-label="Я распознала так" data-testid="estimate-card">
             {renderEstimateLines(card.estimate).map((line) => (
-              <p key={line} className="food-text-card__line">
+              <p key={line} className="diary-estimate__line">
                 {line}
               </p>
             ))}
             {gramsOpen ? (
-              <div className="food-text-card__grams">
-                <label className="food-scanner-screen__section-heading" htmlFor="food-manual-grams">
+              <div className="diary-grams">
+                <label className="diary-grams__label" htmlFor="food-manual-grams">
                   {MANUAL_COPY.gramsField}
                 </label>
                 <input
                   id="food-manual-grams"
                   type="text"
                   inputMode="numeric"
-                  className="food-scanner-result__name-input"
+                  className="diary-grams__input"
                   value={grams}
                   onChange={(e) => setGrams(e.target.value)}
                   placeholder="например, 300"
                   disabled={busy !== "idle"}
                 />
-                <div className="food-scanner-screen__cta-stack">
-                  <button type="button" className="btn-primary" disabled={busy !== "idle"} onClick={recalc}>
+                <div className="cr-actions diary-actions">
+                  <RecordButton variant="primary" disabled={busy !== "idle"} onClick={recalc}>
                     {busy === "estimating" ? MANUAL_COPY.estimating : MANUAL_COPY.recalc}
-                  </button>
-                  <button type="button" className="btn-secondary" disabled={busy !== "idle"} onClick={() => setGramsOpen(false)}>
+                  </RecordButton>
+                  <RecordButton variant="text" disabled={busy !== "idle"} onClick={() => setGramsOpen(false)}>
                     {MANUAL_COPY.cancelGrams}
-                  </button>
+                  </RecordButton>
                 </div>
               </div>
             ) : (
               <>
-                <p className="food-text-card__line">{confirmQuestionFor(card.estimate)}</p>
-                <div className="food-scanner-screen__cta-stack">
-                  <button type="button" className="btn-primary" disabled={busy !== "idle"} onClick={() => void save()}>
+                <p className="diary-estimate__question">{confirmQuestionFor(card.estimate)}</p>
+                <div className="cr-actions diary-actions">
+                  <RecordButton variant="primary" disabled={busy !== "idle"} onClick={() => void save()}>
                     {busy === "saving" ? MANUAL_COPY.saving : MANUAL_COPY.toDiary}
-                  </button>
-                  <button type="button" className="btn-secondary" disabled={busy !== "idle"} onClick={() => setGramsOpen(true)}>
+                  </RecordButton>
+                  <RecordButton variant="soft" disabled={busy !== "idle"} onClick={() => setGramsOpen(true)}>
                     {MANUAL_COPY.fixGrams}
-                  </button>
+                  </RecordButton>
                 </div>
               </>
             )}

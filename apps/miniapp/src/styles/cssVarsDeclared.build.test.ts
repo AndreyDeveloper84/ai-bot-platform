@@ -49,8 +49,11 @@ const AYLA_CHAT = readFileSync(
 const KNOWN_UNDECLARED: Record<string, { uses: number; why: string }> = {
   // `--c-surface` снят 28.09 (§6-хи): два правила объявляют `transparent`
   // явно, имени больше нет — любое новое `var(--c-surface)` теперь красное.
+  // DRF-2954 (часть 2): два места ушли вместе с прежними экранами сканера —
+  // `.food-scanner-consent__body` (согласие теперь `.diary-consent__body`
+  // без этого имени) и мёртвое `.food-scanner-result__beauty-line`.
   "--leading-normal": {
-    uses: 14,
+    uses: 12,
     why: "межстрочный наследуется — замена меняет вёрстку (DRF-2150)",
   },
   // `--text-body-size` снят с DRF-2933: все девять мест жили в инлайновых
