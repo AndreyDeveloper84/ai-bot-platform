@@ -182,6 +182,11 @@ function statusLine(booking: BookingItem): string | null {
   return rendering.label;
 }
 
+/** 404 сервера — записи нет (или она не этого человека: сервер их не различает). */
+function isGone(err: unknown): boolean {
+  return err instanceof ApiError && err.status === 404;
+}
+
 export function CustomerBookingDetailScreen() {
   const navigate = useNavigate();
   const online = useOnline();
@@ -293,11 +298,20 @@ export function CustomerBookingDetailScreen() {
       // Исход неизвестен: запрос мог дойти, а ответ — потеряться. Правду
       // говорит запись, поэтому сначала читаем её.
       let fresh: BookingItem | null = null;
+      let rereadErr: unknown = null;
       try {
         fresh = await getBookingDetail(bookingId);
         if (settle(fresh)) return;
-      } catch {
+      } catch (e) {
         /* перечитать не вышло — решаем по самой ошибке ниже */
+        rereadErr = e;
+      }
+      if (isGone(err) && isGone(rereadErr)) {
+        // Записи нет ни для отмены, ни для чтения: это не «не удалось
+        // отменить» с повтором, а «Этой записи больше нет» (ревью #2458).
+        setView({ kind: "card" });
+        setLoad({ kind: "error", err: rereadErr });
+        return;
       }
       if (fresh?.status === "cancel_requested") {
         // Отмена дошла и идёт: её добьёт сервер. «Не удалось» было бы ложью.

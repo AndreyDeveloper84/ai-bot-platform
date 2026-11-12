@@ -474,6 +474,36 @@ describe("кадр 10 — отмена не удалась", () => {
     expect(mockedRequest).toHaveBeenCalledTimes(1);
   });
 
+  it("404 и на отмене, и на перечитывании — «Этой записи больше нет», а не «не удалось» с повтором", async () => {
+    const user = userEvent.setup();
+    mockedFetch.mockResolvedValueOnce({ booking: FUTURE });
+    mockedRequest.mockImplementation(async () => {
+      mockedFetch.mockRejectedValue(new ApiError(404, "not_found", "booking not found"));
+      throw new ApiError(404, "not_found", "booking not found");
+    });
+    renderScreen("b-1");
+
+    await user.click(await cancelButton());
+    await user.click(confirmYes());
+
+    expect(await screen.findByRole("heading", { name: DETAIL_COPY.goneTitle })).toBeInTheDocument();
+    expect(screen.queryByText(DETAIL_COPY.failedTitle)).not.toBeInTheDocument();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("404 на отмене, а запись читается — это отказ, не «записи нет»", async () => {
+    const user = userEvent.setup();
+    mockedFetch.mockImplementation(answered(FUTURE));
+    mockedRequest.mockRejectedValue(new ApiError(404, "not_found", ""));
+    renderScreen("b-1");
+
+    await user.click(await cancelButton());
+    await user.click(confirmYes());
+
+    expect(await screen.findByRole("heading", { name: DETAIL_COPY.failedTitle })).toBeInTheDocument();
+    expect(screen.queryByText(DETAIL_COPY.goneTitle)).not.toBeInTheDocument();
+  });
+
   it("сбой, но запись уже отменена — это кадр 9, а не «не удалось»", async () => {
     const user = userEvent.setup();
     mockedFetch.mockResolvedValueOnce({ booking: FUTURE });
