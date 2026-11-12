@@ -1,124 +1,131 @@
 /**
- * Customer records screen — REAL bookings (pilot phase 3.2).
+ * «Записи» клиента — список. Макет «Записи.png» (набор владельца от
+ * 06.10.2026, DRF-2952), кадры 1, 2, 12, 14–16.
  *
- * Spec: `docs/screens/customer-records-flow.md` §3 (R1 main records
- * list) + §7 (R5 empty states) + §9 (states matrix).
+ * # Что на экране
  *
- * Phase 3.2 (stub removal, orchestrator GO): data comes from the real
- * `GET /bookings/list` (upcoming / `?status=past` history) via
- * `lib/customer-records.ts`. Gone with the stub: multi-tenant groupings
- * (single-tenant pilot — the field doesn't exist upstream), «Сообщить
- * по записи» AMM modal (no endpoint), repeat-intent prefill (no
- * endpoint — «Записаться ещё» opens the real catalog), invented
- * prices/addresses. Home = records: this screen is the tab root at
- * `/customer/main` (also mounted at `/customer/records`).
+ *   - шапка «Ayla ✦» и дверь в профиль; `<h1>Записи</h1>` остаётся для
+ *     читающих с экрана — на макете заголовка нет, раздел называет вкладка
+ *     нижней панели;
+ *   - сегмент «Предстоящие | Прошедшие»;
+ *   - «Предстоящие»: раздел «Предстоящие записи», под ним — «Прошедшие
+ *     записи» (кадр 1): три самые свежие и кнопка «Все прошедшие»;
+ *   - «Прошедшие»: список; у самой свежей записи — «Повторить запись» и
+ *     «Посмотреть детали» (кадр 12);
+ *   - записей нет вовсе — кадр 2, без сегмента.
  *
- * # Tab structure (unchanged)
+ * # Что осталось, хотя на макете этого нет
  *
- * Two top-level tabs «Ближайшие (N)» / «История (N)», default
- * «Ближайшие». Filter chips on «История» when total past >= 5 (Tau
- * §13 implementer note #8) — unique masters from the loaded data.
+ * Правило DRF-2948: работающую возможность нельзя убрать молча.
  *
- * # 5-state matrix (Wellness pattern reuse)
+ *   - `GoalInviteCard` первым (решение владельца 31.08) — показывается по
+ *     серверному `decision-context.missing`, не по «нет записей»;
+ *   - полоса «нет сети» и выключенные вместе с ней действия;
+ *   - настоящая постраничная загрузка обоих разделов;
+ *   - фильтр прошедших по мастеру, когда записей пять и больше;
+ *   - «Оценить визит» — у свежей записи кнопкой, у остальных строкой на
+ *     карточке; сама оценка — в карточке записи;
+ *   - статус и оплата на карточке, когда они не обычные.
  *
- *   loading  → 3 skeleton cards
- *   ok       → render time buckets
- *   empty    → EmptyRecordsState
- *   error    → generic copy + retry
- *   offline  → banner «Записи могут быть устаревшими»
+ * # Что ушло
  *
- * # Вход в анкету цели (решение владельца 30.08)
+ * Заголовки «Сегодня / Завтра / На этой неделе» и месяцы в истории (дата
+ * стоит на карточке, год дописывается, когда он не текущий), счётчики во
+ * вкладках (это было число загруженных, а не всех), кнопки «Перенести» и
+ * «Отменить» на ближайшей карточке — действия живут в карточке записи.
  *
- * Первым на экране — `GoalInviteCard`, над записями и над «Найти
- * услугу». Показывается по серверному `decision-context.missing`, не по
- * эвристике «нет записей»; секция, а не модалка и не шаг мастера, так
- * что дорога к записи не перекрыта. Порядок нормативный: решение
- * владельца 31.08 поверх BOT-001 §13, принятое при полном знании
- * возражений (разбор — в теле PR #1342).
+ * # Корень вкладки
  *
- * # Voice locks
- *
- *   - «Записи» (NOT «Bookings»), «ты» canonical, no exclamation marks
- *
- * # WCAG (§13 inline)
- *
- *   - Tab strip uses role="tablist" / role="tab" / aria-controls.
- *   - Skip link «К списку записей» so SR users can bypass the header.
- *   - Time group headers use heading semantics.
+ * Экран — корень клиентской поверхности: нижняя панель стоит вне веток
+ * состояний (DRF-2191 — отказ ручки не отнимает выход), стрелки «назад» нет.
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { BookingCard, BookingCardSkeleton } from "../components/BookingCard";
 import { CustomerAvatarEntry } from "../components/CustomerAvatarEntry";
 import { CustomerTabBar } from "../components/CustomerTabBar";
-import { EmptyRecordsState } from "../components/EmptyRecordsState";
 import { GoalInviteCard } from "../components/GoalInviteCard";
-import { TimeGroupHeader } from "../components/TimeGroupHeader";
+import { RecordCard, RecordCardSkeleton } from "../components/records/RecordCard";
+import { RecordsLoadError } from "../components/records/RecordsLoadError";
+import { RecordButton, RecordsState } from "../components/records/RecordsState";
 import { useOnline } from "../hooks/useOnline";
-import { authErrorCopy, loadErrorReason, type LoadErrorReason } from "../lib/auth-error-copy";
+import { useScreenBack } from "../hooks/useScreenBack";
 import {
-  annotateItems,
   getMyBookings,
-  type AnnotatedRecordItem,
   type BookingSection,
   type RecordItem,
   type RecordsPage,
 } from "../lib/customer-records";
-import { useScreenBack } from "../hooks/useScreenBack";
 import { screenRoot } from "../lib/screen-back";
 
-// ---------------------------------------------------------------------------
-// State model — per-section isolation so flipping tabs doesn't blank the
-// other.
-// ---------------------------------------------------------------------------
-
-type Slice<T> =
+type Slice =
   | { kind: "loading" }
-  | { kind: "ok"; data: T }
-  | { kind: "error"; reason: LoadErrorReason };
+  | { kind: "ok"; data: RecordsPage }
+  | { kind: "error"; err: unknown };
 
 const FILTER_ALL = "__all__";
+/** Сколько прошедших показывает вкладка «Предстоящие» (кадр 1). */
+const HISTORY_PREVIEW = 3;
+/** Фильтр по мастеру — когда прошедших набралось столько. */
+const FILTER_FROM = 5;
+/** Причина выключенной кнопки — одна на все. */
+const OFFLINE_HINT = "Нет сети";
 
-// ---------------------------------------------------------------------------
-// Main screen.
-// ---------------------------------------------------------------------------
+export const RECORDS_COPY = {
+  tabUpcoming: "Предстоящие",
+  tabHistory: "Прошедшие",
+  upcomingHeading: "Предстоящие записи",
+  historyHeading: "Прошедшие записи",
+  emptyTitle: "У тебя пока нет записей",
+  emptyBody: "Найди подходящего мастера и запишись на первую процедуру.",
+  emptyBodyAyla: "поможет с выбором.",
+  findMaster: "Найти мастера",
+  noUpcoming: "Предстоящих записей нет.",
+  noHistory: "История накопится после первых визитов.",
+  allHistory: "Все прошедшие",
+  repeat: "Повторить запись",
+  details: "Посмотреть детали",
+  rate: "Оценить визит",
+  loadFailed: "Не удалось загрузить записи",
+  more: "Показать ещё",
+  moreBusy: "Загружаю…",
+  filterEmpty: "По этому фильтру записей нет.",
+  filterReset: "Показать все",
+  offline:
+    "Записи могут быть устаревшими — нет сети. Перенос, отмена и новая запись сейчас недоступны.",
+} as const;
 
 export function CustomerRecordsScreen() {
   const navigate = useNavigate();
 
-  // Вид экрана (DRF-1493): корень. «Записи» — дом клиентской
-  // поверхности (`/customer/main` и `/customer/records`), и у экрана
-  // есть собственная нижняя навигация: выход отсюда — соседняя
-  // вкладка, а не «назад». Объявление обязательно даже здесь — молчать
-  // о виде нельзя, иначе следующий экран промолчит по недосмотру.
+  // Вид экрана (DRF-1493): корень. У «Записей» собственная вкладка нижней
+  // панели — выход отсюда через соседнюю вкладку, а не «назад». Объявление
+  // обязательно и здесь: кто рисует панель, тот объявил корень (DRF-2201).
   useScreenBack(
     screenRoot(
-      "«Записи» — дом клиентской поверхности и корневая вкладка; " +
-        "выход отсюда через нижнюю навигацию.",
+      "«Записи» — корневая вкладка клиентской поверхности; выход отсюда через нижнюю навигацию.",
     ),
   );
 
   const [activeTab, setActiveTab] = useState<BookingSection>("upcoming");
-  const [upcoming, setUpcoming] = useState<Slice<RecordsPage>>({
-    kind: "loading",
-  });
-  const [history, setHistory] = useState<Slice<RecordsPage>>({
-    kind: "loading",
+  const [upcoming, setUpcoming] = useState<Slice>({ kind: "loading" });
+  const [history, setHistory] = useState<Slice>({ kind: "loading" });
+  const [filter, setFilter] = useState<string>(FILTER_ALL);
+  // Догрузка — у каждого раздела своя: общий признак включал бы кнопку
+  // одного раздела по завершении запроса другого.
+  const [loadingMore, setLoadingMore] = useState<Record<BookingSection, boolean>>({
+    upcoming: false,
+    history: false,
   });
   const online = useOnline();
-  const [filter, setFilter] = useState<{ active: string }>({ active: FILTER_ALL });
-  const [loadingMore, setLoadingMore] = useState(false);
 
-  // ── data fetch ────────────────────────────────────────────────────────
   const fetchSection = useCallback(async (section: BookingSection) => {
     const setSlice = section === "upcoming" ? setUpcoming : setHistory;
     setSlice({ kind: "loading" });
     try {
-      const data = await getMyBookings(section);
-      setSlice({ kind: "ok", data });
-    } catch (e) {
-      setSlice({ kind: "error", reason: loadErrorReason(e) });
+      setSlice({ kind: "ok", data: await getMyBookings(section) });
+    } catch (err) {
+      setSlice({ kind: "error", err });
     }
   }, []);
 
@@ -127,411 +134,356 @@ export function CustomerRecordsScreen() {
     void fetchSection("history");
   }, [fetchSection]);
 
-  // «Показать ещё» — real cursor pagination (`before` = next_cursor).
-  const loadMore = useCallback(async () => {
-    const slice = activeTab === "upcoming" ? upcoming : history;
-    if (slice.kind !== "ok" || !slice.data.nextCursor) return;
-    const cursor = slice.data.nextCursor;
-    setLoadingMore(true);
-    try {
-      const page = await getMyBookings(activeTab, cursor);
-      const setSlice = activeTab === "upcoming" ? setUpcoming : setHistory;
-      setSlice((s) =>
-        s.kind === "ok"
-          ? {
-              kind: "ok",
-              data: {
-                ...s.data,
-                items: [...s.data.items, ...page.items],
-                totalCount: s.data.totalCount + page.items.length,
-                nextCursor: page.nextCursor,
-              },
-            }
-          : s,
-      );
-    } catch {
-      /* load-more failure is silent — the button stays for a retry */
-    } finally {
-      setLoadingMore(false);
-    }
-  }, [activeTab, upcoming, history]);
+  // «Показать ещё» — настоящая постраничная загрузка (`before` = next_cursor).
+  const loadMore = useCallback(
+    async (section: BookingSection) => {
+      const slice = section === "upcoming" ? upcoming : history;
+      if (slice.kind !== "ok" || !slice.data.nextCursor) return;
+      setLoadingMore((m) => ({ ...m, [section]: true }));
+      try {
+        const page = await getMyBookings(section, slice.data.nextCursor);
+        const setSlice = section === "upcoming" ? setUpcoming : setHistory;
+        setSlice((s) => {
+          if (s.kind !== "ok") return s;
+          // Строка, которая уже показана, второй раз не добавляется: сервер
+          // на повторном курсоре может вернуть те же записи.
+          const seen = new Set(s.data.items.map((b) => b.bookingId));
+          const fresh = page.items.filter((b) => !seen.has(b.bookingId));
+          return {
+            kind: "ok",
+            data: {
+              ...s.data,
+              items: [...s.data.items, ...fresh],
+              // Ничего нового не пришло — дальше листать нечего.
+              nextCursor: fresh.length > 0 ? page.nextCursor : null,
+            },
+          };
+        });
+      } catch {
+        /* тихо: кнопка остаётся, повтор — следующим нажатием */
+      } finally {
+        setLoadingMore((m) => ({ ...m, [section]: false }));
+      }
+    },
+    [upcoming, history],
+  );
 
-  // Reset filter when switching tabs.
   useEffect(() => {
-    setFilter({ active: FILTER_ALL });
+    setFilter(FILTER_ALL);
   }, [activeTab]);
 
-  // ── derived state ────────────────────────────────────────────────────
-  const upcomingData = upcoming.kind === "ok" ? upcoming.data : null;
-  const historyData = history.kind === "ok" ? history.data : null;
-
-  const upcomingCount = upcomingData?.totalCount ?? 0;
-  const historyCount = historyData?.totalCount ?? 0;
-
-  // Filter chip eligibility — Tau §13 #8: show only when history has >=5.
-  const filterChipsEnabled = activeTab === "history" && historyCount >= 5;
-
-  // Unique master names from the loaded history — no hardcoded list.
-  const masterFilterOptions = useMemo(() => {
-    if (!filterChipsEnabled || !historyData) return [];
-    const seen = new Set<string>();
-    const ordered: string[] = [];
-    for (const b of historyData.items) {
-      if (!seen.has(b.masterName)) {
-        seen.add(b.masterName);
-        ordered.push(b.masterName);
-      }
-    }
-    return ordered;
-  }, [filterChipsEnabled, historyData]);
-
-  // Apply the master filter to the active section's items.
-  const annotatedItems: AnnotatedRecordItem[] = useMemo(() => {
-    const data = activeTab === "upcoming" ? upcomingData : historyData;
-    if (!data) return [];
-    const items =
-      filter.active === FILTER_ALL
-        ? data.items
-        : data.items.filter((b) => b.masterName === filter.active);
-    return annotateItems(items, activeTab);
-  }, [activeTab, historyData, upcomingData, filter.active]);
-
-  const slice = activeTab === "upcoming" ? upcoming : history;
-  const sectionCount = activeTab === "upcoming" ? upcomingCount : historyCount;
-
-  // Empty-state branching — Tau §9.1.
-  const emptyVariant:
-    | "no_bookings_ever"
-    | "no_upcoming_has_past"
-    | "no_history_has_upcoming"
-    | null = (() => {
-    if (slice.kind !== "ok" || sectionCount > 0) return null;
-    if (activeTab === "upcoming") {
-      if (historyCount === 0) return "no_bookings_ever";
-      return "no_upcoming_has_past";
-    }
-    if (upcomingCount > 0) return "no_history_has_upcoming";
-    return "no_bookings_ever";
-  })();
-
-  // ── handlers ─────────────────────────────────────────────────────────
-  const handleOpenBooking = useCallback(
-    (b: RecordItem) => {
-      navigate(`/customer/records/${b.bookingId}`);
-    },
-    [navigate],
+  const upcomingItems = useMemo(
+    () => (upcoming.kind === "ok" ? upcoming.data.items : []),
+    [upcoming],
+  );
+  const historyItems = useMemo(
+    () => (history.kind === "ok" ? history.data.items : []),
+    [history],
   );
 
-  const handleReschedule = useCallback(
-    (b: RecordItem) => {
-      // Real reschedule flow (единственный экран переноса; канонический
-      // адрес — `/customer/records/:id/reschedule`, DRF-1481).
-      navigate(`/customer/records/${b.bookingId}/reschedule`);
-    },
-    [navigate],
+  // Кадр 2 законен, только когда ОБА раздела прочитаны и пусты: пока история
+  // грузится или упала, «записей нет» было бы догадкой.
+  const nothingAtAll =
+    upcoming.kind === "ok" &&
+    history.kind === "ok" &&
+    upcomingItems.length === 0 &&
+    historyItems.length === 0;
+
+  // Оба раздела не прочитаны — это кадры 14–16 целиком, без сегмента:
+  // переключаться не между чем.
+  const nothingLoaded = upcoming.kind === "error" && history.kind === "error";
+
+  const filterEnabled = historyItems.length >= FILTER_FROM;
+  const masterOptions = useMemo(() => {
+    if (!filterEnabled) return [];
+    return Array.from(new Set(historyItems.map((b) => b.masterName).filter(Boolean)));
+  }, [filterEnabled, historyItems]);
+  const shownHistory = useMemo(
+    () =>
+      filter === FILTER_ALL ? historyItems : historyItems.filter((b) => b.masterName === filter),
+    [filter, historyItems],
   );
 
-  const handleCancel = useCallback(
-    (b: RecordItem) => {
-      // Cancel flow lives on the detail screen (real 2-step + undo).
-      navigate(`/customer/records/${b.bookingId}`);
-    },
+  const open = useCallback(
+    (b: RecordItem) => navigate(`/customer/records/${b.bookingId}`),
     [navigate],
   );
+  // Готового «повтора» у сервера нет: настоящий путь — каталог.
+  const repeat = useCallback(() => navigate("/customer/catalog"), [navigate]);
+  const rate = useCallback((b: RecordItem) => navigate(`/feedback/${b.bookingId}`), [navigate]);
+  const findMaster = useCallback(() => navigate("/customer/catalog"), [navigate]);
+  const askAyla = useCallback(() => navigate("/customer/ayla"), [navigate]);
 
-  const handleRepeat = useCallback(() => {
-    // No prefill endpoint in the pilot — the real catalog is the honest
-    // repeat path (phase 3.1 made it real).
-    navigate("/customer/catalog");
-  }, [navigate]);
+  const loadMoreButton = (section: BookingSection, slice: Slice) =>
+    slice.kind === "ok" &&
+    slice.data.nextCursor && (
+      <div className="cr-more">
+        <RecordButton
+          variant="soft"
+          onClick={() => void loadMore(section)}
+          disabled={loadingMore[section]}
+        >
+          {loadingMore[section] ? RECORDS_COPY.moreBusy : RECORDS_COPY.more}
+        </RecordButton>
+      </div>
+    );
 
-  const handleReview = useCallback(
-    (b: RecordItem) => {
-      navigate(`/feedback/${b.bookingId}`);
-    },
-    [navigate],
+  const skeletons = (
+    <div className="cr-list" aria-hidden="true">
+      <RecordCardSkeleton />
+      <RecordCardSkeleton />
+      <RecordCardSkeleton />
+    </div>
   );
 
-  const handleAskAyla = useCallback(() => {
-    navigate("/");
-  }, [navigate]);
-
-  const handleFindService = useCallback(() => {
-    navigate("/customer/catalog");
-  }, [navigate]);
-
-  // ── render ────────────────────────────────────────────────────────────
   return (
-    <div className="records-screen" lang="ru">
-      {/* WCAG 2.4.1 skip link. */}
+    <div className="records-screen cr-screen" lang="ru">
+      {/* WCAG 2.4.1 — мимо шапки сразу к списку. */}
       <a className="records-screen__skip-link" href="#records-main">
         К списку записей
       </a>
 
-      <header className="records-screen__header" role="banner">
-        <h1 className="records-screen__title">Записи</h1>
-        {/* Вход в профиль — §77 п.60. Стоит на всех экранах нижней
-            панели: вход, который есть не везде, читается как «иногда
-            можно». Имя компонент берёт сам — у этого экрана его нет. */}
+      <header className="cr-brandbar" role="banner">
+        <h1 className="visually-hidden">Записи</h1>
+        <span className="cr-brand" aria-hidden="true">
+          <span lang="en">Ayla</span>
+          <svg className="cr-brand__star" width="18" height="18" viewBox="0 0 24 24">
+            <path d="M12 1.5c.9 5.6 4.9 9.6 10.5 10.5-5.6.9-9.6 4.9-10.5 10.5-.9-5.6-4.9-9.6-10.5-10.5 5.6-.9 9.6-4.9 10.5-10.5z" />
+          </svg>
+        </span>
+        {/* Вход в профиль — §77 п.60: стоит на всех экранах нижней панели. */}
         <CustomerAvatarEntry />
       </header>
 
-      {!online && (
-        <div
-          className="records-screen__offline-banner"
-          role="status"
-          aria-live="polite"
-        >
-          Записи могут быть устаревшими — нет сети. Перенос, отмена и
-          новая запись сейчас недоступны.
+      {/* Полоса говорит «показанное могло устареть». Когда не загрузилось
+          ничего, устаревать нечему — тогда говорит сам кадр «нет сети». */}
+      {!online && !nothingLoaded && (
+        <div className="records-screen__offline-banner" role="status" aria-live="polite">
+          {RECORDS_COPY.offline}
         </div>
       )}
 
-      {/* Вход в анкету цели — ПЕРВЫМ, над записями и над «Найти
-          услугу». Порядок задан решением владельца 31.08, принятым
-          поверх BOT-001 §13 при полном знании возражений (разбор — в
-          теле PR #1342). Заголовок экрана остаётся выше: домашний
-          экран не подменяется экраном анкеты.
-
-          Карточка ничего не требует и ничего не загораживает — табы,
-          список, «Найти услугу» и нижняя навигация работают без
-          ответа на вопрос (AC-5.2, non-goal #1/#3). Показывается по
-          серверному `decision-context.missing`, не по эвристике «нет
-          записей». */}
+      {/* Приглашение к цели — ПЕРВЫМ, над записями (решение владельца 31.08
+          поверх BOT-001 §13). Ничего не требует и ничего не загораживает. */}
       <GoalInviteCard />
 
-      {/* Tab strip — WCAG 1.3.1 role=tablist. */}
-      <div
-        className="records-screen__tabs"
-        role="tablist"
-        aria-label="Раздел записей"
-      >
-        <button
-          type="button"
-          role="tab"
-          id="records-tab-upcoming"
-          aria-selected={activeTab === "upcoming"}
-          aria-controls="records-panel-upcoming"
-          className={`records-screen__tab${activeTab === "upcoming" ? " records-screen__tab--active" : ""}`}
-          onClick={() => setActiveTab("upcoming")}
-        >
-          Ближайшие{upcomingCount > 0 && ` (${upcomingCount})`}
-        </button>
-        <button
-          type="button"
-          role="tab"
-          id="records-tab-history"
-          aria-selected={activeTab === "history"}
-          aria-controls="records-panel-history"
-          className={`records-screen__tab${activeTab === "history" ? " records-screen__tab--active" : ""}`}
-          onClick={() => setActiveTab("history")}
-        >
-          История{historyCount > 0 && ` (${historyCount})`}
-        </button>
-      </div>
-
-      <main
-        id="records-main"
-        className="records-screen__main"
-        role="tabpanel"
-        aria-labelledby={
-          activeTab === "upcoming"
-            ? "records-tab-upcoming"
-            : "records-tab-history"
-        }
-      >
-        {/* Filter chips — history tab only when count >=5. */}
-        {filterChipsEnabled && (
-          <div
-            className="records-screen__filter-row"
-            role="group"
-            aria-label="Фильтр истории"
-          >
-            <button
-              type="button"
-              className={`records-screen__chip${filter.active === FILTER_ALL ? " records-screen__chip--active" : ""}`}
-              aria-pressed={filter.active === FILTER_ALL}
-              onClick={() => setFilter({ active: FILTER_ALL })}
-            >
-              Все
-            </button>
-            {masterFilterOptions.map((name) => (
-              <button
-                key={name}
-                type="button"
-                className={`records-screen__chip${filter.active === name ? " records-screen__chip--active" : ""}`}
-                aria-pressed={filter.active === name}
-                onClick={() => setFilter({ active: name })}
-              >
-                У {name}
-              </button>
-            ))}
-          </div>
-        )}
-
-        {/* Loading. */}
-        {slice.kind === "loading" && (
-          <div className="records-screen__list">
-            <BookingCardSkeleton />
-            <BookingCardSkeleton />
-            <BookingCardSkeleton />
-          </div>
-        )}
-
-        {/* Error. */}
-        {slice.kind === "error" && (
-          <div className="records-screen__error" role="status" aria-live="polite">
-            {/* DRF-1319 D-1: отказ входа — своим именем, как на Hello и в StateError. */}
-            {slice.reason.kind === "auth" && (
-              <p style={{ fontWeight: 600 }}>{authErrorCopy(slice.reason.slug).title}</p>
-            )}
-            <p>
-              {slice.reason.kind === "auth"
-                ? authErrorCopy(slice.reason.slug).body
-                : slice.reason.kind === "network"
-                  ? "Не получилось загрузить. Проверь интернет."
-                  : "Что-то пошло не так. Попробуй ещё раз через минуту."}
-            </p>
-            <button
-              type="button"
-              className="btn-secondary"
-              onClick={() => void fetchSection(activeTab)}
-            >
-              Обновить
-            </button>
-          </div>
-        )}
-
-        {/* Empty. */}
-        {slice.kind === "ok" && emptyVariant && (
-          <EmptyRecordsState
-            variant={emptyVariant}
-            onFindService={handleFindService}
-            onAskAyla={handleAskAyla}
-            onRepeatLast={() => setActiveTab("history")}
-            onGoToHistory={() => setActiveTab("history")}
+      <main id="records-main" className="cr-main">
+        {nothingLoaded ? (
+          <RecordsLoadError
+            err={upcoming.err}
+            online={online}
+            title={RECORDS_COPY.loadFailed}
+            onRetry={() => {
+              void fetchSection("upcoming");
+              void fetchSection("history");
+            }}
           />
-        )}
-
-        {/* Filter active but produced 0 items. */}
-        {slice.kind === "ok" &&
-          !emptyVariant &&
-          annotatedItems.length === 0 && (
-            <div
-              className="records-screen__filter-empty"
-              role="status"
-              aria-live="polite"
-            >
-              <p>По этому фильтру записей нет.</p>
-              <button
-                type="button"
-                className="btn-secondary"
-                onClick={() => setFilter({ active: FILTER_ALL })}
-              >
-                Показать все
-              </button>
+        ) : nothingAtAll ? (
+          <RecordsState
+            icon="calendar"
+            title={RECORDS_COPY.emptyTitle}
+            quiet
+            body={
+              <p>
+                {RECORDS_COPY.emptyBody} <span lang="en">Ayla</span> {RECORDS_COPY.emptyBodyAyla}
+              </p>
+            }
+            actions={
+              <>
+                <RecordButton variant="primary" onClick={findMaster}>
+                  {RECORDS_COPY.findMaster}
+                </RecordButton>
+                <RecordButton variant="soft" icon="ayla" onClick={askAyla}>
+                  Спросить <span lang="en">Ayla</span>
+                </RecordButton>
+              </>
+            }
+          />
+        ) : (
+          <>
+            <div className="cr-segment" role="tablist" aria-label="Раздел записей">
+              {(
+                [
+                  ["upcoming", RECORDS_COPY.tabUpcoming],
+                  ["history", RECORDS_COPY.tabHistory],
+                ] as const
+              ).map(([key, label]) => (
+                <button
+                  key={key}
+                  type="button"
+                  role="tab"
+                  id={`records-tab-${key}`}
+                  aria-selected={activeTab === key}
+                  aria-controls="records-panel"
+                  className={`cr-segment__item${activeTab === key ? " cr-segment__item--on" : ""}`}
+                  onClick={() => setActiveTab(key)}
+                >
+                  {label}
+                </button>
+              ))}
             </div>
-          )}
 
-        {/* Render time buckets. */}
-        {slice.kind === "ok" && annotatedItems.length > 0 && (
-          <div className="records-screen__list">
-            {renderTimeBuckets({
-              items: annotatedItems,
-              activeTab,
-              onOpen: handleOpenBooking,
-              onReschedule: handleReschedule,
-              onCancel: handleCancel,
-              onRepeat: handleRepeat,
-              onReview: handleReview,
-              offline: !online,
-            })}
+            <div
+              id="records-panel"
+              role="tabpanel"
+              aria-labelledby={`records-tab-${activeTab}`}
+              className="cr-panel"
+            >
+              {activeTab === "upcoming" ? (
+                <>
+                  <section aria-labelledby="records-upcoming-heading">
+                    <h2
+                      id="records-upcoming-heading"
+                      className={upcoming.kind === "error" ? "visually-hidden" : "cr-heading"}
+                    >
+                      {RECORDS_COPY.upcomingHeading}
+                    </h2>
+                    {upcoming.kind === "loading" && skeletons}
+                    {upcoming.kind === "error" && (
+                      <RecordsLoadError
+                        err={upcoming.err}
+                        online={online}
+                        title={RECORDS_COPY.loadFailed}
+                        onRetry={() => void fetchSection("upcoming")}
+                      />
+                    )}
+                    {upcoming.kind === "ok" && upcomingItems.length === 0 && (
+                      <div className="cr-note" role="status">
+                        <p>{RECORDS_COPY.noUpcoming}</p>
+                        <RecordButton variant="soft" onClick={findMaster}>
+                          {RECORDS_COPY.findMaster}
+                        </RecordButton>
+                      </div>
+                    )}
+                    {upcomingItems.length > 0 && (
+                      <ul className="cr-list" role="list">
+                        {upcomingItems.map((b) => (
+                          <li key={b.bookingId}>
+                            <RecordCard item={b} section="upcoming" onOpen={() => open(b)} />
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                    {loadMoreButton("upcoming", upcoming)}
+                  </section>
 
-            {/* Real cursor pagination. */}
-            {slice.data.nextCursor && (
-              <button
-                type="button"
-                className="btn-secondary records-screen__load-more"
-                disabled={loadingMore}
-                onClick={() => void loadMore()}
-              >
-                {loadingMore ? "Загружаю…" : "Показать ещё"}
-              </button>
-            )}
-          </div>
+                  {/* Кадр 1: прошедшие — под предстоящими. Свои загрузку и
+                      сбой этот блок не показывает: у них есть вкладка. */}
+                  {historyItems.length > 0 && (
+                    <section aria-labelledby="records-history-heading">
+                      <h2 id="records-history-heading" className="cr-heading">
+                        {RECORDS_COPY.historyHeading}
+                      </h2>
+                      <ul className="cr-list" role="list">
+                        {historyItems.slice(0, HISTORY_PREVIEW).map((b) => (
+                          <li key={b.bookingId}>
+                            <RecordCard item={b} section="history" onOpen={() => open(b)} />
+                          </li>
+                        ))}
+                      </ul>
+                      {(historyItems.length > HISTORY_PREVIEW ||
+                        (history.kind === "ok" && history.data.nextCursor)) && (
+                        <div className="cr-more">
+                          <RecordButton variant="text" onClick={() => setActiveTab("history")}>
+                            {RECORDS_COPY.allHistory}
+                          </RecordButton>
+                        </div>
+                      )}
+                    </section>
+                  )}
+                </>
+              ) : (
+                <>
+                  {filterEnabled && (
+                    <div
+                      className="records-screen__filter-row"
+                      role="group"
+                      aria-label="Фильтр прошедших записей"
+                    >
+                      {[FILTER_ALL, ...masterOptions].map((name) => (
+                        <button
+                          key={name}
+                          type="button"
+                          className={`records-screen__chip${filter === name ? " records-screen__chip--active" : ""}`}
+                          aria-pressed={filter === name}
+                          onClick={() => setFilter(name)}
+                        >
+                          {name === FILTER_ALL ? "Все" : name}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                  {history.kind === "loading" && skeletons}
+                  {history.kind === "error" && (
+                    <RecordsLoadError
+                      err={history.err}
+                      online={online}
+                      title={RECORDS_COPY.loadFailed}
+                      onRetry={() => void fetchSection("history")}
+                    />
+                  )}
+                  {history.kind === "ok" && historyItems.length === 0 && (
+                    <div className="cr-note" role="status">
+                      <p>{RECORDS_COPY.noHistory}</p>
+                    </div>
+                  )}
+                  {historyItems.length > 0 && shownHistory.length === 0 && (
+                    <div className="cr-note" role="status">
+                      <p>{RECORDS_COPY.filterEmpty}</p>
+                      <RecordButton variant="soft" onClick={() => setFilter(FILTER_ALL)}>
+                        {RECORDS_COPY.filterReset}
+                      </RecordButton>
+                    </div>
+                  )}
+                  {shownHistory.length > 0 && (
+                    <ul className="cr-list" role="list">
+                      {shownHistory.map((b, index) =>
+                        index === 0 ? (
+                          // Кадр 12: у самой свежей — действия, блоком под карточкой.
+                          <li key={b.bookingId} className="cr-card-group">
+                            <RecordCard item={b} section="history" onOpen={() => open(b)} />
+                            <RecordButton
+                              variant="soft"
+                              icon="repeat"
+                              onClick={repeat}
+                              disabled={!online}
+                              title={online ? undefined : OFFLINE_HINT}
+                            >
+                              {RECORDS_COPY.repeat}
+                            </RecordButton>
+                            <RecordButton variant="soft" icon="details" onClick={() => open(b)}>
+                              {RECORDS_COPY.details}
+                            </RecordButton>
+                            {b.canRate && (
+                              <RecordButton
+                                variant="soft"
+                                icon="star"
+                                onClick={() => rate(b)}
+                                disabled={!online}
+                                title={online ? undefined : OFFLINE_HINT}
+                              >
+                                {RECORDS_COPY.rate}
+                              </RecordButton>
+                            )}
+                          </li>
+                        ) : (
+                          <li key={b.bookingId}>
+                            <RecordCard item={b} section="history" onOpen={() => open(b)} />
+                          </li>
+                        ),
+                      )}
+                    </ul>
+                  )}
+                  {loadMoreButton("history", history)}
+                </>
+              )}
+            </div>
+          </>
         )}
       </main>
 
-      {/* Bottom nav — records is home, the «Записи» tab is selected. */}
+      {/* Панель — вне веток состояний: выход есть при любом исходе загрузки. */}
       <CustomerTabBar active="records" />
     </div>
   );
-}
-
-// ---------------------------------------------------------------------------
-// Render helper — time-bucket the items.
-// ---------------------------------------------------------------------------
-
-interface BucketProps {
-  items: AnnotatedRecordItem[];
-  activeTab: BookingSection;
-  onOpen: (b: RecordItem) => void;
-  onReschedule: (b: RecordItem) => void;
-  onCancel: (b: RecordItem) => void;
-  onRepeat: () => void;
-  onReview: (b: RecordItem) => void;
-  /** Сети нет — карточки выключают действия, которые без неё не пройдут. */
-  offline: boolean;
-}
-
-function renderTimeBuckets(props: BucketProps) {
-  const {
-    items,
-    activeTab,
-    onOpen,
-    onReschedule,
-    onCancel,
-    onRepeat,
-    onReview,
-    offline,
-  } = props;
-
-  // Stable bucket order — preserves the order in which buckets first
-  // appear in the data (backend already sorted rows by visit_at).
-  const buckets = new Map<string, AnnotatedRecordItem[]>();
-  for (const b of items) {
-    const arr = buckets.get(b._timeGroup) ?? [];
-    arr.push(b);
-    buckets.set(b._timeGroup, arr);
-  }
-
-  return Array.from(buckets.entries()).map(([label, bucketItems]) => (
-    <div key={label} className="records-screen__time-bucket">
-      <TimeGroupHeader label={label} level={2} />
-      <ul className="records-screen__items" role="list">
-        {bucketItems.map((b) => {
-          const variant: "nearest" | "future" | "past" =
-            activeTab === "history"
-              ? "past"
-              : b.isNearest
-                ? "nearest"
-                : "future";
-          return (
-            <li key={b.bookingId}>
-              <BookingCard
-                item={b}
-                variant={variant}
-                onOpen={() => onOpen(b)}
-                onReschedule={() => onReschedule(b)}
-                onCancel={() => onCancel(b)}
-                onRepeat={onRepeat}
-                onReview={() => onReview(b)}
-                offline={offline}
-              />
-            </li>
-          );
-        })}
-      </ul>
-    </div>
-  ));
 }

@@ -201,7 +201,7 @@ describe("пустые записи — приглашение зависит о
     renderScreen();
 
     // Положительная стража: экран действительно отрисовался.
-    expect(await screen.findByText(/Пока записей нет/)).toBeInTheDocument();
+    expect(await screen.findByText(/У тебя пока нет записей/)).toBeInTheDocument();
 
     expect(
       screen.queryByRole("button", { name: GOAL_CTA }),
@@ -223,7 +223,7 @@ describe("записи есть — новизну определяет missing,
 
     // Положительная стража: список записей на месте.
     expect(
-      await screen.findByRole("tab", { name: "Ближайшие (2)" }),
+      await screen.findByRole("tab", { name: "Предстоящие" }),
     ).toBeInTheDocument();
     expect(screen.getByText("Маникюр")).toBeInTheDocument();
 
@@ -237,7 +237,7 @@ describe("записи есть — новизну определяет missing,
     renderScreen();
 
     expect(
-      await screen.findByRole("tab", { name: "Ближайшие (2)" }),
+      await screen.findByRole("tab", { name: "Предстоящие" }),
     ).toBeInTheDocument();
     expect(screen.getByText("Маникюр")).toBeInTheDocument();
 
@@ -300,7 +300,7 @@ describe("приглашение не обещает того, чего код �
 // ---------------------------------------------------------------------------
 
 describe("дорога к записи открыта при показанном приглашении", () => {
-  it("«Найти услугу» с пустого экрана по-прежнему ведёт в каталог", async () => {
+  it("«Найти мастера» с пустого экрана по-прежнему ведёт в каталог", async () => {
     const user = userEvent.setup();
     mockLists([], []);
     mockedContext.mockResolvedValue(DOC_GOAL_MISSING);
@@ -308,12 +308,12 @@ describe("дорога к записи открыта при показанно�
 
     // Приглашение на экране — и не перехватывает поток записи.
     expect(await screen.findByRole("button", { name: GOAL_CTA })).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "Найти услугу" }));
+    await user.click(screen.getByRole("button", { name: "Найти мастера" }));
     expect(await screen.findByText("CATALOG-PROBE")).toBeInTheDocument();
   });
 
   it("DRF-2191: «Услуги» из панели ушли, приглашение и дорога в каталог остались", async () => {
-    // Вход в каталог — с самого экрана («Найти услугу» на пустом, узел выше),
+    // Вход в каталог — с самого экрана («Найти мастера» на пустом, узел выше),
     // из панели он снят (§55 б, макет DRF-1321). Здесь — что снятие вкладки
     // не тронуло ни приглашение цели, ни саму панель.
     const user = userEvent.setup();
@@ -325,11 +325,11 @@ describe("дорога к записи открыта при показанно�
     const nav = screen.getByRole("navigation", { name: "Основная навигация" });
     expect(within(nav).queryByRole("button", { name: "Услуги" })).toBeNull();
     expect(within(nav).getAllByRole("button")).toHaveLength(5);
-    await user.click(screen.getByRole("button", { name: "Найти услугу" }));
+    await user.click(screen.getByRole("button", { name: "Найти мастера" }));
     expect(await screen.findByText("CATALOG-PROBE")).toBeInTheDocument();
   });
 
-  it("приглашение идёт ПЕРВЫМ — выше «Найти услугу»", async () => {
+  it("приглашение идёт ПЕРВЫМ — выше «Найти мастера»", async () => {
     // Порядок нормативный, поэтому и заперт тестом. Решение владельца
     // 31.08: анкета идёт первой. Принято поверх BOT-001 §13 («First
     // Contact MUST NOT begin with a standalone questionnaire», §2.1
@@ -342,7 +342,7 @@ describe("дорога к записи открыта при показанно�
     renderScreen();
 
     const cta = await screen.findByRole("button", { name: GOAL_CTA });
-    const findService = screen.getByRole("button", { name: "Найти услугу" });
+    const findService = screen.getByRole("button", { name: "Найти мастера" });
     expect(
       cta.compareDocumentPosition(findService) &
         Node.DOCUMENT_POSITION_FOLLOWING,
@@ -377,7 +377,7 @@ describe("дорога к записи открыта при показанно�
     await act(async () => {
       back.handler!();
     });
-    expect(await screen.findByText(/Пока записей нет/)).toBeInTheDocument();
+    expect(await screen.findByText(/У тебя пока нет записей/)).toBeInTheDocument();
   });
 });
 
@@ -392,7 +392,7 @@ describe("сбой decision-context", () => {
     renderScreen();
 
     expect(
-      await screen.findByRole("tab", { name: "Ближайшие (2)" }),
+      await screen.findByRole("tab", { name: "Предстоящие" }),
     ).toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: GOAL_CTA }),

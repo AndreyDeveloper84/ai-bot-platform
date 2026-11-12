@@ -315,7 +315,7 @@ describe("DRF-1493 · корневой экран: лишней кнопки н�
       <CustomerRecordsScreen />,
       "/customer/main",
     );
-    await screen.findByRole("tab", { name: /Ближайшие/ });
+    await screen.findByRole("tab", { name: "Предстоящие" });
     expect(
       screen.queryByRole("button", { name: "Назад" }),
     ).not.toBeInTheDocument();

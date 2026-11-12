@@ -155,6 +155,12 @@ def _is_helper_call(node: ast.AST, name: str) -> bool:
     )
 
 
+#: Ключи, под которыми на провод уходит фото мастера. ``master_photo_url`` —
+#: фото мастера в строке ЗАПИСИ (DRF-2952): под другим именем перепись его не
+#: видела бы, и сырая ссылка хранилища прошла бы мимо.
+_PHOTO_KEYS = ("photo_url", "master_photo_url")
+
+
 def census(tree: ast.AST, rel: str) -> tuple[int, list[str]]:
     """(сколько ключей нашлось, какие отдают сырое)."""
     found = 0
@@ -163,13 +169,13 @@ def census(tree: ast.AST, rel: str) -> tuple[int, list[str]]:
         if not isinstance(node, ast.Dict):
             continue
         for key, value in zip(node.keys, node.values, strict=True):
-            if not (isinstance(key, ast.Constant) and key.value in ("photo_url", "image_url")):
+            if not (isinstance(key, ast.Constant) and key.value in _PHOTO_KEYS + ("image_url",)):
                 continue
             found += 1
             if key.value == "image_url" and not rel.endswith("miniapp_api/master_media.py"):
                 raw.append(f"{rel}:{node.lineno} image_url")
-            elif key.value == "photo_url" and not _is_helper_call(value, "master_photo_path"):
-                raw.append(f"{rel}:{value.lineno} photo_url")
+            elif key.value in _PHOTO_KEYS and not _is_helper_call(value, "master_photo_path"):
+                raw.append(f"{rel}:{value.lineno} {key.value}")
     return found, raw
 
 
@@ -191,6 +197,11 @@ class TestW1Census:
         src = 'def f(m):\n    return {"id": m.id, "photo_url": m.photo_url}\n'
         found, raw = census(ast.parse(src), "apps/x/views.py")
         assert found == 1 and raw == ["apps/x/views.py:2 photo_url"]
+
+    def test_census_catches_a_raw_photo_on_a_booking_row(self) -> None:
+        src = 'def f(b):\n    return {"master_photo_url": b.master.photo_url}\n'
+        found, raw = census(ast.parse(src), "apps/x/views.py")
+        assert found == 1 and raw == ["apps/x/views.py:2 master_photo_url"]
 
     def test_census_catches_image_url_outside_master_media(self) -> None:
         src = 'def f(i):\n    return {"image_url": i["image_url"]}\n'

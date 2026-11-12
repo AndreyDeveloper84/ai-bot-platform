@@ -1729,6 +1729,7 @@ def _booking_to_dict(b, *, tenant, now=None) -> dict[str, Any]:
     moment = now or timezone.now()
     is_past = bool(b.visit_at and b.visit_at < moment)
     can_rate = is_past and b.status == "confirmed" and b.rating is None
+    master = b.master if b.master_id else None
     out = {
         "id": str(b.id),
         "status": b.status,
@@ -1736,6 +1737,19 @@ def _booking_to_dict(b, *, tenant, now=None) -> dict[str, Any]:
         "service_name": b.service_name,
         "master_id": str(b.master_id) if b.master_id else None,
         "master_name": b.master_name,
+        # DRF-2952 — фото и специализация мастера записи: макет «Записи» рисует
+        # их на карточке, а взять их экрану больше неоткуда. Пусто — значит
+        # «нет»: связь с мастером оборвана (каталог пересеян) или поле не
+        # заполнено. Список и чтение одной записи приходят с
+        # ``select_related("master")`` — без запроса на строку. Пути записи
+        # (отмена, перенос) берут строку под блокировкой без соединения и
+        # платят за мастера один запрос на действие — там это не цикл.
+        "master_photo_url": master_photo_path(b.master_id, master.photo_url if master else ""),
+        "master_specialization": (master.specialization or "") if master else "",
+        # DRF-2952 — ключ услуги в каталоге бота, по нему ручка ``/slots`` ищет
+        # свободное время. На этом пути он совпадает с ``service_id``; на пути
+        # Ayla — нет (см. ``_proxy_booking_to_dict``).
+        "catalog_service_id": str(b.service_id) if b.service_id else None,
         "visit_at": visit_at_iso,
         "duration_min": b.duration_min,
         "cancel_requested_at": cancel_requested_iso,
@@ -1825,7 +1839,9 @@ def bookings_list(request: HttpRequest) -> HttpResponse:
 
     from django.db.models import Q
 
-    qs = BookingRequest.all_tenants.filter(
+    # ``select_related("master")`` — фото и специализация мастера в строке
+    # записи (DRF-2952) без запроса на элемент.
+    qs = BookingRequest.all_tenants.select_related("master").filter(
         tenant=bot_user.tenant,
         bot_user=bot_user,
     )
@@ -1877,7 +1893,7 @@ def _get_booking_owned(bot_user: BotUser, booking_id: str):
     from apps.booking.models import BookingRequest
 
     try:
-        return BookingRequest.all_tenants.get(
+        return BookingRequest.all_tenants.select_related("master").get(
             id=booking_id,
             tenant=bot_user.tenant,
             bot_user=bot_user,
@@ -2189,6 +2205,17 @@ def _proxy_booking_to_dict(proxy, *, tenant) -> dict[str, Any]:
         "service_name": service.name if service else "",
         "master_id": str(master.id) if master else None,
         "master_name": master.name if master else "",
+        # DRF-2952 — те же два поля и те же «пусто = нет», что у локального
+        # пути. Мастер уже прочитан выше, новых запросов нет.
+        "master_photo_url": master_photo_path(
+            master.id if master else None, master.photo_url if master else ""
+        ),
+        "master_specialization": (master.specialization or "") if master else "",
+        # DRF-2952 — ``service_id`` на этом пути — id услуги В AYLA (его ждёт
+        # перенос, см. ``_ayla_reschedule_target``), а ``/slots`` ищет услугу по
+        # ключу каталога бота. Экран переноса слал в ``/slots`` первый и получал
+        # «service not found». Отдаём оба, каждый под своим именем.
+        "catalog_service_id": str(service.id) if service else None,
         # DRF-2436 / решение владельца п.15: у каждой записи видно, в каком
         # салоне она создана. Имя — клиентское имя салона (как у витрины), не ID.
         "salon_name": proxy.tenant.name,

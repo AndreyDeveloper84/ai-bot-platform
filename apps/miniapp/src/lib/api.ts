@@ -1,5 +1,5 @@
 import { applyIdentityHeaders } from "./auth-headers";
-import { markRead } from "./claims";
+import { carryProof, markRead } from "./claims";
 
 const API_BASE = "/api/v1/customer";
 
@@ -792,6 +792,21 @@ export interface BookingItem {
   master_id: string | null;
   master_name: string;
   /**
+   * DRF-2952 — фото мастера записи: значение с провода для `MasterPhoto`
+   * (наш путь с версией), `""` — фото нет. Ключа нет — сервер старше.
+   */
+  master_photo_url?: string;
+  /** DRF-2952 — специализация мастера («Массажист»); `""` — не указана. */
+  master_specialization?: string;
+  /**
+   * DRF-2952 — ключ услуги в каталоге бота, по которому `/slots` ищет
+   * свободное время. На пути Ayla он НЕ равен `service_id` (тот — id услуги в
+   * Ayla, и перенос ждёт именно его): экран переноса слал в `/slots`
+   * `service_id` и получал «service not found». `null` — услуги в каталоге
+   * больше нет; ключа нет — сервер старше, тогда годится `service_id`.
+   */
+  catalog_service_id?: string | null;
+  /**
    * DRF-2436 B / решение владельца п.15 — клиентское имя салона записи
    * (`Tenant.name`, как у витрины). «Мои записи» — единый список по всем
    * салонам, и у каждой строки должно быть видно, в каком салоне она. Ключа
@@ -842,8 +857,20 @@ export const fetchMyBookings = (params?: {
   return request(`/bookings/list${qs ? `?${qs}` : ""}`, { method: "GET" });
 };
 
+/**
+ * Метка прочитанного — на вложенной записи (DRF-2952). Экраны утверждают исход
+ * по `booking` / `new_booking`, а `request` метит только конверт: без этого
+ * шага `verifyClaim` на записи в бою не проходил никогда (`claims.ts`,
+ * `carryProof`).
+ */
+async function bookingEnvelope<E extends object>(pending: Promise<E>): Promise<E> {
+  const envelope = await pending;
+  for (const value of Object.values(envelope)) carryProof(envelope, value);
+  return envelope;
+}
+
 export const fetchBooking = (id: string): Promise<{ booking: BookingItem }> =>
-  request(`/bookings/${id}`, { method: "GET" });
+  bookingEnvelope(request(`/bookings/${id}`, { method: "GET" }));
 
 export type CancelReasonClass = "timing" | "plans_changed" | "not_needed" | "other";
 
@@ -851,16 +878,18 @@ export const cancelBookingRequest = (
   id: string,
   body?: { reason_class?: CancelReasonClass; reason_text?: string },
 ): Promise<{ booking: BookingItem }> =>
-  request(`/bookings/${id}/cancel`, {
-    method: "POST",
-    body: JSON.stringify(body ?? {}),
-  });
+  bookingEnvelope(
+    request(`/bookings/${id}/cancel`, {
+      method: "POST",
+      body: JSON.stringify(body ?? {}),
+    }),
+  );
 
 export const cancelBookingConfirm = (id: string): Promise<{ booking: BookingItem }> =>
-  request(`/bookings/${id}/cancel/confirm`, { method: "POST" });
+  bookingEnvelope(request(`/bookings/${id}/cancel/confirm`, { method: "POST" }));
 
 export const cancelBookingUndo = (id: string): Promise<{ booking: BookingItem }> =>
-  request(`/bookings/${id}/cancel/undo`, { method: "POST" });
+  bookingEnvelope(request(`/bookings/${id}/cancel/undo`, { method: "POST" }));
 
 export const rescheduleBookingRequest = (
   id: string,
@@ -880,10 +909,12 @@ export const rescheduleBookingConfirm = (
   id: string,
   body: { new_master_id: string; new_service_id: string; new_visit_at: string },
 ): Promise<{ old_booking: BookingItem; new_booking: BookingItem }> =>
-  request(`/bookings/${id}/reschedule/confirm`, {
-    method: "POST",
-    body: JSON.stringify(body),
-  });
+  bookingEnvelope(
+    request(`/bookings/${id}/reschedule/confirm`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  );
 
 // --- profile (Phase 3 / F4) ---
 export interface Preferences {

@@ -115,7 +115,7 @@ describe("canonical reschedule route registration (DRF-1481)", () => {
     renderAppAt("/customer/records/bk-77/reschedule");
     // Real reschedule screen (not a 404 / not the booking detail).
     expect(
-      await screen.findByRole("heading", { name: "Перенести" }),
+      await screen.findByRole("heading", { name: "Выбери новую дату и время" }),
     ).toBeInTheDocument();
     // The id from the URL is the id the screen actually loads.
     // Загрузка — в эффекте ПОСЛЕ первого рендера заголовка: ждать вызов,
@@ -128,7 +128,7 @@ describe("canonical reschedule route registration (DRF-1481)", () => {
     // ушедших наружу ранее. Тот же компонент, тот же id.
     renderAppAt("/my-visits/bk-77/reschedule");
     expect(
-      await screen.findByRole("heading", { name: "Перенести" }),
+      await screen.findByRole("heading", { name: "Выбери новую дату и время" }),
     ).toBeInTheDocument();
     // Загрузка — в эффекте ПОСЛЕ первого рендера заголовка: ждать вызов,
     // а не проверять его синхронно (под нагрузкой заголовок успевает раньше).

@@ -96,6 +96,68 @@ export function formatDayMonthTime(isoWithOffset: string): string {
  * человек видел «в 06:00» при визите в 09:00. Сторож
  * `wallClockParse2589.test.ts` держит такой разбор только здесь.
  */
+const WEEKDAYS_FULL = [
+  "воскресенье",
+  "понедельник",
+  "вторник",
+  "среда",
+  "четверг",
+  "пятница",
+  "суббота",
+];
+
+const MONTHS_NOM = [
+  "Январь",
+  "Февраль",
+  "Март",
+  "Апрель",
+  "Май",
+  "Июнь",
+  "Июль",
+  "Август",
+  "Сентябрь",
+  "Октябрь",
+  "Ноябрь",
+  "Декабрь",
+];
+
+/**
+ * «22 сентября, 14:00» — строка времени на карточке записи (макет «Записи»,
+ * DRF-2952). Год дописывается, когда он не текущий: «12 сентября 2025, 16:00»
+ * — в истории без него прошлогодняя запись читалась бы как нынешняя.
+ * Часы — из строки: сервер отдаёт время визита в поясе салона (DRF-2589).
+ */
+export function formatRecordWhen(isoWithOffset: string, now: Date = new Date()): string {
+  const match = isoWithOffset.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}:\d{2})/);
+  if (!match) return UNKNOWN_MARK;
+  const month = MONTHS_GEN[Number(match[2]) - 1];
+  if (!month) return UNKNOWN_MARK;
+  const year = Number(match[1]) === now.getFullYear() ? "" : ` ${match[1]}`;
+  return `${Number(match[3])} ${month}${year}, ${match[4]}`;
+}
+
+/**
+ * «22 сентября, понедельник» — день визита в карточке записи; год — по тому
+ * же правилу, что у {@link formatRecordWhen}.
+ */
+export function formatDayWeekday(isoWithOffset: string, now: Date = new Date()): string {
+  const match = isoWithOffset.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (!match) return UNKNOWN_MARK;
+  const [y, m, d] = [Number(match[1]), Number(match[2]), Number(match[3])];
+  const month = MONTHS_GEN[m - 1];
+  if (!month) return UNKNOWN_MARK;
+  const weekday = WEEKDAYS_FULL[new Date(Date.UTC(y, m - 1, d)).getUTCDay()];
+  const year = y === now.getFullYear() ? "" : ` ${y}`;
+  return `${d} ${month}${year}, ${weekday}`;
+}
+
+/** «Сентябрь 2026» — заголовок недели в переносе; на входе «ГГГГ-ММ-ДД». */
+export function formatMonthYear(isoDate: string): string {
+  const [y, m] = isoDate.split("-").map(Number);
+  const month = m ? MONTHS_NOM[m - 1] : undefined;
+  return y && month ? `${month} ${y}` : "";
+}
+
 export function formatVisitFull(isoWithOffset: string): string {
   const match = isoWithOffset.match(/^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})/);
   if (!match) return isoWithOffset;

@@ -162,7 +162,7 @@ describe("home routing (DRF-1546)", () => {
     expect(await screen.findByText(/4 \/ 8 стаканов/)).toBeInTheDocument();
     expect(screen.getByText(/1240 \/ 2100 ккал/)).toBeInTheDocument();
     // NEGATIVE (парная): списка записей на главной больше нет.
-    expect(screen.queryByText(/Пока записей нет/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/У тебя пока нет записей/)).not.toBeInTheDocument();
   });
 
   it("home is NOT hidden behind the pilot placeholder in a prod build", async () => {
@@ -183,7 +183,7 @@ describe("home routing (DRF-1546)", () => {
     // сняли с «Главной».
     renderAppAt("/customer/records");
 
-    expect(await screen.findByText(/Пока записей нет/)).toBeInTheDocument();
+    expect(await screen.findByText(/У тебя пока нет записей/)).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Записи" })).toBeInTheDocument();
   });
 
