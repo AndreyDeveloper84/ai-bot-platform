@@ -115,6 +115,7 @@ describe("FoodScannerResultScreen — запись по скану", () => {
 
     await waitFor(() => expect(screen.getByRole("button", { name: "Не то" })).toBeDisabled());
     expect(screen.getByRole("button", { name: "Уточнить" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /Записать в дневник/ })).toBeDisabled();
 
     release({ log_id: "log-1", dish_name: "Борщ", meal_type: "lunch", calories: 250 });
     expect(await screen.findByText("saved-screen")).toBeInTheDocument();

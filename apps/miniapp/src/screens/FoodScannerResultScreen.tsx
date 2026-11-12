@@ -533,6 +533,7 @@ export function FoodScannerResultScreen() {
             // блюда переносим, чтобы не набирать заново.
             <RecordButton
               variant="soft"
+              disabled={busy}
               onClick={() =>
                 navigate("/customer/food-scanner/manual", {
                   state: {

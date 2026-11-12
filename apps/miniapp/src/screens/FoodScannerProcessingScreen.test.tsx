@@ -30,6 +30,7 @@ vi.mock("../lib/food-scanner", async (importOriginal) => {
 import {
   FoodNotRecognizedError,
   PhotoBytesMissingError,
+  ScanDailyLimitError,
   StubNotWiredError,
   scanPhoto,
 } from "../lib/food-scanner";
@@ -153,7 +154,7 @@ describe("вид ошибки распознавания (DRF-2954)", () => {
     return heading.closest("main")?.querySelector(".cr-state__badge") ?? null;
   }
 
-  it("сбой — красный знак; заголовок получает фокус: экран подменён на месте", async () => {
+  it("не распознано — красный знак (кадр 9); заголовок получает фокус: экран подменён на месте", async () => {
     mockedScan.mockRejectedValue(new FoodNotRecognizedError());
     renderScreen();
     const heading = await screen.findByRole("heading", { level: 1, name: "Не разобралась" });
@@ -169,5 +170,17 @@ describe("вид ошибки распознавания (DRF-2954)", () => {
     const consent = await screen.findByRole("heading", { level: 1, name: "Нужно разрешение" });
     expect(badgeOf(consent)).toHaveClass("cr-state__badge--info");
     expect(badgeOf(consent)).not.toHaveClass("cr-state__badge--danger");
+  });
+
+  it.each([
+    ["фото выключено", () => new ApiError(404, "photo_scan_disabled", ""), "Фото пока не принимаю"],
+    ["лимит на сегодня", () => new ScanDailyLimitError(), "Сегодня фото не распознаю"],
+  ])("%s — нейтральный круг, тело ошибки — role=alert, превью снимка нет", async (_n, err, title) => {
+    mockedScan.mockRejectedValue(err());
+    renderScreen();
+    const heading = await screen.findByRole("heading", { level: 1, name: title });
+    expect(badgeOf(heading)).toHaveClass("cr-state__badge--info");
+    expect(screen.getByRole("alert")).toBeInTheDocument();
+    expect(screen.queryByRole("img")).not.toBeInTheDocument();
   });
 });

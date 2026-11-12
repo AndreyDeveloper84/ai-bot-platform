@@ -13062,7 +13062,7 @@ button.ss-card {
 
 .diary-grams__input:focus {
   border-color: var(--c-accent);
-  outline: 2px solid var(--c-accent-subtle);
+  outline: 2px solid var(--c-accent);
   outline-offset: 1px;
 }
 
@@ -13298,9 +13298,10 @@ button.ss-card {
   box-sizing: border-box;
 }
 
+/* Кольцо фокуса — цветом акцента: мягкий акцент в тёмной теме не виден. */
 .diary-input:focus {
   border-color: var(--c-accent);
-  outline: 2px solid var(--c-accent-subtle);
+  outline: 2px solid var(--c-accent);
   outline-offset: 1px;
 }
 
@@ -13354,7 +13355,7 @@ button.ss-card {
   gap: var(--s-2);
 }
 
-@media (max-width: 360px) {
+@media (max-width: 400px) {
   .diary-meals {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -13370,7 +13371,8 @@ button.ss-card {
   border: 1px solid var(--c-divider);
   border-radius: var(--r-md);
   cursor: pointer;
-  overflow-wrap: anywhere;
+  /* Слово приёма не рвётся посередине («Переку/с»): тесно — переходим на 2×2. */
+  overflow-wrap: normal;
 }
 
 .diary-meal:active {
@@ -13524,7 +13526,10 @@ button.ss-card {
   margin-bottom: 0;
 }
 
+/* Фокус ставит сам экран (подмена на месте): заголовок не интерактивен, рамка
+   браузера на нём ничего не сообщает — как у `.cr-state__title`. */
 .diary-scan-error__title {
+  outline: none;
   margin: 0;
   font-size: var(--font-size-400);
   font-weight: 700;

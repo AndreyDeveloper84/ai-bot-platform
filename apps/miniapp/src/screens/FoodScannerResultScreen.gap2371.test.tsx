@@ -119,6 +119,23 @@ describe("DRF-2371 — скан без чисел", () => {
     expect(screen.queryByText(/ккал/)).not.toBeInTheDocument();
   });
 
+  it("пока запись идёт, «Написать вручную» выключена: запись не уведёт с ручного ввода (DRF-2954)", async () => {
+    let release: (v: Awaited<ReturnType<typeof logMeal>>) => void = () => undefined;
+    vi.mocked(logMeal).mockReturnValue(
+      new Promise((resolve) => {
+        release = resolve;
+      }),
+    );
+    renderResult(WITHOUT_NUMBERS);
+
+    const manual = await screen.findByRole("button", { name: "Написать вручную" });
+    expect(manual).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: /Записать в дневник/ }));
+    await waitFor(() => expect(manual).toBeDisabled());
+
+    release({ log_id: "log-1", dish_name: "Ризотто с трюфелем", meal_type: "lunch", calories: null } as never);
+  });
+
   it("k2: вместо числа — существующая дорога «Написать вручную»", async () => {
     renderResult(WITHOUT_NUMBERS);
 
