@@ -15,6 +15,8 @@ import {
   canGoEarlier,
   canGoLater,
   dayLabel,
+  dayMark,
+  dayOfMonth,
   earlierWeek,
   earliestFrom,
   getDiaryDay,
@@ -22,6 +24,7 @@ import {
   laterWeek,
   periodLabel,
   shiftDays,
+  weekdayShort,
   weekEndingAt,
 } from "./diary-days";
 
@@ -116,5 +119,38 @@ describe("diary-days: календарь стрелок", () => {
     expect(dayLabel("2026-09-14")).toBe("Пн, 14.09");
     expect(dayLabel("2026-09-20")).toBe("Вс, 20.09");
     expect(periodLabel("2026-09-13", "2026-09-19")).toBe("13.09 – 19.09");
+  });
+});
+
+describe("полоса недели (DRF-2954)", () => {
+  it("день недели и число — по дате, не по часам телефона", () => {
+    expect(weekdayShort("2026-09-14")).toBe("Пн");
+    expect(weekdayShort("2026-09-20")).toBe("Вс");
+    expect(dayOfMonth("2026-09-14")).toBe(14);
+    expect(dayOfMonth("2026-10-01")).toBe(1);
+  });
+
+  const row = (over: Partial<Parameters<typeof dayMark>[0]>) => ({
+    has_entries: true,
+    kcal: 640,
+    uncounted_meals: 0,
+    ...over,
+  });
+
+  it("три отметки по данным строки", () => {
+    expect(dayMark(row({}), true)).toBe("counted");
+    expect(dayMark(row({ uncounted_meals: 1 }), true)).toBe("uncounted");
+    expect(dayMark(row({ kcal: null }), true)).toBe("uncounted");
+    expect(dayMark(row({ has_entries: false, kcal: null }), true)).toBe("none");
+  });
+
+  it("поле неполноты не пришло — как в строке недели: итог полный", () => {
+    expect(dayMark({ has_entries: true, kcal: 300 }, true)).toBe("counted");
+  });
+
+  it("«Без чисел» — калорийного измерения нет: только «есть записи / нет»", () => {
+    expect(dayMark(row({}), false)).toBe("entries");
+    expect(dayMark(row({ kcal: null }), false)).toBe("entries");
+    expect(dayMark(row({ has_entries: false, kcal: null }), false)).toBe("none");
   });
 });

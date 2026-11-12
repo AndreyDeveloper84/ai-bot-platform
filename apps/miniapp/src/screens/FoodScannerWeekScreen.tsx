@@ -22,9 +22,21 @@
  * Отказы — по имени слага, как у соседей: `nutrition_disabled` — дневник
  * недоступен; `consent_required` — гейт согласия (живёт в экране съёмки) с
  * возвратом сюда; остальное — фраза и «Повторить».
+ *
+ * DRF-2954 — вид по доске «Дневник» (кадр 12), решение владельца 12.11 п.8:
+ * полоса из семи дней с отметкой и легенда «Калории посчитаны / Есть записи,
+ * калории не посчитаны / Нет записей». День нажимается в полосе; строки под
+ * ней — те же цифры, без второй кнопки на тот же день. Отметки — формой
+ * (галочка, точка, пустой круг) и нейтральными цветами: ряд зелёных галочек
+ * читался бы серией, а серий здесь нет (В-5). В режиме «Без чисел» —
+ * только «есть записи / нет», легенды нет (`dayMark`).
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
+
+import { RecordIcon } from "../components/records/RecordIcons";
+import { DiaryState } from "../components/diary/DiaryState";
+import { RecordButton } from "../components/records/RecordsState";
 
 import { useScreenBack } from "../hooks/useScreenBack";
 import { ApiError } from "../lib/api";
@@ -32,13 +44,17 @@ import {
   canGoEarlier,
   canGoLater,
   dayLabel,
+  dayMark,
+  dayOfMonth,
   earlierWeek,
   getDiaryDays,
   laterWeek,
   periodLabel,
+  type DayMark,
   type DiaryDayRow,
   type DiaryDays,
   WEEK_DAYS,
+  weekdayShort,
 } from "../lib/diary-days";
 import { entriesLabel } from "../lib/food-scanner";
 import { KCAL_TOTAL_AI_NOTE, kcalTotalMarks } from "../lib/format";
@@ -64,7 +80,25 @@ export const WEEK_COPY = {
   loading: "Загружаю…",
   diaryOff: "Дневник питания пока недоступен.",
   unavailable: "Неделя сейчас недоступна — сервис питания не отвечает. Попробуй чуть позже.",
+  // Легенда полосы — слова владельца 12.11 (DRF-2954, п.8).
+  markCounted: "Калории посчитаны",
+  markUncounted: "Есть записи, калории не посчитаны",
+  markNone: "Нет записей",
 } as const;
+
+/** Отметка дня — значок в круге; форма, а не только цвет, различает три вида. */
+function MarkDot({ mark }: { mark: DayMark }) {
+  if (mark === "counted") {
+    return (
+      <span className="diary-mark diary-mark--counted" aria-hidden="true">
+        <RecordIcon name="check" size={12} />
+      </span>
+    );
+  }
+  if (mark === "uncounted") return <span className="diary-mark diary-mark--uncounted" aria-hidden="true" />;
+  if (mark === "entries") return <span className="diary-mark diary-mark--entries" aria-hidden="true" />;
+  return <span className="diary-mark diary-mark--none" aria-hidden="true" />;
+}
 
 export function weekRefusalText(err: unknown): string {
   if (err instanceof ApiError && err.slug === "nutrition_disabled") return WEEK_COPY.diaryOff;
@@ -138,91 +172,127 @@ export function FoodScannerWeekScreen() {
     return WEEK_COPY.mealsOnly(row.meals_count);
   };
 
+  // Имя дня для экранного диктора: дата + отметка. Видимое «Пн 14» входит в
+  // него (WCAG 2.5.3); «включая оценки ИИ» — та же пометка, что в строке.
+  const dayName = (row: DiaryDayRow): string => {
+    const mark = dayMark(row, showNumbers);
+    const what =
+      mark === "counted"
+        ? kcalTotalMarks(row).approx
+          ? `${WEEK_COPY.markCounted}, ${KCAL_TOTAL_AI_NOTE}`
+          : WEEK_COPY.markCounted
+        : mark === "uncounted"
+          ? WEEK_COPY.markUncounted
+          : mark === "entries"
+            ? WEEK_COPY.mealsOnly(row.meals_count)
+            : WEEK_COPY.markNone;
+    return `${dayLabel(row.date)}: ${what}`;
+  };
+
   return (
-    <div className="food-scanner-screen">
-      <header className="records-screen__header">
-        <button type="button" className="records-screen__back" aria-label="Назад" onClick={onBack}>
-          <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
-            <path
-              d="M12 4l-6 6 6 6"
-              stroke="currentColor"
-              strokeWidth="2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            />
-          </svg>
+    <div className="cr-screen cr-screen--nested diary-screen">
+      <header className="cr-topbar diary-topbar">
+        <button type="button" className="cr-back" aria-label="Назад" onClick={onBack}>
+          <RecordIcon name="back" size={24} />
         </button>
-        <h1 className="records-screen__title">{WEEK_COPY.title}</h1>
+        <h1 className="diary-topbar__title">{WEEK_COPY.title}</h1>
       </header>
 
-      <main className="food-scanner-screen__main">
+      <main className="diary-main">
         {status.kind === "loading" && (
-          <p className="food-scanner-diary__caption" role="status">
+          <p className="diary-loading" role="status">
             {WEEK_COPY.loading}
           </p>
         )}
 
-        {status.kind === "diary_off" && (
-          <div className="food-scanner-diary__unreadable" role="status">
-            <p>{WEEK_COPY.diaryOff}</p>
-          </div>
-        )}
+        {status.kind === "diary_off" && <DiaryState icon="info" lead={WEEK_COPY.diaryOff} />}
 
         {status.kind === "error" && (
-          <div className="food-scanner-diary__unreadable" role="status">
-            <p>{status.text}</p>
-            <button
-              type="button"
-              className="btn-secondary"
+          <DiaryState icon="alert" lead={status.text}>
+            <RecordButton
+              variant="soft"
               onClick={() => void load(period.current.from, period.current.to)}
             >
               {WEEK_COPY.retry}
-            </button>
-          </div>
+            </RecordButton>
+          </DiaryState>
         )}
 
         {week && (
           <>
-            <div className="food-scanner-week__nav">
-              <button
-                type="button"
-                className="food-scanner-diary__entry-action"
-                disabled={!earlierOk}
-                onClick={() => {
-                  const next = earlierWeek(week.from);
-                  void load(next.from, next.to);
-                }}
-              >
-                {WEEK_COPY.earlier}
-              </button>
-              <span className="food-scanner-week__period">{periodLabel(week.from, week.to)}</span>
-              <button
-                type="button"
-                className="food-scanner-diary__entry-action"
-                disabled={!laterOk}
-                onClick={() => {
-                  if (anchor === null) return;
-                  const next = laterWeek(week.to, anchor);
-                  void load(next.from, next.to);
-                }}
-              >
-                {WEEK_COPY.later}
-              </button>
-            </div>
-
-            <p className="food-scanner-diary__caption">{WEEK_COPY.summary(daysWithEntries)}</p>
-
-            <ul className="food-scanner-diary__list">
-              {week.days.map((row) => (
-                <li key={row.date} className="food-scanner-diary__entry">
+            <div className="cr-week diary-week">
+              <div className="cr-week__head">
+                <button
+                  type="button"
+                  className="cr-week__nav"
+                  aria-label={WEEK_COPY.earlier}
+                  disabled={!earlierOk}
+                  onClick={() => {
+                    const next = earlierWeek(week.from);
+                    void load(next.from, next.to);
+                  }}
+                >
+                  <RecordIcon name="back" />
+                </button>
+                <span className="cr-week__month diary-week__period">
+                  {periodLabel(week.from, week.to)}
+                </span>
+                <button
+                  type="button"
+                  className="cr-week__nav"
+                  aria-label={WEEK_COPY.later}
+                  disabled={!laterOk}
+                  onClick={() => {
+                    if (anchor === null) return;
+                    const next = laterWeek(week.to, anchor);
+                    void load(next.from, next.to);
+                  }}
+                >
+                  <RecordIcon name="chevron" />
+                </button>
+              </div>
+              <div className="cr-week__days">
+                {week.days.map((row) => (
                   <button
                     type="button"
-                    className="food-scanner-week__day"
+                    key={row.date}
+                    className="cr-week__day diary-week__day"
+                    aria-label={dayName(row)}
                     onClick={() => navigate(dayRoute(row.date))}
                   >
-                    <span className="food-scanner-diary__entry-dish">{dayLabel(row.date)}</span>
-                    <span className="food-scanner-diary__entry-time">{rowText(row)}</span>
+                    <span className="cr-week__name">{weekdayShort(row.date)}</span>
+                    <span className="cr-week__num">{dayOfMonth(row.date)}</span>
+                    <MarkDot mark={dayMark(row, showNumbers)} />
                   </button>
+                ))}
+              </div>
+            </div>
+
+            {showNumbers && (
+              <ul className="diary-legend">
+                <li className="diary-legend__item">
+                  <MarkDot mark="counted" />
+                  {WEEK_COPY.markCounted}
+                </li>
+                <li className="diary-legend__item">
+                  <MarkDot mark="uncounted" />
+                  {WEEK_COPY.markUncounted}
+                </li>
+                <li className="diary-legend__item">
+                  <MarkDot mark="none" />
+                  {WEEK_COPY.markNone}
+                </li>
+              </ul>
+            )}
+
+            <p className="diary-caption">{WEEK_COPY.summary(daysWithEntries)}</p>
+
+            {/* Цифры дня — строками; нажимается день в полосе выше. */}
+            <ul className="diary-week-rows">
+              {week.days.map((row) => (
+                <li key={row.date} className="diary-week-row">
+                  <span className="diary-week-row__day">{dayLabel(row.date)}</span>
+                  <span className="diary-week-row__text">{rowText(row)}</span>
                 </li>
               ))}
             </ul>

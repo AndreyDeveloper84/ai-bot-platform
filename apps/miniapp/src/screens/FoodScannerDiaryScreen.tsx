@@ -11,16 +11,23 @@
  * (`nutrition_numbers_hidden`, DRF-2766). Before the owner's decision of
  * 04.10 this was derived from `health_flags.eating_disorder`; it no longer
  * is — the mode is the person's own choice, not a profile flag.
+ *
+ * DRF-2954 — вид по доске владельца «Дневник» (кадры 1, 10, 17), решения
+ * 12.11: записи карточками со снимком или значком; два равных входа прямо в
+ * дневнике — «Сфотографировать еду» и «Записать текстом» (§109 «оба входа
+ * равноправны»; экрана «Как добавить?» нет — на один тап короче). Слова,
+ * условия чисел, действия над записью и возврат — прежние.
  */
 
-import { DiaryEntryItem } from "../components/DiaryEntryPhoto";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
+import { DiaryEntryCard } from "../components/diary/DiaryEntryCard";
+import { DiaryLoadError, DiaryState } from "../components/diary/DiaryState";
+import { RecordIcon } from "../components/records/RecordIcons";
+import { RecordButton } from "../components/records/RecordsState";
 import { Skeleton } from "../components/Skeleton";
-import { StateError } from "../components/StateError";
 import {
-  MEAL_TYPE_ICON,
   MEAL_TYPE_LABEL,
   entriesLabel,
   formatTimeShort,
@@ -54,7 +61,20 @@ import { screenRoot } from "../lib/screen-back";
 import { CustomerAvatarEntry } from "../components/CustomerAvatarEntry";
 import { CustomerTabBar } from "../components/CustomerTabBar";
 import { FAVORITES_COPY, FAVORITES_ROUTE, favoritesRefusalText } from "./FoodScannerFavoritesScreen";
+import { DIARY_ROUTE, MANUAL_ROUTE } from "./FoodScannerManualScreen";
 import { WEEK_COPY, WEEK_ROUTE } from "./FoodScannerWeekScreen";
+
+const CAPTURE_ROUTE = "/customer/food-scanner/capture";
+
+/**
+ * Два входа в запись — слова решения владельца 12.11 п.2 (DRF-2954):
+ * «Сфотографировать еду» — §109; «Записать текстом» — те же слова, что у
+ * входа в текст на съёмке и на Главной.
+ */
+export const DIARY_ENTRY_WAYS = {
+  photo: "Сфотографировать еду",
+  text: "Записать текстом",
+} as const;
 
 /**
  * ЧЕТЫРЕ состояния, и свести любые два нельзя — у каждого своя правда
@@ -93,10 +113,6 @@ type GroupKey = MealType | typeof OTHER_MEALS;
 
 const MEAL_ORDER: ReadonlyArray<GroupKey> = [...KNOWN_MEALS, OTHER_MEALS];
 
-const GROUP_ICON: Record<GroupKey, string> = {
-  ...MEAL_TYPE_ICON,
-  [OTHER_MEALS]: "🍽",
-};
 const GROUP_LABEL: Record<GroupKey, string> = {
   ...MEAL_TYPE_LABEL,
   [OTHER_MEALS]: "Другое",
@@ -118,8 +134,11 @@ export function FoodScannerDiaryScreen() {
   );
   const [status, setStatus] = useState<Status>({ kind: "loading" });
 
-  const load = useCallback(async () => {
-    setStatus({ kind: "loading" });
+  // `quiet` — перечитать день после действия, не снимая список: скелет на
+  // месте карточек уводил фокус в никуда и сбрасывал снимки (ревью плана
+  // DRF-2954). Первый показ и «Попробовать снова» — со скелетом, как было.
+  const load = useCallback(async (quiet = false) => {
+    if (!quiet) setStatus({ kind: "loading" });
     try {
       const day = await loadDiaryToday();
       // «Ответ пришёл, записей в нём нет» — своё состояние, не ошибка
@@ -162,7 +181,7 @@ export function FoodScannerDiaryScreen() {
       } catch (err) {
         setNotice({ text: entryErrorText(err) });
         // Неизвестный исход: изменение могло пройти — показать правду.
-        if (err instanceof ApiError && err.slug === "ayla_uncertain") await load();
+        if (err instanceof ApiError && err.slug === "ayla_uncertain") await load(true);
       } finally {
         busy.current = false;
         setPending(false);
@@ -185,7 +204,7 @@ export function FoodScannerDiaryScreen() {
                 undo: entry,
               },
         );
-        await load();
+        await load(true);
       }),
     [load, runEntryAction],
   );
@@ -198,7 +217,7 @@ export function FoodScannerDiaryScreen() {
         const outcome = await restoreFoodEntry(entry.id);
         if (outcome === "restored") {
           setNotice({ text: `Вернула: ${entry.dish_name}.` });
-          await load();
+          await load(true);
         } else if (outcome === "expired") {
           setNotice({
             text: "Уже не вернуть: окно возврата закрылось, запись удалена окончательно.",
@@ -215,7 +234,7 @@ export function FoodScannerDiaryScreen() {
       runEntryAction(async () => {
         await correctFoodEntryGrams(entry.id, grams);
         setNotice({ text: `Исправила: ${entry.dish_name}.` });
-        await load();
+        await load(true);
       }),
     [load, runEntryAction],
   );
@@ -260,26 +279,26 @@ export function FoodScannerDiaryScreen() {
   );
 
   return (
-    <div className="food-scanner-screen food-scanner-screen--tab-root">
-      <header className="records-screen__header">
-        <h1 className="records-screen__title">Питание</h1>
+    <div className="cr-screen diary-screen diary-screen--tab-root">
+      <header className="diary-head">
+        <h1 className="diary-head__title">Питание</h1>
         {/* Вход в профиль — §77 п.60. Стоит на всех экранах нижней
             панели: вход, который есть не везде, читается как «иногда
             можно». Имя компонент берёт сам — у этого экрана его нет. */}
         <CustomerAvatarEntry />
       </header>
 
-      <main className="food-scanner-screen__main">
+      <main className="diary-main">
         {/* Живая область есть всегда, меняется только текст: область,
             вставленная вместе с текстом, часть экранных дикторов пропускает. */}
-        <div className="food-scanner-diary__notice-slot" aria-live="polite">
+        <div className="diary-notice-slot" aria-live="polite">
           {notice && (
-            <div className="food-scanner-diary__notice">
-              <span>{notice.text}</span>
+            <div className="diary-notice">
+              <span className="diary-notice__text">{notice.text}</span>
               {notice.undo && (
                 <button
                   type="button"
-                  className="food-scanner-diary__notice-action"
+                  className="diary-notice__action"
                   disabled={pending}
                   onClick={() => {
                     if (notice.undo) void onUndo(notice.undo);
@@ -293,55 +312,54 @@ export function FoodScannerDiaryScreen() {
         </div>
 
         {status.kind === "loading" && (
-          <div className="food-scanner-diary__skeleton" aria-hidden="true">
-            <Skeleton width="40%" height="1.1em" />
-            <div style={{ marginTop: "var(--s-3)" }}>
-              <Skeleton width="90%" height="0.95em" />
-            </div>
-            <div style={{ marginTop: "var(--s-2)" }}>
-              <Skeleton width="70%" height="0.95em" />
-            </div>
+          <div className="diary-skeleton" aria-hidden="true">
+            {[0, 1, 2].map((i) => (
+              <div key={i} className="diary-skeleton__card">
+                <Skeleton width="56px" height="56px" radius="var(--r-md)" />
+                <div className="diary-skeleton__lines">
+                  <Skeleton width="70%" height="1em" />
+                  <Skeleton width="40%" height="0.9em" />
+                </div>
+              </div>
+            ))}
           </div>
         )}
 
-        {status.kind === "error" && (
-          <StateError err={status.err} onRetry={load} />
-        )}
+        {status.kind === "error" && <DiaryLoadError err={status.err} onRetry={() => void load()} />}
 
         {status.kind === "unreadable" && (
-          <div className="food-scanner-diary__unreadable" role="status">
-            <p>Не удалось загрузить дневник за сегодня.</p>
-            <p className="food-scanner-diary__unreadable-hint">
-              Записи не потерялись — их сейчас не удалось прочитать.
-            </p>
-            <button type="button" className="btn-secondary" onClick={load}>
+          <DiaryState
+            icon="alert"
+            lead="Не удалось загрузить дневник за сегодня."
+            hint="Записи не потерялись — их сейчас не удалось прочитать."
+          >
+            <RecordButton variant="soft" onClick={() => void load()}>
               Попробовать снова
-            </button>
-          </div>
+            </RecordButton>
+          </DiaryState>
         )}
 
         {/* DRF-1927 — без согласия дневник не читался: не сбой и не пустой
             день, повтор ничего не даст, поэтому и кнопки повтора нет. */}
         {status.kind === "consent_required" && (
-          <div className="food-scanner-diary__unreadable" role="status">
-            <p>{DIARY_CONSENT_REQUIRED_TEXT}</p>
-          </div>
+          <DiaryState icon="lock" lead={DIARY_CONSENT_REQUIRED_TEXT} />
         )}
 
         {/* DRF-2071 — контур выключен: та же фраза, что у дня/недели/избранного,
             без повтора и без входов в запись. */}
-        {status.kind === "diary_off" && (
-          <div className="food-scanner-diary__unreadable" role="status">
-            <p>{DIARY_OFF_TEXT}</p>
-          </div>
-        )}
+        {status.kind === "diary_off" && <DiaryState icon="info" lead={DIARY_OFF_TEXT} />}
 
         {status.kind === "ready" && (
           <DiaryReady
             day={status.day}
-            // DRF-2091: «Добавить приём» ведёт на запись текстом — фото-половина
-            // ждёт решение владельца (D26), обещать её кнопкой нельзя.
-            onAddTap={() => navigate("/customer/food-scanner/manual")}
+            // DRF-2954 — два равных входа (решение владельца 12.11 п.2). Съёмка
+            // с дневника остаётся на камере и после согласия (`stayAfterConsent`):
+            // без признака Capture уводит на `returnTo` — так он возвращает тех,
+            // кого прислал к себе ради согласия.
+            onPhotoTap={() =>
+              navigate(CAPTURE_ROUTE, { state: { returnTo: DIARY_ROUTE, stayAfterConsent: true } })
+            }
+            onTextTap={() => navigate(MANUAL_ROUTE)}
             onFavoritesTap={() => navigate(FAVORITES_ROUTE)}
             onWeekTap={() => navigate(WEEK_ROUTE)}
             onDelete={onDelete}
@@ -361,7 +379,8 @@ export function FoodScannerDiaryScreen() {
 
 function DiaryReady({
   day,
-  onAddTap,
+  onPhotoTap,
+  onTextTap,
   onFavoritesTap,
   onWeekTap,
   onDelete,
@@ -370,7 +389,8 @@ function DiaryReady({
   pending,
 }: {
   day: Extract<DiaryToday, { state: "empty" | "entries" }>;
-  onAddTap: () => void;
+  onPhotoTap: () => void;
+  onTextTap: () => void;
   onFavoritesTap: () => void;
   onWeekTap: () => void;
   onDelete: (entry: FoodDiaryEntry) => Promise<void>;
@@ -389,104 +409,117 @@ function DiaryReady({
   // DRF-2766 фаза 2 — итог включает оценки ИИ и говорит об этом.
   const marks = kcalTotalMarks(day.today);
   const approx = approxPrefix(marks);
-  // DRF-2107. «Добавить приём» ведёт на запись текстом (DRF-2091) — живой
-  // прокси, не заглушка; гейт `import.meta.env.DEV` времён DRF-1839 прятал
-  // в проде работающий вход и снят.
+  const caption =
+    totalCount === 0
+      ? "Пока ничего не записано. Добавь приём текстом здесь или напиши Ayla в чате — например «гречка 200 г»: она посчитает и покажет, прежде чем записать."
+      : `Сегодня — ${entriesLabel(totalCount)}.`;
   return (
     <>
-      <p className="food-scanner-diary__caption">
-        {totalCount === 0
-          ? "Пока ничего не записано. Добавь приём текстом здесь или напиши Ayla в чате — например «гречка 200 г»: она посчитает и покажет, прежде чем записать."
-          : `Сегодня — ${entriesLabel(totalCount)}.`}
-      </p>
+      {totalCount === 0 ? (
+        <div className="diary-empty">
+          <span className="cr-state__badge cr-state__badge--accent diary-empty__badge">
+            <RecordIcon name="bowl" size={40} />
+          </span>
+          <p className="diary-caption">{caption}</p>
+        </div>
+      ) : (
+        <p className="diary-caption">{caption}</p>
+      )}
+
+      {/* Два входа — равные плитки рядом (§109 «оба входа равноправны»). */}
+      <div className="diary-ways">
+        <button type="button" className="diary-way" onClick={onPhotoTap}>
+          <span className="diary-way__icon">
+            <RecordIcon name="camera" size={28} />
+          </span>
+          <span className="diary-way__label">{DIARY_ENTRY_WAYS.photo}</span>
+        </button>
+        <button type="button" className="diary-way" onClick={onTextTap}>
+          <span className="diary-way__icon">
+            <RecordIcon name="text" size={28} />
+          </span>
+          <span className="diary-way__label">{DIARY_ENTRY_WAYS.text}</span>
+        </button>
+      </div>
 
       {MEAL_ORDER.map((mt) => {
         const items = grouped[mt];
         if (!items || items.length === 0) return null;
         return (
-          <section
-            key={mt}
-            className="food-scanner-diary__group"
-            aria-labelledby={`food-diary-group-${mt}`}
-          >
-            <h2
-              id={`food-diary-group-${mt}`}
-              className="food-scanner-diary__group-heading"
-            >
-              <span aria-hidden="true">{GROUP_ICON[mt]}</span>{" "}
+          <section key={mt} className="diary-group" aria-labelledby={`food-diary-group-${mt}`}>
+            <h2 id={`food-diary-group-${mt}`} className="diary-group__heading">
               {GROUP_LABEL[mt]}
             </h2>
-            <ul className="food-scanner-diary__list">
+            <ul className="diary-list">
               {items.map((entry) => (
-                <DiaryEntryItem key={entry.id} entry={entry}>
-                  <div className="food-scanner-diary__entry-main">
-                    <span className="food-scanner-diary__entry-time">
-                      {formatTimeShort(entry.logged_at)}
-                    </span>
-                    <span className="food-scanner-diary__entry-dish">
-                      {entry.dish_name}
-                    </span>
-                  </div>
+                <DiaryEntryCard
+                  key={entry.id}
+                  entry={entry}
+                  dish={entry.dish_name}
+                  meta={formatTimeShort(entry.logged_at)}
+                  actions={
+                    <>
+                      {isTextEntry(entry) && (
+                        <button
+                          type="button"
+                          className="diary-entry__action"
+                          aria-label={`Исправить граммы: ${entry.dish_name}`}
+                          disabled={pending}
+                          onClick={() => setEditing(entry.id)}
+                        >
+                          Граммы
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        className="diary-entry__action"
+                        aria-label={`В избранное: ${entry.dish_name}`}
+                        disabled={pending}
+                        onClick={() => onFavorite(entry)}
+                      >
+                        В избранное
+                      </button>
+                      <button
+                        type="button"
+                        className="diary-entry__action"
+                        aria-label={`Удалить: ${entry.dish_name}`}
+                        disabled={pending}
+                        onClick={() => {
+                          void onDelete(entry);
+                        }}
+                      >
+                        Удалить
+                      </button>
+                    </>
+                  }
+                  after={
+                    editing === entry.id ? (
+                      <GramsForm
+                        entry={entry}
+                        onSave={(grams) => {
+                          setEditing(null);
+                          void onCorrect(entry, grams);
+                        }}
+                        onCancel={() => setEditing(null)}
+                      />
+                    ) : null
+                  }
+                >
                   {/* DRF-2371 — без числа строки нет: «~ ккал» и «~0 ккал»
                       оба говорят о расчёте, которого не было. */}
                   {showNumbers && entry.calories != null && (
-                    <span className="food-scanner-diary__entry-cal">
-                      ~{entry.calories} ккал
-                    </span>
+                    <span className="diary-entry__kcal">~{entry.calories} ккал</span>
                   )}
                   {/* DRF-2761 — оценка калорий ИИ видна в записи (решение
                       владельца 02.10), всегда с пометкой «Оценка ИИ». Тот
                       же выключатель чисел, что у проверенного; в итог дня
                       не входит. */}
                   {showNumbers && aiCaloriesOf(entry) != null && (
-                    <span className="food-scanner-diary__entry-cal" data-testid="ai-kcal">
+                    <span className="diary-entry__kcal" data-testid="ai-kcal">
                       {aiKcalPhrase(aiCaloriesOf(entry) as number)}
                     </span>
                   )}
-                  <div className="food-scanner-diary__entry-actions">
-                    {isTextEntry(entry) && (
-                      <button
-                        type="button"
-                        className="food-scanner-diary__entry-action"
-                        aria-label={`Исправить граммы: ${entry.dish_name}`}
-                        disabled={pending}
-                        onClick={() => setEditing(entry.id)}
-                      >
-                        Граммы
-                      </button>
-                    )}
-                    <button
-                      type="button"
-                      className="food-scanner-diary__entry-action"
-                      aria-label={`В избранное: ${entry.dish_name}`}
-                      disabled={pending}
-                      onClick={() => onFavorite(entry)}
-                    >
-                      В избранное
-                    </button>
-                    <button
-                      type="button"
-                      className="food-scanner-diary__entry-action"
-                      aria-label={`Удалить: ${entry.dish_name}`}
-                      disabled={pending}
-                      onClick={() => {
-                        void onDelete(entry);
-                      }}
-                    >
-                      Удалить
-                    </button>
-                  </div>
-                  {editing === entry.id && (
-                    <GramsForm
-                      entry={entry}
-                      onSave={(grams) => {
-                        setEditing(null);
-                        void onCorrect(entry, grams);
-                      }}
-                      onCancel={() => setEditing(null)}
-                    />
-                  )}
-                </DiaryEntryItem>
+                </DiaryEntryCard>
               ))}
             </ul>
           </section>
@@ -494,33 +527,27 @@ function DiaryReady({
       })}
 
       {totalCount > 0 && showNumbers && (
-        <section
-          className="food-scanner-diary__totals"
-          aria-labelledby="food-diary-totals-h2"
-        >
-          <h2
-            id="food-diary-totals-h2"
-            className="food-scanner-screen__section-heading"
-          >
+        <section className="diary-totals" aria-labelledby="food-diary-totals-h2">
+          <h2 id="food-diary-totals-h2" className="diary-group__heading">
             Сегодня
           </h2>
           {/* Цель рисуется, ТОЛЬКО когда она есть. Ключа нет — цели нет
               (анкету человек не проходил), и «/ 0 ккал» на её месте
               было бы чужим числом, выданным за его собственное (§65). */}
           {eaten !== undefined && (
-            <p className="food-scanner-saved__total" data-testid="day-kcal-total">
+            <p className="diary-totals__total" data-testid="day-kcal-total">
               {target !== undefined ? `${approx}${eaten} / ${target} ккал` : `${approx}${eaten} ккал`}
               {marks.approx ? `, ${KCAL_TOTAL_AI_NOTE}` : ""}
             </p>
           )}
           {/* DRF-2766 — день прочитан, а итога нет: не ноль и не «сбой». */}
           {eaten === undefined && marks.incomplete && (
-            <p className="food-scanner-saved__total" data-testid="day-kcal-total">
+            <p className="diary-totals__total" data-testid="day-kcal-total">
               {KCAL_TOTAL_UNKNOWN}
             </p>
           )}
           {eaten !== undefined && marks.incomplete && (
-            <p className="food-scanner-saved__macros" data-testid="day-kcal-incomplete">
+            <p className="diary-totals__note" data-testid="day-kcal-incomplete">
               {KCAL_TOTAL_INCOMPLETE}
             </p>
           )}
@@ -529,36 +556,29 @@ function DiaryReady({
               настоящее приходит с каждой записью. */}
           {/* DRF-2288 (№41): та же строка, что на Главной, — одна функция. */}
           {pfc && pfcLine(pfc, eaten) !== null && (
-            <p className="food-scanner-saved__macros">{pfcLine(pfc, eaten)}</p>
+            <p className="diary-totals__note">{pfcLine(pfc, eaten)}</p>
           )}
         </section>
       )}
 
       {/* Строка диетолога (DRF-1897) — под итогами, тем же текстом, что в
           чате. Сервер присылает её только этому экрану и уже записал её
-          в журнал как показанную; нет ключа — нет и абзаца. */}
+          в журнал как показанную; нет ключа — нет и абзаца. Стоит ВНЕ блока
+          итога: при «Без чисел» блока нет, а строка показывается. */}
       {day.today.coach_observation && (
-        <p className="food-scanner-diary__observation">
-          {day.today.coach_observation}
-        </p>
+        <p className="diary-observation">{day.today.coach_observation}</p>
       )}
 
-      <div className="food-scanner-screen__cta-stack">
-        <button type="button" className="btn-primary" onClick={onAddTap}>
-          Добавить приём
-        </button>
-      </div>
-
       {/* DRF-2092 (F12) — избранное живёт на сервере; вход отсюда, не с
-          дашборда: избранное растёт из записей дневника. */}
-      <div className="food-scanner-screen__cta-stack">
-        <button type="button" className="btn-secondary" onClick={onFavoritesTap}>
+          дашборда: избранное растёт из записей дневника.
+          DRF-2099 — неделя: факт «N из 7 дней с записями», без напоминаний. */}
+      <div className="diary-links">
+        <RecordButton variant="soft" onClick={onFavoritesTap}>
           {FAVORITES_COPY.openFromDiary}
-        </button>
-        {/* DRF-2099 — неделя: факт «N из 7 дней с записями», без напоминаний. */}
-        <button type="button" className="btn-secondary" onClick={onWeekTap}>
+        </RecordButton>
+        <RecordButton variant="soft" onClick={onWeekTap}>
           {WEEK_COPY.openFromDiary}
-        </button>
+        </RecordButton>
       </div>
     </>
   );
@@ -643,7 +663,7 @@ function GramsForm({
   const inputId = `food-diary-grams-${entry.id}`;
   return (
     <form
-      className="food-scanner-diary__grams"
+      className="diary-grams"
       onSubmit={(event) => {
         event.preventDefault();
         const grams = Number(value.trim());
@@ -654,27 +674,29 @@ function GramsForm({
         onSave(grams);
       }}
     >
-      <label htmlFor={inputId} className="food-scanner-diary__grams-label">
+      <label htmlFor={inputId} className="diary-grams__label">
         {`Сколько граммов было: ${entry.dish_name}`}
       </label>
       {/* Текстовое поле, а не type="number": границы проверяет код и
           называет ошибку словами, а не браузер молча. */}
       <input
         id={inputId}
-        className="food-scanner-diary__grams-input"
+        className="diary-grams__input"
         type="text"
         inputMode="numeric"
         value={value}
         onChange={(event) => setValue(event.target.value)}
       />
-      <button type="submit" className="btn-secondary">
-        Сохранить
-      </button>
-      <button type="button" className="btn-secondary" onClick={onCancel}>
-        Отмена
-      </button>
+      <div className="diary-grams__actions">
+        <button type="submit" className="cr-btn cr-btn--primary diary-grams__btn">
+          Сохранить
+        </button>
+        <button type="button" className="cr-btn cr-btn--text diary-grams__btn" onClick={onCancel}>
+          Отмена
+        </button>
+      </div>
       {error && (
-        <p className="food-scanner-diary__grams-error" role="alert">
+        <p className="diary-grams__error" role="alert">
           {error}
         </p>
       )}

@@ -17,6 +17,7 @@
  */
 import { request } from "./api";
 import type { FoodDiaryEntry } from "./customer-wellness";
+import { kcalTotalMarks } from "./format";
 
 export interface DiaryDayRow {
   /** `YYYY-MM-DD` в поясе человека (каталог). */
@@ -128,6 +129,41 @@ export function dayLabel(iso: string): string {
   const dd = String(d.getUTCDate()).padStart(2, "0");
   const mm = String(d.getUTCMonth() + 1).padStart(2, "0");
   return `${WEEKDAY_SHORT[d.getUTCDay()]}, ${dd}.${mm}`;
+}
+
+/** `2026-09-14` → «Пн» — по UTC-полуночи даты, не по часам телефона. */
+export function weekdayShort(iso: string): string {
+  return WEEKDAY_SHORT[new Date(toUtcMidnight(iso)).getUTCDay()] ?? "";
+}
+
+/** `2026-09-14` → 14. */
+export function dayOfMonth(iso: string): number {
+  return new Date(toUtcMidnight(iso)).getUTCDate();
+}
+
+/**
+ * Отметка дня в полосе недели (DRF-2954, решение владельца 12.11 п.8).
+ *
+ * Данные — те же, что у строки недели: `has_entries`, `kcal`,
+ * `uncounted_meals`. «Посчитано» — у каждой записи дня есть число (своё или
+ * оценка ИИ: она входит в итог по решению 04.10, и об этом говорит пометка
+ * «включая оценки ИИ»). Слов «Полные данные» с доски нет: при оценках ИИ это
+ * неправда.
+ *
+ * В режиме «Без чисел» калорийного измерения нет вовсе — только «есть
+ * записи / нет»: отметка о подсчёте калорий говорит о числах, которых
+ * человек видеть не хочет.
+ */
+export type DayMark = "counted" | "uncounted" | "entries" | "none";
+
+export function dayMark(
+  row: Pick<DiaryDayRow, "has_entries" | "kcal" | "uncounted_meals">,
+  showNumbers: boolean,
+): DayMark {
+  if (!row.has_entries) return "none";
+  if (!showNumbers) return "entries";
+  // Неполнота — тем же правилом, что «итог неполный» в строке недели.
+  return row.kcal !== null && !kcalTotalMarks(row).incomplete ? "counted" : "uncounted";
 }
 
 /** «14.09 – 20.09». */

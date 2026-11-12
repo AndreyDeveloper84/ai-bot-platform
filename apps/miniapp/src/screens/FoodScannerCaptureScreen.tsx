@@ -60,6 +60,15 @@ interface RouterIn {
   /** When set, consent-accept bounces back here instead of staying on F1. */
   returnTo?: string;
   mealType?: MealType;
+  /**
+   * DRF-2954 — человек пришёл СНИМАТЬ (вход «Сфотографировать еду» в
+   * дневнике), а не за согласием: после согласия он остаётся на камере.
+   * `returnTo` при этом служит только стрелке «назад» и «Записано».
+   * Без признака — прежнее поведение: экраны, приславшие сюда ради
+   * согласия (неделя, день, избранное, текст, план), получают человека
+   * обратно.
+   */
+  stayAfterConsent?: boolean;
 }
 
 export function FoodScannerCaptureScreen() {
@@ -155,13 +164,13 @@ export function FoodScannerCaptureScreen() {
     // If the customer arrived via deep-link to a downstream surface
     // (e.g. /manual) and was bounced here for consent, return them
     // home after accepting (adversarial CR F1).
-    if (incoming.returnTo) {
+    if (incoming.returnTo && !incoming.stayAfterConsent) {
       navigate(incoming.returnTo, {
         replace: true,
         state: { mealType: incoming.mealType },
       });
     }
-  }, [navigate, incoming.returnTo, incoming.mealType]);
+  }, [navigate, incoming.returnTo, incoming.mealType, incoming.stayAfterConsent]);
 
   const handleDeclineConsent = useCallback(() => {
     navigate("/customer/main");

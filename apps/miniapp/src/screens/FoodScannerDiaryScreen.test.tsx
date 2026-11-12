@@ -19,7 +19,7 @@
  * **3. Ни одна съеденная тарелка не исчезает.** Незнакомый `meal_type`
  * попадает в «Другое», а не выбрасывается (§78).
  */
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { primeDisplayName } from "../components/CustomerAvatarEntry";
@@ -46,7 +46,7 @@ import {
   type WellnessToday,
 } from "../lib/customer-wellness";
 import { ApiError } from "../lib/api";
-import { FoodScannerDiaryScreen } from "./FoodScannerDiaryScreen";
+import { DIARY_ENTRY_WAYS, FoodScannerDiaryScreen } from "./FoodScannerDiaryScreen";
 
 // Дверь в профиль (`CustomerAvatarEntry`) без пропа спрашивает имя у
 // `/me`. Этот набор ручку не подменяет, поэтому имя засевается явно:
@@ -260,7 +260,7 @@ describe("четыре состояния различимы попарно", ()
     expect(screen.queryByText(/Пока ничего не записано/)).not.toBeInTheDocument();
   });
 
-  it("DRF-2071: контур выключен (сводка с nutrition_disabled) — «недоступен», без повтора и без «Добавить приём»", async () => {
+  it("DRF-2071: контур выключен (сводка с nutrition_disabled) — «недоступен», без повтора и без входов в запись", async () => {
     mockedLoad.mockResolvedValue({ state: "diary_off" });
     renderScreen();
 
@@ -268,9 +268,10 @@ describe("четыре состояния различимы попарно", ()
     // Не сбой: ни «через минуту», ни кнопки повтора.
     expect(screen.queryByText(/Не удалось загрузить дневник/)).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Повторить|снова/i })).not.toBeInTheDocument();
-    // Не пустой день и не вход в запись: «Добавить приём» не рисуется.
+    // Не пустой день и не вход в запись: ни одного из двух входов.
     expect(screen.queryByText(/Пока ничего не записано/)).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /Добавить приём/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: DIARY_ENTRY_WAYS.photo })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: DIARY_ENTRY_WAYS.text })).not.toBeInTheDocument();
   });
 
   it("DRF-2071: положительная стража — отказ ручки остаётся сбоем с повтором", async () => {
@@ -303,11 +304,30 @@ describe("ни одна съеденная тарелка не исчезает"
 });
 
 
-describe("«Добавить приём» живёт и в прод-сборке (DRF-2107)", () => {
-  it("прод (DEV=false): кнопка есть и ведёт на запись текстом; подпись зовёт записать здесь", async () => {
-    // Гейт `import.meta.env.DEV` закрывал кнопку, пока скан был заглушкой
-    // (DRF-1839). После DRF-2091 кнопка ведёт на живой текстовый ввод —
-    // прятать её в проде значило прятать работающий вход.
+describe("два входа в запись — прямо в дневнике (DRF-2954, решение владельца 12.11 п.2)", () => {
+  async function renderWithProbe() {
+    const { useLocation } = await import("react-router-dom");
+    function Probe() {
+      const location = useLocation();
+      return (
+        <div data-testid="location" data-state={JSON.stringify(location.state ?? null)}>
+          {location.pathname}
+        </div>
+      );
+    }
+    return render(
+      <MemoryRouter initialEntries={["/customer/food-scanner/diary"]}>
+        <Routes>
+          <Route path="/customer/food-scanner/diary" element={<FoodScannerDiaryScreen />} />
+          <Route path="*" element={<Probe />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+  }
+
+  it("прод (DEV=false): оба входа есть; подпись зовёт записать здесь", async () => {
+    // DRF-2107: гейт `import.meta.env.DEV` закрывал вход, пока скан был
+    // заглушкой; прятать работающий вход в проде нельзя.
     vi.stubEnv("DEV", false);
     try {
       mockedLoad.mockResolvedValue({
@@ -315,31 +335,21 @@ describe("«Добавить приём» живёт и в прод-сборке
         hideNumbers: false,
         today: today({ calories_eaten: 0 }),
       });
-      const { useLocation } = await import("react-router-dom");
-      function Probe() {
-        const location = useLocation();
-        return <div data-testid="location">{location.pathname}</div>;
-      }
-      render(
-        <MemoryRouter initialEntries={["/customer/food-scanner/diary"]}>
-          <Routes>
-            <Route path="/customer/food-scanner/diary" element={<FoodScannerDiaryScreen />} />
-            <Route path="*" element={<Probe />} />
-          </Routes>
-        </MemoryRouter>,
-      );
+      await renderWithProbe();
       expect(await screen.findByText(/Добавь приём текстом здесь/)).toBeInTheDocument();
       expect(screen.queryByText(/через скан/)).not.toBeInTheDocument();
-      fireEvent.click(screen.getByRole("button", { name: "Добавить приём" }));
-      expect(await screen.findByTestId("location")).toHaveTextContent(
-        "/customer/food-scanner/manual",
-      );
+      expect(screen.getByRole("button", { name: DIARY_ENTRY_WAYS.photo })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: DIARY_ENTRY_WAYS.text })).toBeInTheDocument();
     } finally {
       vi.unstubAllEnvs();
     }
   });
 
-  it("непустой день — кнопка тоже есть", async () => {
+  it("слова входов — решения владельца: «Сфотографировать еду», «Записать текстом»", () => {
+    expect(DIARY_ENTRY_WAYS).toEqual({ photo: "Сфотографировать еду", text: "Записать текстом" });
+  });
+
+  it("непустой день — оба входа тоже есть", async () => {
     mockedLoad.mockResolvedValue({
       state: "entries",
       entries: [SOUP],
@@ -348,30 +358,46 @@ describe("«Добавить приём» живёт и в прод-сборке
     });
     renderScreen();
     await screen.findByText(SOUP.dish_name);
-    expect(screen.getByRole("button", { name: "Добавить приём" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: DIARY_ENTRY_WAYS.photo })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: DIARY_ENTRY_WAYS.text })).toBeInTheDocument();
   });
 
-  it("DRF-2091: «Добавить приём» ведёт на запись текстом, не в съёмку (фото — D26)", async () => {
+  it("«Записать текстом» ведёт на запись текстом", async () => {
     mockedLoad.mockResolvedValue({
       state: "empty",
       hideNumbers: false,
       today: today({ calories_eaten: 0 }),
     });
-    const { useLocation } = await import("react-router-dom");
-    function Probe() {
-      const location = useLocation();
-      return <div data-testid="location">{location.pathname}</div>;
-    }
-    render(
-      <MemoryRouter initialEntries={["/customer/food-scanner/diary"]}>
-        <Routes>
-          <Route path="/customer/food-scanner/diary" element={<FoodScannerDiaryScreen />} />
-          <Route path="*" element={<Probe />} />
-        </Routes>
-      </MemoryRouter>,
-    );
-    fireEvent.click(await screen.findByRole("button", { name: "Добавить приём" }));
+    await renderWithProbe();
+    fireEvent.click(await screen.findByRole("button", { name: DIARY_ENTRY_WAYS.text }));
     expect(await screen.findByTestId("location")).toHaveTextContent("/customer/food-scanner/manual");
+  });
+
+  it("«Сфотографировать еду» ведёт в съёмку: возврат — в дневник, после согласия — остаться на камере", async () => {
+    mockedLoad.mockResolvedValue({
+      state: "empty",
+      hideNumbers: false,
+      today: today({ calories_eaten: 0 }),
+    });
+    await renderWithProbe();
+    fireEvent.click(await screen.findByRole("button", { name: DIARY_ENTRY_WAYS.photo }));
+    const location = await screen.findByTestId("location");
+    expect(location).toHaveTextContent("/customer/food-scanner/capture");
+    expect(JSON.parse(location.getAttribute("data-state") ?? "null")).toEqual({
+      returnTo: "/customer/food-scanner/diary",
+      stayAfterConsent: true,
+    });
+  });
+
+  it.each([
+    ["нет согласия", { state: "consent_required" as const }],
+    ["нечитаемо", { state: "unreadable" as const }],
+  ])("%s — входов в запись нет (они только у прочитанного дня)", async (_name, day) => {
+    mockedLoad.mockResolvedValue(day);
+    renderScreen();
+    await screen.findByRole("status");
+    expect(screen.queryByRole("button", { name: DIARY_ENTRY_WAYS.photo })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: DIARY_ENTRY_WAYS.text })).not.toBeInTheDocument();
   });
 
   it("запись из чата (meal_type other) видна в «Другое»", async () => {
@@ -421,7 +447,9 @@ describe("строка диетолога (DRF-1897)", () => {
 
     // POSITIVE first: the ready diary did render.
     expect(await screen.findByText("Овсянка с ягодами")).toBeInTheDocument();
-    expect(container.querySelector(".food-scanner-diary__observation")).toBeNull();
+    expect(container.querySelector(".diary-observation")).toBeNull();
+    // Положительная пара селектора: класс строки диетолога — тот, что выше.
+    expect(container.querySelector(".diary-totals")).not.toBeNull();
   });
 });
 
@@ -477,6 +505,23 @@ describe("правка и удаление записи (DRF-1838)", () => {
     expect(mockedDelete).toHaveBeenCalledWith("fl-text");
     expect(mockedLoad).toHaveBeenCalledTimes(2);
     expect(screen.getByRole("button", { name: "Вернуть" })).toBeInTheDocument();
+  });
+
+  it("после «Удалить» день перечитывается тихо: оставшаяся карточка не пересоздаётся (DRF-2954)", async () => {
+    serveDay([TEXT_ENTRY, PHOTO_ENTRY]);
+    mockedDelete.mockResolvedValue(DELETION);
+    renderScreen();
+
+    const kept = (await screen.findByText(PHOTO_ENTRY.dish_name)).closest("li");
+    serveDay([PHOTO_ENTRY]);
+    fireEvent.click(screen.getByRole("button", { name: "Удалить: Гречка" }));
+
+    await screen.findByText("Убрано: Гречка. Вернуть можно ещё 15 минут.");
+    await waitFor(() => expect(screen.queryByText("Гречка")).not.toBeInTheDocument());
+    expect(mockedLoad).toHaveBeenCalledTimes(2);
+    // Скелет на месте списка размонтировал бы карточки: фокус и снимки
+    // терялись бы на каждом действии.
+    expect(screen.getByText(PHOTO_ENTRY.dish_name).closest("li")).toBe(kept);
   });
 
   it("«Вернуть» в окне возвращает запись и перечитывает день", async () => {

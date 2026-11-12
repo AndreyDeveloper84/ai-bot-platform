@@ -1,5 +1,6 @@
 /**
- * Значки раздела «Записи» клиента (макет «Записи.png», DRF-2952).
+ * Значки раздела клиента: «Записи» (макет «Записи.png», DRF-2952), дневник питания
+ * (DRF-2954).
  *
  * Линейные, цвет — `currentColor`: значок берёт цвет строки, в которой стоит,
  * и не несёт собственного. Все декоративные (`aria-hidden`) — смысл строки
@@ -24,7 +25,10 @@ export type RecordIconName =
   | "alert"
   | "offline"
   | "lock"
-  | "gone";
+  | "gone"
+  | "bowl"
+  | "camera"
+  | "text";
 
 const PATHS: Record<RecordIconName, ReactNode> = {
   back: <path d="M15 5l-7 7 7 7" />,
@@ -108,6 +112,25 @@ const PATHS: Record<RecordIconName, ReactNode> = {
     <>
       <rect x="3.5" y="5" width="17" height="15.5" rx="3" />
       <path d="M3.5 10h17M9.5 13.5l5 4M14.5 13.5l-5 4" />
+    </>
+  ),
+  // Дневник питания (DRF-2954): запись без снимка, вход «фото», вход «текст».
+  bowl: (
+    <>
+      <path d="M3.5 11h17a8.5 8.5 0 01-17 0z" />
+      <path d="M9 19.5h6M14.5 7.5l4-4" />
+    </>
+  ),
+  camera: (
+    <>
+      <path d="M4 8.5h3l1.6-2.5h6.8L17 8.5h3a1 1 0 011 1V18a1.5 1.5 0 01-1.5 1.5h-15A1.5 1.5 0 013 18V9.5a1 1 0 011-1z" />
+      <circle cx="12" cy="13.5" r="3.5" />
+    </>
+  ),
+  text: (
+    <>
+      <rect x="4.5" y="3.5" width="15" height="17" rx="2.5" />
+      <path d="M8 8.5h8M8 12h8M8 15.5h5" />
     </>
   ),
 };
