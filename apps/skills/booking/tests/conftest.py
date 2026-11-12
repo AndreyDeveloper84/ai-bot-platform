@@ -69,6 +69,22 @@ _MESSAGE = (
 
 
 @pytest.fixture(autouse=True)
+def workspace_kind_unknown(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Вид кабинета — «не знаю», без похода в каталог.
+
+    ``calc_price`` без цены спрашивает ``workspace_kind`` (REST к каталогу,
+    кэш 10 мин); при заданных ``AYLA_BASE_URL``/``AYLA_INTERNAL_API_TOKEN``
+    в окружении прогона это был бы живой httpx-вызов — сторож сетевого
+    выхода (DRF-2696) записал бы нарушение. ``None`` = прежние слова про
+    администратора; тест, которому нужен соло, патчит сам.
+    """
+
+    from apps.identity.services import workspace_kind as wk
+
+    monkeypatch.setattr(wk, "workspace_kind", lambda tenant_id: None)
+
+
+@pytest.fixture(autouse=True)
 def forbid_vendor_llm_client(monkeypatch: pytest.MonkeyPatch) -> None:
     """Закрыть обоим провайдерам дорогу к конструктору SDK."""
 

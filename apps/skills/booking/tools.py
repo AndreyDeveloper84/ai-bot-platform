@@ -585,6 +585,15 @@ class CalcPriceResult:
     * ``promo_status``     — see :data:`PromoStatus`. ``"not_supplied"``
                             is the no-promo-mentioned case; the seven
                             others mirror :data:`apps.promotions.services.PromoReason`.
+    * ``price_is_from``    — the masters of this service charge DIFFERENT
+                            prices and no master was chosen: ``original_price``
+                            is the lowest of them and the text says «от …»
+                            (owner decision 12.11.2026). ``False`` when one
+                            master, one price, or a chosen master's edge.
+    * ``solo``             — the tenant is a solo master's workspace
+                            (``workspace_kind == "solo"``); only consulted
+                            when there is no price: a solo has no
+                            administrator to «озвучить цену».
     """
 
     service_name: str
@@ -592,6 +601,8 @@ class CalcPriceResult:
     final_price: Decimal | None
     discount_percent: int | None
     promo_status: PromoStatus
+    price_is_from: bool = False
+    solo: bool = False
 
 
 @dataclass(frozen=True)
@@ -3286,6 +3297,7 @@ def calc_price(
             final_price=None,
             discount_percent=None,
             promo_status="not_supplied" if not promo_code else "not_found",
+            solo=_tenant_is_solo(tenant),
         )
         text = _format_price_text(result)
         _audit_tool(
@@ -3298,6 +3310,7 @@ def calc_price(
 
     service_name = catalog_row.name or service_lookup.get(service_id, "")
     base_price: Decimal | None = catalog_row.price_from
+    quoted_from_edge = False
 
     # DRF-1067: with a chosen master on the Ayla path, price the
     # master+service edge — the amount the booking is actually created
@@ -3313,11 +3326,21 @@ def calc_price(
             )
         if edge_price is not None:
             base_price = edge_price
+            quoted_from_edge = True
 
     # DRF-1989: цена ниже 1 ₽ — не цена, а незаполненное поле (каталог такое не
     # продаёт): ответ «цену озвучит администратор», а не «0 ₽».
+    # No chosen master's edge to quote: the price Ayla will stamp is still an
+    # EDGE price (DRF-1067) — one per master. One price across the masters
+    # (or a single master) is quoted as exact; several different ones are
+    # quoted as «от <lowest>» (owner decision 12.11.2026). No priced edge in
+    # the mirror — the service row's price, as before.
+    price_is_from = False
+    if not quoted_from_edge:
+        base_price, price_is_from = _price_across_masters(tenant, catalog_row, base_price)
     if base_price is not None and base_price < 1:
         base_price = None
+    solo = base_price is None and _tenant_is_solo(tenant)
 
     # ── No promo case ──────────────────────────────────────────────
     if not promo_code:
@@ -3327,6 +3350,8 @@ def calc_price(
             final_price=base_price,
             discount_percent=None,
             promo_status="not_supplied",
+            price_is_from=price_is_from,
+            solo=solo,
         )
         text = _format_price_text(result)
         _audit_tool(
@@ -3376,6 +3401,8 @@ def calc_price(
         final_price=final_price,
         discount_percent=discount,
         promo_status=validation.reason,
+        price_is_from=price_is_from,
+        solo=solo,
     )
     text = _format_price_text(result)
     _audit_tool(
@@ -3429,6 +3456,61 @@ def _edge_price_for_quote(
         return None
 
 
+def _price_across_masters(
+    tenant: Any, catalog_row: Any, base_price: Decimal | None
+) -> tuple[Decimal | None, bool]:
+    """The price to quote when no master is chosen, and whether it is «от».
+
+    Ayla stamps the (specialist, service) EDGE price onto the appointment
+    (DRF-1067), so the mirror's edges — not the service row — say what the
+    customer will pay. Sellable sync edges with a price are read in one
+    query:
+
+    * none            → ``(base_price, False)`` — the service row, as before;
+    * one price       → ``(that price, False)`` — exact, even if the row's
+      ``price_from`` differs: the booking will be at the edge price;
+    * several prices  → ``(lowest, True)`` — «от …», the honest form for a
+      salon that prices per master (owner decision 12.11.2026).
+
+    Unsellable edges (DRF-1962: below the minimum, inactive) are not
+    offers and do not take part — ``.sellable()`` is the one predicate.
+    """
+    from apps.catalog.models import MasterService
+
+    prices = sorted(
+        {
+            p
+            for p in MasterService.all_tenants.filter(
+                tenant=tenant,
+                service=catalog_row,
+                ayla_specialist_service_id__isnull=False,
+                price__gte=1,
+            )
+            .sellable()
+            .values_list("price", flat=True)
+        }
+    )
+    if not prices:
+        return base_price, False
+    return prices[0], len(prices) > 1
+
+
+def _tenant_is_solo(tenant: Any) -> bool:
+    """``True`` when the catalog says this workspace is a solo master's.
+
+    Read only when a quote has no price to give: the wording then names who
+    can tell it — a salon has an administrator, a solo master has only the
+    master. Unknown kind (catalog unreachable, flag off) → salon wording,
+    i.e. what the bot said before.
+    """
+    from apps.identity.services.workspace_kind import workspace_kind
+
+    tenant_id = getattr(tenant, "id", None)
+    if tenant_id is None:
+        return False
+    return workspace_kind(tenant_id) == "solo"
+
+
 def _format_price_text(result: CalcPriceResult) -> str:
     """Render a Russian price quote for the deterministic fallback path.
 
@@ -3436,27 +3518,36 @@ def _format_price_text(result: CalcPriceResult) -> str:
     adapter shows when the LLM returns empty. Wording per the B6 spec:
 
     * No promo, price known          → "1 500 ₽".
+    * Masters price differently      → "от 1 500 ₽" (``price_is_from``; the
+                                        promo line keeps the «от» on both sides).
     * Valid promo applied            → "1 500 ₽ → 1 350 ₽ (промокод MAY10, −10%)".
     * Promo not_found / inactive     → "Не нашла такой промокод — могу посчитать без него?"
     * Promo not_started              → "Этот промокод начнёт действовать ..."
     * Promo expired                  → "Срок действия промокода истёк."
     * Promo wrong_service            → "Промокод не подходит к этой услуге."
     * price_from is None             → "Точную цену озвучит администратор — это услуга по индивидуальному прайсу."
+    * price_from is None, solo       → "Мастер пока не указал цену на эту услугу — уточни при записи."
 
     Strings are short on purpose — the LLM rephrases freely on top.
     """
     name = result.service_name or "услуга"
 
     if result.original_price is None:
+        if result.solo:
+            return f"{name}: мастер пока не указал цену на эту услугу — уточни при записи."
         return f"{name}: точную цену озвучит администратор — это услуга по индивидуальному прайсу."
 
     base_str = format_rub(result.original_price)
+    if result.price_is_from:
+        base_str = f"от {base_str}"
 
     status = result.promo_status
     if status == "not_supplied":
         return f"{name}: {base_str}."
     if status == "ok" and result.final_price is not None and result.discount_percent is not None:
         final_str = format_rub(result.final_price)
+        if result.price_is_from:
+            final_str = f"от {final_str}"
         return f"{name}: {base_str} → {final_str} (промокод, −{result.discount_percent}%)."
     if status in ("not_found", "inactive"):
         return f"Не нашла такой промокод — могу посчитать без него? {name}: {base_str}."

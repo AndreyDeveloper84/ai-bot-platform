@@ -582,8 +582,12 @@ def _format_price_block(price: dict[str, Any]) -> str:
         f"• Финальная цена: {price.get('final_price', '—')}\n"
         f"• Скидка: {price.get('discount_percent', '—')}\n"
         f"• Статус промокода: {price.get('promo_status', '—')}\n"
+        f"• Цена «от» (у мастеров разные цены): {'да' if price.get('price_is_from') else 'нет'}\n"
+        f"• Соло-мастер (администратора нет): {'да' if price.get('solo') else 'нет'}\n"
         f"• Готовый текст: {price.get('rendered_text', '')}\n"
-        "Сохрани числа без изменений. Подбери тон под promo_status."
+        "Сохрани числа без изменений. Подбери тон под promo_status. "
+        "Если цена «от» — говори «от …», не называй её точной. "
+        "Если соло-мастер и цены нет — не упоминай администратора."
     )
 
 
