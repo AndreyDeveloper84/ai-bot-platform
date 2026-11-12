@@ -100,6 +100,20 @@ def test_w1_text_writes_a_passed_tap_does_not_a_stopped_tap_does() -> None:
     assert records_its_own_verdict(structural=True, gate_outcome=stopped) is True
 
 
+@pytest.mark.parametrize("verdict", ["clarify", "caution", "", "что-то новое"])
+def test_w2_a_tap_passed_with_anything_but_a_clean_allow_writes_its_verdict(verdict: str) -> None:
+    """Ревью #2472: ``cb:`` руками с уточняющим вердиктом не теряет его."""
+    outcome = SimpleNamespace(allowed=True, verdict=verdict)
+
+    assert records_its_own_verdict(structural=True, gate_outcome=outcome) is True
+    assert (
+        records_its_own_verdict(
+            structural=True, gate_outcome=SimpleNamespace(allowed=True, verdict="allow")
+        )
+        is False
+    )
+
+
 # ─── наследование ────────────────────────────────────────────────────────
 
 
