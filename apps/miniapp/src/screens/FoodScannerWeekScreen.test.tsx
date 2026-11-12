@@ -258,8 +258,13 @@ describe("полоса недели (DRF-2954, решение владельца
 
   it("«Без чисел» — легенды про калории нет, имя дня — число приёмов", async () => {
     mockedDays.mockResolvedValue({ ...TODAY_WEEK, nutrition_numbers_hidden: true });
-    renderScreen();
+    const { container } = renderScreen();
     await screen.findByText(WEEK_COPY.summary(3));
+
+    // И на картинке: ни галочки «посчитано», ни точки «не посчитано» —
+    // только нейтральная «есть записи».
+    expect(container.querySelector(".diary-mark--counted, .diary-mark--uncounted")).toBeNull();
+    expect(container.querySelectorAll(".diary-mark--entries")).toHaveLength(3);
 
     expect(screen.queryByText(WEEK_COPY.markCounted)).not.toBeInTheDocument();
     expect(screen.queryByText(WEEK_COPY.markUncounted)).not.toBeInTheDocument();

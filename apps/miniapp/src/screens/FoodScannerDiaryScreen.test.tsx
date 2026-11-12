@@ -46,6 +46,7 @@ import {
   type WellnessToday,
 } from "../lib/customer-wellness";
 import { ApiError } from "../lib/api";
+import { OPEN_FROM_MAX_COPY } from "../lib/auth-error-copy";
 import { DIARY_ENTRY_WAYS, FoodScannerDiaryScreen } from "./FoodScannerDiaryScreen";
 
 // Дверь в профиль (`CustomerAvatarEntry`) без пропа спрашивает имя у
@@ -274,6 +275,23 @@ describe("четыре состояния различимы попарно", ()
     expect(screen.queryByRole("button", { name: DIARY_ENTRY_WAYS.text })).not.toBeInTheDocument();
   });
 
+  it("сбой загрузки — роль alert и «Попробовать снова» (DRF-2954: вид состояния, копия StateError)", async () => {
+    mockedLoad.mockRejectedValue(new ApiError(502, "ayla_unavailable", "upstream"));
+    renderScreen();
+
+    const alert = await screen.findByRole("alert");
+    expect(within(alert).getByRole("button", { name: "Попробовать снова" })).toBeInTheDocument();
+    expect(screen.queryByText(/upstream/)).not.toBeInTheDocument();
+  });
+
+  it("отказ транспорта — «Открой Ayla из MAX», без повтора", async () => {
+    mockedLoad.mockRejectedValue(new ApiError(401, "no_init_data", "Mini App opens only from MAX"));
+    renderScreen();
+
+    expect(await screen.findByRole("button", { name: OPEN_FROM_MAX_COPY.action })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Попробовать снова" })).not.toBeInTheDocument();
+  });
+
   it("DRF-2071: положительная стража — отказ ручки остаётся сбоем с повтором", async () => {
     mockedLoad.mockRejectedValue(new ApiError(404, "not_found", "no such day"));
     renderScreen();
@@ -429,6 +447,8 @@ describe("строка диетолога (DRF-1897)", () => {
     renderScreen();
 
     const line = await screen.findByText(LINE);
+    // Положительная пара к «не пришла — ни абзаца»: тот селектор ищет этот класс.
+    expect(line).toHaveClass("diary-observation");
     const totals = screen.getByRole("region", { name: "Сегодня" });
     // Под итогами: итоги в документе раньше строки.
     expect(
@@ -448,8 +468,6 @@ describe("строка диетолога (DRF-1897)", () => {
     // POSITIVE first: the ready diary did render.
     expect(await screen.findByText("Овсянка с ягодами")).toBeInTheDocument();
     expect(container.querySelector(".diary-observation")).toBeNull();
-    // Положительная пара селектора: класс строки диетолога — тот, что выше.
-    expect(container.querySelector(".diary-totals")).not.toBeNull();
   });
 });
 
@@ -522,6 +540,62 @@ describe("правка и удаление записи (DRF-1838)", () => {
     // Скелет на месте списка размонтировал бы карточки: фокус и снимки
     // терялись бы на каждом действии.
     expect(screen.getByText(PHOTO_ENTRY.dish_name).closest("li")).toBe(kept);
+  });
+
+  it("после «Вернуть» и «Граммы» день тоже перечитывается тихо (DRF-2954)", async () => {
+    serveDay([TEXT_ENTRY, PHOTO_ENTRY]);
+    mockedDelete.mockResolvedValue(DELETION);
+    mockedRestore.mockResolvedValue("restored");
+    mockedCorrect.mockResolvedValue(undefined);
+    renderScreen();
+
+    const kept = (await screen.findByText(PHOTO_ENTRY.dish_name)).closest("li");
+    fireEvent.click(screen.getByRole("button", { name: "Удалить: Гречка" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Вернуть" }));
+    await screen.findByText("Вернула: Гречка.");
+    expect(screen.getByText(PHOTO_ENTRY.dish_name).closest("li")).toBe(kept);
+
+    fireEvent.click(screen.getByRole("button", { name: "Исправить граммы: Гречка" }));
+    fireEvent.change(screen.getByLabelText("Сколько граммов было: Гречка"), {
+      target: { value: "250" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Сохранить" }));
+    await screen.findByText("Исправила: Гречка.");
+    expect(mockedLoad).toHaveBeenCalledTimes(4);
+    expect(screen.getByText(PHOTO_ENTRY.dish_name).closest("li")).toBe(kept);
+  });
+
+  it("перечитывание после «Удалить» упало — сбой назван, «Вернуть» на месте", async () => {
+    serveDay([TEXT_ENTRY]);
+    mockedDelete.mockResolvedValue(DELETION);
+    renderScreen();
+    await screen.findByText("Гречка");
+    mockedLoad.mockRejectedValue(new ApiError(502, "ayla_unavailable", "down"));
+
+    fireEvent.click(screen.getByRole("button", { name: "Удалить: Гречка" }));
+
+    expect(await screen.findByRole("alert")).toBeInTheDocument();
+    expect(screen.getByText("Убрано: Гречка. Вернуть можно ещё 15 минут.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Вернуть" })).toBeInTheDocument();
+  });
+
+  it("форма граммов закрывается вместе со своей записью и не воскресает после «Вернуть»", async () => {
+    serveDay([TEXT_ENTRY]);
+    mockedDelete.mockResolvedValue(DELETION);
+    mockedRestore.mockResolvedValue("restored");
+    renderScreen();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Исправить граммы: Гречка" }));
+    expect(screen.getByLabelText("Сколько граммов было: Гречка")).toBeInTheDocument();
+    serveDay([]);
+    fireEvent.click(screen.getByRole("button", { name: "Удалить: Гречка" }));
+    await screen.findByText("Убрано: Гречка. Вернуть можно ещё 15 минут.");
+    serveDay([TEXT_ENTRY]);
+    fireEvent.click(screen.getByRole("button", { name: "Вернуть" }));
+
+    await screen.findByText("Вернула: Гречка.");
+    await screen.findByRole("button", { name: "Удалить: Гречка" });
+    expect(screen.queryByLabelText("Сколько граммов было: Гречка")).not.toBeInTheDocument();
   });
 
   it("«Вернуть» в окне возвращает запись и перечитывает день", async () => {

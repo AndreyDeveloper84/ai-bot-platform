@@ -98,7 +98,7 @@ type Status =
   // DRF-1927 — нет согласия: дневник не читался, повтор ничего не даст.
   | { kind: "consent_required" }
   // DRF-2071 — контур питания выключен (сводка с `nutrition_disabled: true`):
-  // не сбой и не пустой день; ни повтора, ни «Добавить приём».
+  // не сбой и не пустой день; ни повтора, ни входов в запись.
   | { kind: "diary_off" }
   | {
       kind: "ready";
@@ -400,6 +400,10 @@ function DiaryReady({
 }) {
   const [editing, setEditing] = useState<string | null>(null);
   const entries = day.state === "entries" ? day.entries : [];
+  // Список перечитывается тихо и больше не размонтируется: форма граммов у
+  // записи, которой в дне уже нет, не должна ни висеть, ни воскресать после
+  // «Вернуть» (ревью кода DRF-2954). «Удалить» закрывает форму своей записи.
+  const editingId = editing !== null && entries.some((e) => e.id === editing) ? editing : null;
   const grouped = groupByMeal(entries);
   const totalCount = entries.length;
   // Признак приходит от источника; его отсутствие уже превращено в
@@ -485,6 +489,7 @@ function DiaryReady({
                         aria-label={`Удалить: ${entry.dish_name}`}
                         disabled={pending}
                         onClick={() => {
+                          if (editing === entry.id) setEditing(null);
                           void onDelete(entry);
                         }}
                       >
@@ -493,7 +498,7 @@ function DiaryReady({
                     </>
                   }
                   after={
-                    editing === entry.id ? (
+                    editingId === entry.id ? (
                       <GramsForm
                         entry={entry}
                         onSave={(grams) => {

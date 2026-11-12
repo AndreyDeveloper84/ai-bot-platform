@@ -13511,6 +13511,11 @@ button.ss-card {
   display: block;
 }
 
+/* Пустая область в ленте экрана — без лишнего зазора под шапкой. */
+.diary-notice-slot:empty {
+  margin-bottom: calc(-1 * var(--s-4));
+}
+
 .diary-notice {
   display: flex;
   flex-wrap: wrap;
@@ -13637,6 +13642,7 @@ button.ss-card {
 }
 
 .diary-way:focus-visible,
+.diary-notice__action:focus-visible,
 .diary-entry__action:focus-visible,
 .diary-week__day:focus-visible {
   outline: 2px solid var(--c-accent);
@@ -13912,11 +13918,13 @@ button.ss-card {
   background: var(--c-accent-pressed);
 }
 
+/* Кольцо — цветом вторичного текста: отметка должна читаться (WCAG 1.4.11,
+   3:1), цвет разделителя давал 1,2:1. */
 .diary-mark--none {
   width: 12px;
   height: 12px;
   margin: 3px;
-  border: 1.5px solid var(--c-divider);
+  border: 1.5px solid var(--c-text-secondary);
 }
 
 .diary-legend {
