@@ -128,7 +128,10 @@ describe("первый вход клиента", () => {
       await screen.findByText("Что сейчас хочется привести в порядок?"),
     ).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Лицо и кожа" })).toBeInTheDocument();
-    // Приветствия на первом экране больше нет.
+    // Экрана-приветствия `HelloScreen` («Привет, {имя}!») на первом экране
+    // больше нет. Приветствие Ayla над шагом цели (DRF-2949, «Привет! Я Ayla»)
+    // — другое: оно часть анкеты, его держит
+    // `GoalSelectScreen.firstContact2949.test.tsx`.
     expect(screen.queryByText(/Привет,/)).toBeNull();
     expect(screen.queryByText("ДОМАШНИЙ ЭКРАН")).toBeNull();
   });

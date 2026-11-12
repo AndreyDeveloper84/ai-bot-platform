@@ -254,7 +254,24 @@ class CatalogSpecialistServiceDTO:
     sellable: bool = True
     unsellable_reason: str | None = None
     sellable_key_present: bool = False
+    #: Цена и длительность РЕБРА (``SpecialistService.price`` /
+    #: ``duration_minutes`` / ``resolved_duration``). У соло цена живёт
+    #: только здесь — ``SalonService.base_price`` у него пуст, — и до
+    #: 11.11.2026 зеркало её не читало: клиентские списки бота показывали
+    #: услуги соло-мастера без «от … ₽», а котировка говорила «цену озвучит
+    #: администратор», которого у соло нет. ``None`` — ключа в ответе нет
+    #: или он ``null``.
+    price: Decimal | None = None
+    duration_minutes: int | None = None
+    resolved_duration: int | None = None
     raw: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def effective_duration(self) -> int | None:
+        """Длительность, по которой считать окна: разрешённая каскадом, иначе своя."""
+        return (
+            self.resolved_duration if self.resolved_duration is not None else self.duration_minutes
+        )
 
 
 @dataclass(frozen=True)
@@ -1895,8 +1912,33 @@ def _parse_specialist_service(row: dict[str, Any]) -> CatalogSpecialistServiceDT
         # питоновский `None`, и до этой строки различить их было нечем.
         health_check_key_present="resolved_requires_health_check" in row,
         **_parse_sellable(row),
+        price=_parse_decimal_lenient(row, "price"),
+        duration_minutes=_parse_int_lenient(row, "duration_minutes"),
+        resolved_duration=_parse_int_lenient(row, "resolved_duration"),
         raw=row,
     )
+
+
+def _parse_decimal_lenient(row: dict[str, Any], key: str) -> Decimal | None:
+    """Цена ребра: нечитаемое значение — ``None`` + предупреждение, не отказ строки.
+
+    Строка ребра, упавшая на разборе, выпадает из снимка целиком, и полный
+    снимок сносит её ребро при сверке — мастер перестаёт предлагать услугу.
+    Цена такой власти над ребром иметь не должна: без неё зеркало просто без цены.
+    """
+    try:
+        return _parse_decimal(row.get(key))
+    except (ArithmeticError, ValueError, TypeError):
+        logger.warning("catalog.http.edge_field_unreadable key=%s edge=%s", key, row.get("id"))
+        return None
+
+
+def _parse_int_lenient(row: dict[str, Any], key: str) -> int | None:
+    try:
+        return _parse_int(row.get(key))
+    except (ValueError, TypeError):
+        logger.warning("catalog.http.edge_field_unreadable key=%s edge=%s", key, row.get("id"))
+        return None
 
 
 def _parse_specialist(row: dict[str, Any]) -> CatalogSpecialistDTO:

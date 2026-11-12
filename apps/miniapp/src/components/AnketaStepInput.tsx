@@ -47,6 +47,12 @@ interface Props {
   item: MissingItem;
   submitting: boolean;
   onAnswer: (answer: AnketaAnswer) => void;
+  /**
+   * Вид вариантов одиночного выбора. «Карточки» — строки во всю ширину со
+   * значком, как на кадрах 1–2 макета «Первый контакт» (DRF-2949): так
+   * рисуется шаг цели. Это только вид: нажатие шлёт тот же ответ, что фишка.
+   */
+  layout?: "chips" | "cards";
 }
 
 /** Режим, который экран умеет рисовать; всё остальное — `single`. */
@@ -55,7 +61,7 @@ export function renderedMode(mode: string | undefined): "single" | "multi" | "sc
   return "single";
 }
 
-export function AnketaStepInput({ item, submitting, onAnswer }: Props) {
+export function AnketaStepInput({ item, submitting, onAnswer, layout = "chips" }: Props) {
   const step = item.step ?? "";
   const allOptions = item.options ?? [];
   const escape = allOptions.find((o) => o.role === "escape") ?? null;
@@ -119,6 +125,7 @@ export function AnketaStepInput({ item, submitting, onAnswer }: Props) {
         options={options}
         submitting={submitting}
         onAnswer={onAnswer}
+        layout={layout}
       />
       {escapeLink}
     </>
@@ -132,6 +139,7 @@ function StepBody({
   options,
   submitting,
   onAnswer,
+  layout,
 }: {
   mode: ReturnType<typeof renderedMode>;
   step: string;
@@ -139,6 +147,7 @@ function StepBody({
   options: { key: string; label: string }[];
   submitting: boolean;
   onAnswer: (answer: AnketaAnswer) => void;
+  layout: "chips" | "cards";
 }) {
   if (mode === "text") {
     return (
@@ -190,6 +199,24 @@ function StepBody({
       </div>
     );
   }
+  if (layout === "cards") {
+    return (
+      <div className="goal-select__options" role="group" aria-label={item.prompt}>
+        {options.map((option) => (
+          <button
+            key={option.key}
+            type="button"
+            className="goal-select__option"
+            disabled={submitting}
+            onClick={() => onAnswer({ step, option_key: option.key })}
+          >
+            <GoalOptionMark />
+            {option.label}
+          </button>
+        ))}
+      </div>
+    );
+  }
   return (
     <div className="chip-row" role="group" aria-label={item.prompt}>
       {options.map((option) => (
@@ -204,6 +231,33 @@ function StepBody({
         </button>
       ))}
     </div>
+  );
+}
+
+/**
+ * Значок варианта цели — один на все. На макете у вариантов разные значки, но
+ * варианты приходят с сервера, и значка у них нет: придумывать соответствие
+ * «цель → рисунок» экран не вправе. Декоративный, без текста.
+ */
+export function GoalOptionMark() {
+  return (
+    <span className="goal-select__option-mark" aria-hidden="true">
+      <svg
+        width="20"
+        height="20"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        focusable="false"
+      >
+        <circle cx="12" cy="12" r="8.5" />
+        <circle cx="12" cy="12" r="4.5" />
+        <circle cx="12" cy="12" r="0.8" />
+      </svg>
+    </span>
   );
 }
 

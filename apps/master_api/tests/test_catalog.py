@@ -230,3 +230,44 @@ class TestCatalogCrossTenant:
         assert resp.status_code == 200
         # Calling master is in tenant A with no services mapped → empty.
         assert resp.json() == {"services": []}
+
+
+class TestOwnEdgePriceWins:
+    """11.11.2026: у соло цена живёт на ребре мастер↔услуга, у салона с
+    несколькими мастерами ``price_from`` услуги — «от» по всем. На своём
+    экране мастеру нужна собственная цена и длительность — ребро главнее
+    строки услуги; без цены на ребре — как прежде, строка услуги."""
+
+    def test_the_masters_own_edge_price_and_duration_win(self, tenant, accepted_master) -> None:
+        from apps.catalog.provenance import MasterServiceSource, master_service_write
+
+        priced = _make_service(
+            tenant=tenant,
+            name="Массаж спины",
+            slug="massage-back",
+            price=Decimal("1600"),
+            duration_min=30,
+        )
+        bare = _make_service(
+            tenant=tenant, name="Массаж ШВЗ", slug="massage-neck", price=None, duration_min=None
+        )
+        with master_service_write(MasterServiceSource.CATALOG_SYNC):
+            MasterService.all_tenants.create(
+                tenant=tenant,
+                master=accepted_master,
+                service=priced,
+                ayla_specialist_service_id="11111111-1111-4111-8111-111111111111",
+                price=Decimal("2800.00"),
+                duration_min=60,
+            )
+            MasterService.all_tenants.create(
+                tenant=tenant,
+                master=accepted_master,
+                service=bare,
+                ayla_specialist_service_id="22222222-2222-4222-8222-222222222222",
+            )
+
+        out = {d["name"]: d for d in svc.list_master_services(master=accepted_master)}
+
+        assert (out["Массаж спины"]["price_rub"], out["Массаж спины"]["duration_min"]) == (2800, 60)
+        assert (out["Массаж ШВЗ"]["price_rub"], out["Массаж ШВЗ"]["duration_min"]) == (None, 0)
