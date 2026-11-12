@@ -283,13 +283,17 @@ describe("H01 · план", () => {
     expect(screen.getByTestId("location")).toHaveTextContent("/customer/plan");
   });
 
-  it("attention-строка: «Сегодня не получается по плану?» → «Скорректировать с Ayla» уходит в чат", async () => {
+  // DRF-2950 (решение владельца 12.11, п.10): как «Продолжить разговор» с
+  // DRF-2799 — разговор в приложении, а не закрытие в чат MAX.
+  it("attention-строка: «Сегодня не получается по плану?» → «Скорректировать с Ayla» открывает разговор в приложении", async () => {
     serve({ plan: PLAN });
     renderHome();
 
     await screen.findByText("Сегодня не получается по плану?");
     fireEvent.click(screen.getByRole("button", { name: "Скорректировать с Ayla" }));
-    expect(mockedClose).toHaveBeenCalledTimes(1);
+    expect(screen.getByTestId("location")).toHaveTextContent("/customer/ayla");
+    await settleScenario();
+    expect(mockedClose).not.toHaveBeenCalled();
   });
 });
 
@@ -466,7 +470,9 @@ describe("H01 · нет согласия дневника", () => {
 // ---------------------------------------------------------------------------
 
 describe("H01 · быстрые действия", () => {
-  it("ровно пять: записать питание / стакан воды / новая запись / скорректировать план / профиль", async () => {
+  // «Профиль» снят решением владельца 12.11 (DRF-2950, п.9): третий вход в
+  // профиль рядом с аватаром в шапке и вкладкой панели.
+  it("ровно четыре: записать питание / стакан воды / новая запись / скорректировать план", async () => {
     serve({ plan: PLAN });
     renderHome();
 
@@ -476,13 +482,28 @@ describe("H01 · быстрые действия", () => {
       .getAllByRole("button")
       .map((b) => b.getAttribute("aria-label"));
     // Имя стакана для скринридера — с глаголом (тап пишет 250 мл сразу); видимая подпись — «Стакан воды».
-    expect(labels).toEqual(["Записать питание", "Добавить стакан воды", "Новая запись", "Скорректировать план", "Профиль"]);
+    expect(labels).toEqual(["Записать питание", "Добавить стакан воды", "Новая запись", "Скорректировать план"]);
     expect(within(block).getByText("Стакан воды")).toBeInTheDocument();
+    // Профиль не потерян: вход остался в шапке и во вкладке панели.
+    expect(within(block).queryByRole("button", { name: "Профиль" })).toBeNull();
+    expect(within(screen.getByRole("banner")).getByRole("button", { name: /профил/i })).toBeInTheDocument();
+    expect(within(screen.getByRole("navigation")).getByText("Профиль")).toBeInTheDocument();
     // Ушедшие из быстрых действий: цель — в карточке, услуги — в каталоге.
     expect(within(block).queryByRole("button", { name: "Найди услугу" })).toBeNull();
     expect(within(block).queryByRole("button", { name: "Моя цель" })).toBeNull();
     // «Добавить замер» из макета не переносится (§49).
     expect(screen.queryByText(/замер/i)).toBeNull();
+  });
+
+  it("«Скорректировать план» открывает разговор в приложении, а не закрывает его (DRF-2950, п.10)", async () => {
+    serve({ plan: PLAN });
+    renderHome();
+
+    const qa = within(await screen.findByRole("region", { name: "Быстрые действия" }));
+    fireEvent.click(qa.getByRole("button", { name: "Скорректировать план" }));
+    expect(screen.getByTestId("location")).toHaveTextContent("/customer/ayla");
+    await settleScenario();
+    expect(mockedClose).not.toHaveBeenCalled();
   });
 
   it("«Записать питание» → съёмка фото (DRF-2289; текстом — ссылкой оттуда)", async () => {

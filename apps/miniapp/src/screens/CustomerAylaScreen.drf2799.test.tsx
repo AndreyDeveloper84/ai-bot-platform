@@ -51,7 +51,16 @@ describe("Главная · «Продолжить разговор с Ayla»", 
         const u = String(url);
         if (u.includes("/wellness/today")) return ok({ active_goals: [] });
         if (u.includes("/recent-activity")) return ok({ this_week_booking_count: 0 });
-        if (u.includes("/plan-lite")) return ok({ plan_lite: null });
+        // План есть: «Скорректировать с Ayla» стоит в блоке плана.
+        if (u.includes("/plan-lite")) {
+          return ok({
+            plan_lite: {
+              plan_id: "p1",
+              goal_key: "shape",
+              actions: [{ action_type: "log_water", cadence: "per_day", target_count: 7, done_count: 1 }],
+            },
+          });
+        }
         if (u.includes("/last-topic")) return ok({ last_topic: null });
         if (u.includes("/catalog")) return ok({ services: [], masters: [], picks: [] });
         return ok({});
@@ -59,7 +68,13 @@ describe("Главная · «Продолжить разговор с Ayla»", 
     );
   });
 
-  it.each(["Продолжить разговор", "Задать новый вопрос"])(
+  it.each([
+    "Продолжить разговор",
+    "Задать новый вопрос",
+    // DRF-2950 (решение владельца 12.11, п.10) — обе двери плана туда же.
+    "Скорректировать план",
+    "Скорректировать с Ayla",
+  ])(
     "«%s» открывает разговор в приложении и не закрывает его",
     async (label) => {
       render(

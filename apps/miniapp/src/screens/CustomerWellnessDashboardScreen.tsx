@@ -35,7 +35,7 @@
  *     статус, «Открыть запись»); «Все мои записи» — справа от заголовка
  *     (Д11); нет записи — «Записей нет» + «Записаться»
  *   Block 3 — Быстрые действия по фризу: записать питание / стакан воды /
- *     новая запись / скорректировать план / профиль
+ *     новая запись / скорректировать план («Профиль» снят — DRF-2950)
  *   Block A — «Продолжить разговор с Ayla» с последней темой
  *     (`customer/last-topic/`); без темы — нейтрально. ЕДИНСТВЕННЫЙ вход в
  *     чат с этого экрана (Д2)
@@ -297,7 +297,7 @@ export function CustomerWellnessDashboardScreen() {
   const [lastTopic, setLastTopic] = useState<LastTopic | null>(null);
   // DRF-2266 — куда ведут двери в чат, и где они «застряли» (web.max.ru).
   const [chatLink, setChatLink] = useState<string | null>(null);
-  const [chatStuckAt, setChatStuckAt] = useState<"ayla" | "consent" | "plan" | null>(null);
+  const [chatStuckAt, setChatStuckAt] = useState<"consent" | null>(null);
 
   const [online, setOnline] = useState<boolean>(isOnline());
   const [waterQueueLen, setWaterQueueLen] = useState<number>(
@@ -674,30 +674,26 @@ export function CustomerWellnessDashboardScreen() {
     navigate("/customer/food-scanner/manual");
   }, [navigate]);
 
-  const onProfileTap = useCallback(() => {
-    navigate("/customer/profile");
-  }, [navigate]);
-
   // В чат MAX — закрыть Mini App: приложение открыто из диалога с Ayla, и
-  // закрытие возвращает туда. Фразу («скорректировать план», согласие,
-  // новый вопрос) человек пишет сам: deep link с текстом в MAX не
-  // существует (см. историю в StateError.tsx), и никакого контекста экран
-  // в чат не передаёт — обещать это было бы ложью.
-  // DRF-2266 — все двери Главной в чат идут одним путём: мост close() →
-  // ссылка на диалог бота → подсказка рядом с нажатой кнопкой (web.max.ru:
-  // раньше `closeApp()` там молча ничего не делал — «кнопка не работает»).
+  // закрытие возвращает туда. Так уходит ОДНА дверь — согласие на дневник:
+  // приглашение к согласию бот присылает в диалог (DRF-2230), и дать его
+  // можно только там. Фразу человек пишет сам: deep link с текстом в MAX не
+  // существует (см. историю в StateError.tsx).
+  // DRF-2266 — мост close() → ссылка на диалог бота → подсказка рядом с
+  // нажатой кнопкой (web.max.ru: раньше `closeApp()` там молча ничего не
+  // делал — «кнопка не работает»).
   const goToChat = useCallback(
-    (where: "ayla" | "consent" | "plan") => {
+    (where: "consent") => {
       const outcome = returnToChat(chatLink);
       setChatStuckAt(outcome === "stuck" ? where : null);
     },
     [chatLink],
   );
-  // DRF-2799 (решение владельца 06.10): разговор с Ayla продолжается здесь,
-  // в Mini App, — приложение не закрывается. Прочие двери в чат (согласие,
-  // план) остаются прежними.
+  // Разговор с Ayla продолжается здесь, в Mini App, — приложение не
+  // закрывается: «Продолжить разговор» и «Задать новый вопрос» с DRF-2799
+  // (решение владельца 06.10), «Скорректировать с Ayla» и «Скорректировать
+  // план» — с DRF-2950 (решение владельца 12.11, п.10).
   const onChatTap = useCallback(() => navigate("/customer/ayla"), [navigate]);
-  const onPlanChatTap = useCallback(() => goToChat("plan"), [goToChat]);
 
   // DRF-2230 — приглашение к согласию уходит в чат, и лишь потом экран
   // закрывается. Сбой отправки — вслух и без закрытия: закрыться молча значило
@@ -1034,7 +1030,7 @@ export function CustomerWellnessDashboardScreen() {
         {/* Block P — «План на сегодня»: действия активного плана; без плана
             блока нет (DRF-2144 п.2). */}
         {planSlice.kind === "ok" && planSlice.data && (
-          <PlanToday plan={planSlice.data} onAll={onPlanTap} onAdjust={onPlanChatTap} />
+          <PlanToday plan={planSlice.data} onAll={onPlanTap} onAdjust={onChatTap} />
         )}
 
         {/* Block 5 — Ближайшая запись (карточка по макету H01, DRF-2144 п.3;
@@ -1099,9 +1095,11 @@ export function CustomerWellnessDashboardScreen() {
 
         {/* Block 3 — Быстрые действия по фризу 25.08 (DRF-2144 п.4):
             записать питание / стакан воды / новая запись / скорректировать
-            план / профиль. «Добавить замер» из макета → «стакан воды» (§49:
-            без веса). «Найди услугу» и «Моя цель» ушли: цель — в карточке,
-            услуги — по «Записаться» в каталог. Без контура питания (DRF-2071)
+            план. «Профиль» снят решением владельца 12.11 (DRF-2950, п.9): он
+            был третьим входом в профиль рядом с аватаром в шапке и вкладкой.
+            «Добавить замер» из макета → «стакан воды» (§49: без веса).
+            «Найди услугу» и «Моя цель» ушли: цель — в карточке, услуги — по
+            «Записаться» в каталог. Без контура питания (DRF-2071)
             дневниковые кнопки не рисуются. */}
         <section
           className="wellness-dash__quick-actions"
@@ -1154,27 +1152,14 @@ export function CustomerWellnessDashboardScreen() {
               type="button"
               className="wellness-dash__qa-btn wellness-dash__qa-btn--compact"
               aria-label="Скорректировать план"
-              onClick={onPlanChatTap}
+              onClick={onChatTap}
             >
               <span className="wellness-dash__qa-icon" aria-hidden="true">
                 📝
               </span>
               <span className="wellness-dash__qa-label">Скорректировать план</span>
             </button>
-            <button
-              type="button"
-              className="wellness-dash__qa-btn wellness-dash__qa-btn--compact"
-              aria-label="Профиль"
-              onClick={onProfileTap}
-            >
-              <span className="wellness-dash__qa-icon" aria-hidden="true">
-                👤
-              </span>
-              <span className="wellness-dash__qa-label">Профиль</span>
-            </button>
           </div>
-          {/* DRF-2266 — «Скорректировать план» тоже дверь в чат. */}
-          {chatStuckAt === "plan" && <ChatStuckHint />}
 
           {/* Sync indicator for offline water queue (§11.8). */}
           {waterQueueLen > 0 && (
@@ -1813,8 +1798,9 @@ function PlanToday({
         })}
       </ul>
       {/* Attention-состояние по фризу 25.08 п.2 — человеческим языком. Кнопка
-          закрывает Mini App в чат MAX; что именно поправить, человек пишет
-          сам — контекст в чат не передаётся. */}
+          ведёт в разговор с Ayla внутри Mini App (DRF-2950, решение владельца
+          12.11, п.10); что именно поправить, человек пишет сам — контекст в
+          разговор не передаётся. */}
       <div className="wellness-dash__plan-attention" role="note">
         <p className="wellness-dash__plan-attention-text">Сегодня не получается по плану?</p>
         <button type="button" className="btn-secondary" onClick={onAdjust}>
