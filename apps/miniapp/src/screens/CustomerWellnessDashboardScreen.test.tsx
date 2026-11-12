@@ -486,7 +486,22 @@ describe("CustomerWellnessDashboardScreen — goal truthfulness (DRF-1476)", () 
     // решения об одном слове и разных предметах; стража сужена до
     // класса, который она стережёт: число + «шаг» (5000 шагов) и
     // «шагомер». Заголовок §5.2 через неё проходит, счётчик — нет.
-    expect(text).not.toMatch(/\d+\s*шаг/i);
+    //
+    // Число и «шаг» ищутся в СОБСТВЕННОМ тексте каждого элемента, а не в
+    // склейке `textContent` всего экрана: с DRF-2950 «Шаги на сегодня»
+    // стоят сразу за строкой цели, и склейка давала «Неделя 3Шаги» —
+    // соседство двух узлов, а не счётчик. `{n} шагов` в одном элементе
+    // по-прежнему ловится.
+    const ownTexts = Array.from(document.body.querySelectorAll("*")).map((el) =>
+      Array.from(el.childNodes)
+        .filter((n) => n.nodeType === Node.TEXT_NODE)
+        .map((n) => n.textContent ?? "")
+        .join(""),
+    );
+    expect(ownTexts.some((t) => t.includes("Шаги на сегодня"))).toBe(true); // присутствие
+    for (const own of ownTexts) {
+      expect(own).not.toMatch(/\d+\s*шаг/i);
+    }
     expect(text).not.toMatch(/шагов/i);
   });
 });

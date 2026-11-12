@@ -30,7 +30,8 @@ export type RecordIconName =
   | "camera"
   | "text"
   | "image"
-  | "plus";
+  | "plus"
+  | "sparkle";
 
 const PATHS: Record<RecordIconName, ReactNode> = {
   back: <path d="M15 5l-7 7 7 7" />,
@@ -144,6 +145,8 @@ const PATHS: Record<RecordIconName, ReactNode> = {
   ),
   // DRF-2950: «+» у стакана воды на Главной (строка плана и кнопка шага).
   plus: <path d="M12 5v14M5 12h14" />,
+  // DRF-2950: знак рядом с «ayla» в шапке Главной и у «Шагов на сегодня» (✦ доски).
+  sparkle: <path d="M12 3.5c.6 4.6 3.4 7.4 8 8-4.6.6-7.4 3.4-8 8-.6-4.6-3.4-7.4-8-8 4.6-.6 7.4-3.4 8-8z" />,
 };
 
 export function RecordIcon({ name, size = 20 }: { name: RecordIconName; size?: number }) {

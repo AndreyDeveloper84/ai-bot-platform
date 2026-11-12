@@ -42,7 +42,6 @@ const PRIMARIES = [
   ".btn-primary",
   ".cta-bar__button",
   ".ayla-btn--primary",
-  ".wellness-dash__cta",
   ".salon-today__cta",
   ".m6-btn-primary",
   ".m6-compose__send",

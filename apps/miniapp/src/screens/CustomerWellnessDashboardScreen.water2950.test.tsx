@@ -194,6 +194,39 @@ describe("п.11а — после принятого стакана числа п
   });
 });
 
+describe("стакан добрал норму — карточка шага уходит, фокус не теряется", () => {
+  it("кнопка ушла вместе с карточкой — фокус на «Отменить» тоста", async () => {
+    serve([() => json(day(7)), () => json(day(8))]);
+    renderHome();
+
+    const card = (await screen.findByRole("heading", { name: "Шаги на сегодня" })).closest(
+      "section",
+    ) as HTMLElement;
+    fireEvent.click(within(card).getByRole("button", { name: "Добавить стакан воды" }));
+
+    const undo = await screen.findByRole("button", { name: "Отменить стакан" });
+    await waitFor(() =>
+      expect(screen.queryByRole("heading", { name: "Шаги на сегодня" })).toBeNull(),
+    );
+    expect(screen.getByText("8 / 8 стаканов")).toBeInTheDocument();
+    await waitFor(() => expect(document.activeElement).toBe(undo));
+  });
+
+  it("стакан из быстрых действий — фокус не трогается (его кнопка на месте)", async () => {
+    serve([() => json(day(7)), () => json(day(8))]);
+    renderHome();
+    expect(await screen.findByRole("heading", { name: "Шаги на сегодня" })).toBeInTheDocument();
+
+    tapGlass();
+    await screen.findByRole("button", { name: "Отменить стакан" });
+    await waitFor(() =>
+      expect(screen.queryByRole("heading", { name: "Шаги на сегодня" })).toBeNull(),
+    );
+    await settleScenario();
+    expect(document.activeElement).toBe(document.body);
+  });
+});
+
 describe("п.11а — гонки тихого и полного чтения", () => {
   it("тихое обогнало полную и упало — срез не завис в скелете, а потом получил ответ полной", async () => {
     const firstLoad = held();

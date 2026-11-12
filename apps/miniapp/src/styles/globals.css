@@ -5551,19 +5551,19 @@ a {
 }
 
 /* ──────────────────────────────────────────────────────────────────
- * Customer wellness dashboard — Tier 1 Priority 2 Phase B
- * Spec: docs/screens/customer-main-wellness-dashboard.md §3 Variant B
+ * Главная клиента — DRF-2950, доски владельца «Презентация UI Ayla…»
+ * (кадры 1–2, 5–7) и «Мобильное приложение Ayla…» (кадры 1–3), решения
+ * 12.11. Вид — раздел клиента, как у Записей, Плана и Дневника: карточки
+ * `--c-surface-1` с тонкой рамкой и радиусом `--r-lg`, значки в круге,
+ * кнопки `cr-btn`. Теней нет (anti-slop §18).
+ * Spec: docs/screens/customer-main-wellness-dashboard.md
  *
- * WCAG 2.2 AA notes (Tau §8 BLOCKERS addressed):
- *   - All tap targets ≥44×44dp (icon buttons use padding to reach the
- *     hit area without enlarging the visible glyph).
- *   - Progress bar track + borders use the `--c-divider` token. It is
- *     a hairline (1.24:1 on `--c-surface-1`), so it is decorative
- *     reinforcement only — never the sole boundary of a control.
- *   - Body text uses `--c-text-primary` — 16.96:1 against `--c-bg`
- *     in the light theme, 16.96:1 in the dark one.
- *   - Skeleton shimmer is via the existing `.skeleton` class which
- *     respects `prefers-reduced-motion` (handled there).
+ * WCAG 2.2 AA:
+ *   - цели нажатия ≥44×44 (WCAG 2.5.8);
+ *   - рамки и дорожки — `--c-divider`, это украшение, а не единственная
+ *     граница элемента управления;
+ *   - мерцание скелетов — общий `.skeleton`, он уважает
+ *     `prefers-reduced-motion`.
  * ────────────────────────────────────────────────────────────────── */
 .wellness-dash {
   min-height: 100vh;
@@ -5586,26 +5586,31 @@ a {
   border-radius: var(--r-sm);
   z-index: 1000;
 }
+
+/* Шапка (решение 12.11, п.1): знак слева, вход в профиль справа. */
 .wellness-dash__header {
   display: flex;
   align-items: center;
-  /* Человек слева, фирменный знак справа (Д1, DRF-2331). Знак занял
-     место, где макет держал колокольчик: колокольчик не рисуется — за
-     ним нет ленты уведомлений. */
   justify-content: space-between;
   gap: var(--s-3);
-  height: 56px;
-  padding: 0 var(--s-3);
-  border-bottom: 1px solid var(--c-divider);
-  background: var(--c-surface-1);
+  min-height: 56px;
+  padding: var(--s-2) var(--s-4) 0;
 }
-/* Д1 — аватар, имя, «Рада тебя видеть!». */
-.wellness-dash__person {
-  display: flex;
-  align-items: center;
-  gap: var(--s-2);
-  /* Длинное имя ужимается, знак справа не выдавливается за край. */
-  min-width: 0;
+.wellness-dash__brand {
+  display: inline-flex;
+  align-items: flex-start;
+  gap: 2px;
+  font-size: var(--font-size-500);
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--c-text-primary);
+}
+.wellness-dash__wordmark {
+  text-transform: lowercase;
+}
+.wellness-dash__brand-star {
+  display: inline-flex;
+  color: var(--c-accent);
 }
 
 /* Вход в профиль клиента — аватарка в шапке (решение владельца §77 п.60).
@@ -5634,11 +5639,11 @@ a {
   outline-offset: 2px;
   border-radius: 50%;
 }
-/* На Главной кружок стоит слева, рядом с именем (так его поставил
-   DRF-2331, и фирменный знак занимает правый край). На остальных экранах
-   панели шапка — `records-screen__header`, флекс с заголовком слева, и
-   дверь уходит к правому краю — как аватарка админской поверхности
-   (`lib/avatar-sheet.ts`, «аватар справа вверху»).
+/* На Главной кружок стоит справа, напротив фирменного знака (DRF-2950,
+   решение владельца 12.11, п.1). На остальных экранах панели шапка —
+   `records-screen__header`, флекс с заголовком слева, и дверь уходит к
+   правому краю — как аватарка админской поверхности (`lib/avatar-sheet.ts`,
+   «аватар справа вверху»).
    Размещение задано КОНТЕКСТОМ, а не модификатором на кнопке: модификатор
    пришлось бы собирать в рантайме (`className={...}`), а сторож
    `miniapp_style_contract` намеренно не видит собранные имена — я бы своими
@@ -5666,169 +5671,601 @@ a {
   letter-spacing: 0.04em;
 }
 
-/* Держит высоту строки имени, пока день грузится. */
-.wellness-dash__person-skel {
-  width: 96px;
-  height: 15px;
-  border-radius: var(--r-sm);
-}
-.wellness-dash__person-text {
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-}
-.wellness-dash__person-name {
-  display: flex;
-  align-items: baseline;
-  /* Зазор стилем, а не пробелом в вёрстке: флекс обрезает пробел между
-     своими детьми, и 👋 прилипал к имени. */
-  gap: var(--s-1);
-  min-width: 0;
-  font-size: var(--font-size-200);
-  font-weight: 600;
-}
-/* Обрезается имя; 👋 рядом с многоточием, а не вместо него. */
-.wellness-dash__person-name-text {
-  min-width: 0;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.wellness-dash__person-hi {
-  font-size: var(--font-size-100);
-  color: var(--c-text-secondary);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.wellness-dash__brand {
-  display: flex;
-  align-items: center;
-  gap: var(--s-1);
-  font-size: var(--font-size-300);
-  font-weight: 600;
-}
-.wellness-dash__wordmark {
-  text-transform: lowercase;
-  letter-spacing: 0.02em;
-}
-.wellness-dash__ask {
-  flex: 1;
-  text-align: left;
-  background: transparent;
-  border: none;
-  color: var(--c-text-secondary);
-  font-size: var(--font-size-200);
-  min-height: 44px;
-  padding: 0 var(--s-2);
-  cursor: pointer;
-  text-decoration: underline;
-  text-decoration-style: dotted;
-  text-underline-offset: 4px;
-}
-.wellness-dash__ask:focus-visible {
-  outline: 2px solid var(--c-accent);
-  outline-offset: 2px;
-}
-.wellness-dash__header-icons {
-  display: flex;
-  gap: var(--s-1);
-}
-.wellness-dash__icon-btn {
-  background: transparent;
-  border: none;
-  font-size: var(--font-size-300);
-  min-width: 44px;
-  min-height: 44px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  cursor: pointer;
-  color: var(--c-text-primary);
-}
-.wellness-dash__icon-btn:focus-visible {
-  outline: 2px solid var(--c-accent);
-  outline-offset: 2px;
-  border-radius: var(--r-sm);
-}
+/* «Без сети» — данные на экране есть, поэтому полоса, а не состояние. */
 .wellness-dash__offline-banner {
-  background: var(--c-warning);
-  color: var(--c-text-on-accent);
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  margin: var(--s-2) var(--s-4) 0;
   padding: var(--s-2) var(--s-3);
   font-size: var(--font-size-200);
-  text-align: center;
+  color: var(--c-text-primary);
+  background: var(--c-surface-2);
+  border-radius: var(--r-md);
 }
 .wellness-dash__main {
-  padding: var(--s-3) var(--s-3) var(--s-5);
   display: flex;
   flex-direction: column;
   gap: var(--s-4);
+  padding: var(--s-2) var(--s-4) var(--s-5);
 }
+
+/* Приветствие — одно (решение 12.11, п.1). */
 .wellness-dash__greeting {
-  margin-bottom: 0;
+  margin: 0;
 }
 .wellness-dash__greeting-title {
+  margin: 0 0 var(--s-1);
   font-size: var(--font-size-400);
-  font-weight: 600;
-  margin: 0 0 var(--s-2);
+  font-weight: 700;
   line-height: var(--leading-tight);
+  overflow-wrap: anywhere;
 }
 .wellness-dash__one-liner {
   margin: 0;
-  color: var(--c-text-secondary);
   font-size: var(--font-size-200);
   line-height: var(--leading-base);
-}
-.wellness-dash__onboarding {
-  background: var(--c-accent-subtle);
-  border-radius: var(--r-md);
-  border: 1px solid var(--c-divider);
-}
-.wellness-dash__onboarding-body {
-  padding: var(--s-3);
-  position: relative;
-}
-.wellness-dash__onboarding-title {
-  margin: 0 0 var(--s-1);
-  font-weight: 600;
-}
-.wellness-dash__onboarding-text {
-  margin: 0;
-  font-size: var(--font-size-200);
   color: var(--c-text-secondary);
-  padding-right: 44px;
-}
-/* DRF-2091 — вход в запись текстом с карточки-подсказки. */
-.wellness-dash__onboarding-cta {
-  margin-top: var(--s-2);
 }
 
+/* Карточки экрана — одна подложка на всех. */
+.wellness-dash__onboarding,
+.wellness-dash__goal-card,
+.wellness-dash__today-goals,
+.wellness-dash__plan-item,
+.wellness-dash__plan-empty,
+.wellness-dash__booking-card,
+.wellness-dash__ayla-card,
+.wellness-dash__consent,
+.wellness-dash__pulse-card,
+.wellness-dash__block-error {
+  background: var(--c-surface-1);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-lg);
+}
+
+/* Значок в круге (как `.plan-mark` экрана плана) и в плитке. */
+.wellness-dash__mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 44px;
+  height: 44px;
+  color: var(--c-accent);
+  background: var(--c-accent-subtle);
+  border-radius: 50%;
+}
+/* «✓» плана (решение 12.11, п.4): сделано не меньше нужного. */
+.wellness-dash__mark--done {
+  color: var(--c-text-on-accent);
+  background: var(--c-success);
+}
+.wellness-dash__mark--danger {
+  color: var(--c-danger);
+  background: color-mix(in srgb, var(--c-danger) 12%, var(--c-surface-1));
+}
+.wellness-dash__tile {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 56px;
+  height: 56px;
+  color: var(--c-accent);
+  background: var(--c-accent-subtle);
+  border-radius: var(--r-md);
+}
+.wellness-dash__chevron {
+  display: inline-flex;
+  flex: none;
+  color: var(--c-text-secondary);
+}
+
+/* Заголовок раздела и ссылка справа от него (Д11, решение 12.11 п.4). */
+.wellness-dash__plan-today,
+.wellness-dash__booking,
+.wellness-dash__quick-actions,
+.wellness-dash__ayla,
+.wellness-dash__recos {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+.wellness-dash__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0 var(--s-2);
+}
+.wellness-dash__section-header {
+  margin: 0;
+  font-size: var(--font-size-300);
+  font-weight: 700;
+  color: var(--c-text-primary);
+}
+.wellness-dash__head-link {
+  min-height: 44px;
+  padding: 0 var(--s-1);
+  font: inherit;
+  font-size: var(--font-size-200);
+  font-weight: 600;
+  text-align: right;
+  color: var(--c-accent);
+  background: none;
+  border: 0;
+  border-radius: var(--r-sm);
+  cursor: pointer;
+}
+.wellness-dash__head-link:active {
+  background: var(--c-accent-subtle);
+}
+
+/* «Начнём с малого?» */
+.wellness-dash__onboarding {
+  position: relative;
+  padding: var(--s-4);
+}
+.wellness-dash__onboarding-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+.wellness-dash__onboarding-title {
+  margin: 0;
+  padding-right: 44px;
+  font-size: var(--font-size-300);
+  font-weight: 700;
+}
+.wellness-dash__onboarding-text {
+  margin: 0 0 var(--s-1);
+  padding-right: 44px;
+  font-size: var(--font-size-200);
+  line-height: var(--leading-base);
+  color: var(--c-text-secondary);
+}
 .wellness-dash__onboarding-dismiss {
   position: absolute;
   top: var(--s-1);
   right: var(--s-1);
-  background: transparent;
-  border: none;
-  font-size: var(--font-size-400);
-  line-height: 1;
   min-width: 44px;
   min-height: 44px;
+  font-size: var(--font-size-400);
+  line-height: 1;
+  color: var(--c-text-secondary);
+  background: transparent;
+  border: none;
+  border-radius: var(--r-sm);
   cursor: pointer;
+}
+
+/* Цель — строка доски «Моя цель» (решение 12.11, п.2). Кнопка внутри
+   растянута на всю карточку (`::after`): нажимается вся строка, а
+   заголовок блока остаётся вне кнопки. */
+.wellness-dash__goal-card {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s-3);
+  padding: var(--s-3);
+}
+.wellness-dash__goal-card--link {
+  position: relative;
+}
+.wellness-dash__goal-text {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  gap: 2px;
+  min-width: 0;
+}
+.wellness-dash__goal-eyebrow {
+  margin: 0;
+  font-size: var(--font-size-100);
+  font-weight: 500;
   color: var(--c-text-secondary);
 }
-.wellness-dash__onboarding-dismiss:focus-visible {
+.wellness-dash__goal-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 0;
+  font: inherit;
+  text-align: left;
+  color: inherit;
+  background: none;
+  border: 0;
+  cursor: pointer;
+}
+.wellness-dash__goal-row::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: var(--r-lg);
+}
+.wellness-dash__goal-row:active::after {
+  background: color-mix(in srgb, var(--c-text-primary) 6%, transparent);
+}
+.wellness-dash__goal-row:focus-visible {
+  outline: none;
+}
+.wellness-dash__goal-row:focus-visible::after {
   outline: 2px solid var(--c-accent);
   outline-offset: 2px;
-  border-radius: var(--r-sm);
 }
-.wellness-dash__pulse-card {
-  background: var(--c-surface-1);
-  border: 1px solid var(--c-divider);
-  border-radius: var(--r-md);
+.wellness-dash__goal-title {
+  font-size: var(--font-size-200);
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+.wellness-dash__goal-meta {
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+.wellness-dash__goal-hint {
+  margin: 0;
+  font-size: var(--font-size-200);
+  color: var(--c-text-secondary);
+}
+/* «Выбери цель» — своей строкой под текстом: `.cr-btn` во всю ширину, и
+   флекс карточки переносит её вниз (цели нет — места в строке мало). */
+.wellness-dash__goal-pick {
+  flex: 1 1 100%;
+}
+
+/* «Шаги на сегодня» — карточка «Твой следующий шаг» доски (п.3). */
+.wellness-dash__today-goals {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+  padding: var(--s-4);
+}
+.wellness-dash__step-eyebrow {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  margin: 0;
+  font-size: var(--font-size-200);
+  font-weight: 700;
+}
+.wellness-dash__step-eyebrow .cr-icon {
+  color: var(--c-accent);
+}
+.wellness-dash__step {
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+}
+.wellness-dash__step-title {
+  margin: 0;
+  font-size: var(--font-size-300);
+  font-weight: 700;
+  line-height: var(--leading-tight);
+  overflow-wrap: anywhere;
+}
+
+/* «План на сегодня» — строки доски (п.4). */
+.wellness-dash__plan-empty {
+  margin: 0;
   padding: var(--s-3);
+  font-size: var(--font-size-200);
+  color: var(--c-text-secondary);
+}
+.wellness-dash__plan-list {
   display: flex;
   flex-direction: column;
   gap: var(--s-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.wellness-dash__plan-item {
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+  width: 100%;
+  min-height: 68px;
+  padding: var(--s-3);
+  font: inherit;
+  text-align: left;
+  color: var(--c-text-primary);
+}
+.wellness-dash__plan-item--go {
+  cursor: pointer;
+}
+.wellness-dash__plan-item--go:active {
+  background: var(--c-surface-2);
+}
+.wellness-dash__plan-text {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  gap: 2px;
+  min-width: 0;
+}
+.wellness-dash__plan-label {
+  font-size: var(--font-size-200);
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+.wellness-dash__plan-period {
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+.wellness-dash__plan-count {
+  font-weight: 600;
+  color: var(--c-text-primary);
+}
+.wellness-dash__plan-add {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  color: var(--c-accent);
+  background: var(--c-accent-subtle);
+  border: 0;
+  border-radius: 50%;
+  cursor: pointer;
+}
+.wellness-dash__plan-add:active {
+  background: color-mix(in srgb, var(--c-accent) 22%, var(--c-surface-1));
+}
+.wellness-dash__plan-attention {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  padding: var(--s-3);
+  background: var(--c-surface-2);
+  border-radius: var(--r-lg);
+}
+.wellness-dash__plan-attention-text {
+  margin: 0;
+  font-size: var(--font-size-200);
+  font-weight: 600;
+  color: var(--c-text-primary);
+}
+
+/* Ближайшая запись — раскладка доски (п.7). */
+.wellness-dash__booking-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+  padding: var(--s-3);
+}
+.wellness-dash__booking-card--empty {
+  align-items: center;
+  padding: var(--s-5) var(--s-4) var(--s-4);
+  text-align: center;
+}
+.wellness-dash__booking-main {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s-3);
+}
+.wellness-dash__booking-text {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  gap: 2px;
+  min-width: 0;
+}
+.wellness-dash__booking-what {
+  font-size: var(--font-size-200);
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+.wellness-dash__booking-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-1);
+  margin: 2px 0;
+}
+.wellness-dash__booking-who,
+.wellness-dash__booking-where {
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+  overflow-wrap: anywhere;
+}
+.wellness-dash__booking-when {
+  font-size: var(--font-size-200);
+  color: var(--c-text-primary);
+}
+.wellness-dash__booking-price {
+  font-weight: 600;
+  color: var(--c-text-primary);
+  white-space: nowrap;
+}
+.wellness-dash__booking-more {
+  margin-top: var(--s-1);
+  font-size: var(--font-size-100);
+  color: var(--c-text-primary);
+}
+.wellness-dash__booking-empty {
+  margin: 0;
+  font-size: var(--font-size-300);
+  font-weight: 700;
+}
+
+/* Быстрые действия — компактный ряд из четырёх (п.9). Flex, а не сетка: без
+   контура питания кнопок две (DRF-2071), и они делят ряд поровну. */
+.wellness-dash__qa-grid {
+  display: flex;
+  gap: var(--s-2);
+}
+.wellness-dash__qa-grid--row {
+  flex-wrap: wrap;
+}
+.wellness-dash__qa-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--s-2);
+  padding: var(--s-3) var(--s-1);
+  font: inherit;
+  color: var(--c-text-primary);
+  background: var(--c-surface-1);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-lg);
+  cursor: pointer;
+}
+.wellness-dash__qa-btn:active {
+  background: var(--c-surface-2);
+}
+.wellness-dash__qa-btn--compact {
+  flex: 1 1 0;
+  min-width: 56px;
+  min-height: 92px;
+  justify-content: flex-start;
+  text-align: center;
+}
+.wellness-dash__qa-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 40px;
+  height: 40px;
+  color: var(--c-accent);
+  background: var(--c-accent-subtle);
+  border-radius: 50%;
+}
+.wellness-dash__qa-label {
+  font-size: var(--font-size-200);
+  font-weight: 500;
+}
+.wellness-dash__qa-btn--compact .wellness-dash__qa-label {
+  font-size: var(--font-size-100);
+  line-height: 1.2;
+  /* DRF-2266 (скрин владельца 21.09): «Скорректировать» — одно слово длиннее
+     плитки ряда (min-width 56px); без переноса оно рисовалось поверх соседа. */
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  hyphens: auto;
+}
+.wellness-dash__queue-indicator {
+  margin: 0;
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+
+/* Тост воды — над панелью (DRF-2950): кнопок стакана три, две из них
+   высоко на экране. Над панелью (z-index 10), под листами (200). */
+.wellness-dash__toast {
+  position: fixed;
+  left: var(--s-4);
+  right: var(--s-4);
+  bottom: calc(56px + var(--safe-bottom) + var(--s-3));
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-3);
+  padding: var(--s-2) var(--s-2) var(--s-2) var(--s-4);
+  min-height: 52px;
+  font-size: var(--font-size-200);
+  color: var(--c-surface-1);
+  background: var(--c-text-primary);
+  border-radius: var(--r-md);
+}
+.wellness-dash__toast-text {
+  min-width: 0;
+}
+/* DRF-1842 — «Отменить» внутри тоста воды. Цвет наследуется от тоста
+   (токены --c-text-primary / --c-surface-1 выше), своих литералов нет:
+   кнопка обязана оставаться читаемой на той же подложке при смене палитры. */
+.wellness-dash__toast-action {
+  flex: none;
+  min-height: 44px;
+  padding: 0 var(--s-3);
+  font: inherit;
+  font-weight: 600;
+  color: inherit;
+  background: none;
+  border: 1px solid currentColor;
+  border-radius: var(--r-sm);
+  cursor: pointer;
+}
+
+/* DRF-2266 — вернуться в чат не вышло: подсказка вместо тишины. */
+.wellness-dash__chat-hint {
+  margin: 0;
+  color: var(--c-text-secondary);
+  font-size: var(--font-size-100);
+}
+
+/* «Продолжить разговор с Ayla». */
+.wellness-dash__ayla-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  padding: var(--s-3);
+}
+.wellness-dash__ayla-row {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s-3);
+  margin-bottom: var(--s-1);
+}
+.wellness-dash__ayla-text {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  gap: var(--s-1);
+  min-width: 0;
+}
+.wellness-dash__ayla-topic-head {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--s-2);
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+.wellness-dash__ayla-when {
+  white-space: nowrap;
+}
+.wellness-dash__ayla-topic {
+  margin: 0;
+  font-size: var(--font-size-200);
+  line-height: var(--leading-base);
+  color: var(--c-text-primary);
+  overflow-wrap: anywhere;
+}
+
+/* Один блок согласия дневника. */
+.wellness-dash__consent {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+  padding: var(--s-4);
+}
+.wellness-dash__consent-row {
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+}
+.wellness-dash__consent-text {
+  margin: 0;
+  font-size: var(--font-size-200);
+  line-height: var(--leading-base);
+  color: var(--c-text-primary);
+}
+/* DRF-2230 — приглашение в чат не ушло: сказано вслух, экран не закрыт. */
+.wellness-dash__consent-error {
+  margin: 0;
+  font-size: var(--font-size-200);
+  color: var(--c-danger);
+}
+
+/* Сводка дня (п.6: карточкой, без кольца; п.5: вода в стаканах). */
+.wellness-dash__pulse-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+  padding: var(--s-4);
 }
 .wellness-dash__pulse-row {
   display: flex;
@@ -5836,28 +6273,41 @@ a {
   gap: var(--s-1);
 }
 .wellness-dash__pulse-head {
-  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
   font-size: var(--font-size-200);
+  font-weight: 700;
+}
+.wellness-dash__pulse-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 32px;
+  height: 32px;
+  color: var(--c-accent);
+  background: var(--c-accent-subtle);
+  border-radius: 50%;
 }
 .wellness-dash__pulse-numbers {
   font-size: var(--font-size-200);
-  color: var(--c-text-secondary);
+  color: var(--c-text-primary);
 }
 .wellness-dash__pulse-pfc {
   font-size: var(--font-size-100);
   color: var(--c-text-secondary);
 }
 .wellness-dash__pulse-divider {
+  margin: 0;
   border: 0;
   border-top: 1px solid var(--c-divider);
-  margin: 0;
 }
 .wellness-dash__progress {
   height: 8px;
+  overflow: hidden;
   background: var(--c-surface-2);
   border-radius: var(--r-pill);
-  overflow: hidden;
-  border: 1px solid var(--c-divider);
 }
 .wellness-dash__progress-fill {
   height: 100%;
@@ -5874,470 +6324,61 @@ a {
   color: var(--c-accent);
   font-size: var(--font-size-200);
 }
-.wellness-dash__section-header {
-  font-size: var(--font-size-200);
-  font-weight: 600;
-  margin: 0 0 var(--s-2);
-  color: var(--c-text-primary);
-}
-.wellness-dash__quick-actions {
+
+/* Ошибка блока и «контур питания выключен» — состояние раздела в размер
+   блока: значок, текст, кнопка; без заголовка и без перевода фокуса. */
+.wellness-dash__block-error {
   display: flex;
   flex-direction: column;
+  align-items: center;
   gap: var(--s-2);
+  padding: var(--s-4);
+  text-align: center;
 }
-.wellness-dash__qa-grid {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: var(--s-2);
-}
-@media (max-width: 320px) {
-  /* WCAG 1.4.10 reflow @ small viewports — stack single column. */
-  .wellness-dash__qa-grid {
-    grid-template-columns: 1fr;
-  }
-}
-.wellness-dash__qa-btn {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: var(--s-1);
-  min-height: 88px;
-  padding: var(--s-3);
-  background: var(--c-surface-1);
-  border: 1px solid var(--c-divider);
-  border-radius: var(--r-md);
-  text-align: left;
-  cursor: pointer;
-  color: var(--c-text-primary);
-  font-family: var(--font-sans);
-}
-.wellness-dash__qa-btn[aria-disabled="true"] {
-  opacity: 0.55;
-  cursor: not-allowed;
-}
-.wellness-dash__qa-btn:focus-visible {
-  outline: 2px solid var(--c-accent);
-  outline-offset: 2px;
-}
-.wellness-dash__qa-icon {
-  font-size: var(--font-size-400);
-  line-height: 1;
-}
-.wellness-dash__qa-label {
-  font-size: var(--font-size-200);
-  font-weight: 500;
-}
-.wellness-dash__qa-hint {
-  font-size: var(--font-size-100);
-  color: var(--c-text-secondary);
-}
-.wellness-dash__queue-indicator {
+.wellness-dash__block-error p {
   margin: 0;
-  font-size: var(--font-size-100);
-  color: var(--c-text-secondary);
-}
-.wellness-dash__toast {
-  background: var(--c-text-primary);
-  color: var(--c-surface-1);
-  padding: var(--s-2) var(--s-3);
-  border-radius: var(--r-sm);
   font-size: var(--font-size-200);
-  align-self: flex-start;
-}
-/* DRF-1842 — «Отменить» внутри тоста воды. Цвет наследуется от тоста
-   (токены --c-text-primary / --c-surface-1 выше), своих литералов нет:
-   кнопка обязана оставаться читаемой на той же подложке при смене палитры. */
-.wellness-dash__toast-action {
-  margin-left: var(--s-2);
-  padding: 0 var(--s-2);
-  background: none;
-  color: inherit;
-  border: 1px solid currentColor;
-  border-radius: var(--r-sm);
-  font: inherit;
-  font-weight: 600;
-  cursor: pointer;
-}
-.wellness-dash__today-goals,
-.wellness-dash__booking,
-.wellness-dash__weekly,
-.wellness-dash__recos {
-  display: flex;
-  flex-direction: column;
-  gap: var(--s-2);
-}
-.wellness-dash__goal-list,
-.wellness-dash__weekly-list {
-  list-style: none;
-  padding: 0;
-  margin: 0;
-  display: flex;
-  flex-direction: column;
-  gap: var(--s-2);
-}
-.wellness-dash__goal-item {
-  font-size: var(--font-size-200);
+  line-height: var(--leading-base);
   color: var(--c-text-primary);
 }
-.wellness-dash__booking-card {
-  background: var(--c-surface-1);
-  border: 1px solid var(--c-divider);
-  border-radius: var(--r-md);
-  padding: var(--s-3);
-  display: flex;
-  flex-direction: column;
-  gap: var(--s-1);
-}
-.wellness-dash__booking-when {
-  font-weight: 600;
-}
-.wellness-dash__booking-what,
-.wellness-dash__booking-who,
-.wellness-dash__booking-where {
-  font-size: var(--font-size-200);
-  color: var(--c-text-secondary);
-}
-.wellness-dash__booking-more {
-  margin-top: var(--s-1);
-  font-size: var(--font-size-200);
-  color: var(--c-text-primary);
-}
-.wellness-dash__booking-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--s-2);
-  margin-top: var(--s-2);
-}
-.wellness-dash__booking-primary {
-  flex: 1 1 auto;
-}
-.wellness-dash__booking-all {
-  background: transparent;
-  border: none;
-  color: var(--c-accent);
-  padding: var(--s-2) var(--s-3);
-  min-height: 44px;
-  text-align: left;
-  font-size: var(--font-size-200);
-  cursor: pointer;
-}
-.wellness-dash__booking-all:focus-visible {
-  outline: 2px solid var(--c-accent);
-  outline-offset: 2px;
-  border-radius: var(--r-sm);
-}
-.wellness-dash__booking-empty {
-  margin: 0 0 var(--s-2);
-  color: var(--c-text-primary);
+/* Заголовок отказа входа (DRF-1319 D-1) — поверх `p` блока, отсюда вес. */
+.wellness-dash__block-error-title,
+.wellness-dash__block-error p.wellness-dash__block-error-title {
+  font-weight: 700;
 }
 
-/* ──────────────────────────────────────────────────────────────────
- * H01 — главный экран клиента по макету DRF-1321 v1.2 (DRF-2144).
- * Карточка цели, один блок согласия, «План на сегодня», карточка записи,
- * «Продолжить разговор с Ayla», компактный ряд быстрых действий.
- * Токены — те же, что у всего экрана; заливка акцентом у главного
- * действия — как `.salon-today__cta`. (Оговорка «своего `.btn-primary`
- * нет» с DRF-2380 устарела: он есть; здесь дело в раскладке.)
- * ────────────────────────────────────────────────────────────────── */
-
-/* Главное действие в потоке: «Продолжить сегодняшний план», «Составить
-   план», «Выбери цель», «Продолжить разговор». */
-.wellness-dash__cta {
+/* Скелеты (кадр 6 доски). */
+.wellness-dash__skel-line {
   display: block;
   width: 100%;
-  min-height: 48px;
-  margin: var(--s-2) 0 0;
-  padding: 0 var(--s-4);
-  background: var(--c-accent);
-  color: var(--c-text-on-accent);
-  border: none;
-  border-radius: var(--r-md);
-  font-family: var(--font-sans);
-  font-size: var(--font-size-300);
-  font-weight: 600;
-  cursor: pointer;
-}
-.wellness-dash__cta:active {
-  background: var(--c-accent-pressed);
-}
-.wellness-dash__cta:focus-visible {
-  outline: 2px solid var(--c-accent);
-  outline-offset: 2px;
-}
-
-/* Вторичное действие-ссылка: «Посмотреть детали цели», «Смотреть весь
-   план», «Задать новый вопрос». ≥44dp по высоте (WCAG 2.5.8). */
-.wellness-dash__link-btn {
-  display: inline-block;
-  background: transparent;
-  border: none;
-  color: var(--c-accent);
-  padding: var(--s-2) var(--s-1);
-  min-height: 44px;
-  font-family: var(--font-sans);
-  font-size: var(--font-size-200);
-  font-weight: 500;
-  cursor: pointer;
-  text-align: center;
-}
-.wellness-dash__link-btn:focus-visible {
-  outline: 2px solid var(--c-accent);
-  outline-offset: 2px;
   border-radius: var(--r-sm);
 }
-
-/* Карточка активной цели. */
-.wellness-dash__goal-card {
-  display: flex;
-  flex-direction: column;
-  gap: var(--s-1);
-  padding: var(--s-4);
-  background: var(--c-surface-1);
-  border: 1px solid var(--c-divider);
-  border-radius: var(--r-lg);
+.wellness-dash__skel-mark {
+  flex: none;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
 }
-.wellness-dash__goal-eyebrow {
-  align-self: flex-start;
-  margin: 0;
-  padding: 2px var(--s-2);
-  border-radius: var(--r-pill);
-  background: var(--c-accent-subtle);
-  color: var(--c-accent);
-  font-size: var(--font-size-100);
-  font-weight: 600;
-  letter-spacing: 0.02em;
-  text-transform: uppercase;
-}
-.wellness-dash__goal-title {
-  margin: var(--s-1) 0 0;
-  font-size: var(--font-size-400);
-  font-weight: 700;
-  color: var(--c-text-primary);
-}
-.wellness-dash__goal-due,
-.wellness-dash__goal-status,
-.wellness-dash__goal-hint {
-  margin: 0;
-  font-size: var(--font-size-200);
-  color: var(--c-text-secondary);
-}
-.wellness-dash__goal-card .wellness-dash__link-btn {
-  align-self: center;
-}
-
-/* Один блок согласия дневника. */
-.wellness-dash__consent {
-  display: flex;
-  flex-direction: column;
-  gap: var(--s-2);
-  padding: var(--s-3);
-  background: var(--c-surface-2);
+.wellness-dash__skel-tile {
+  flex: none;
+  width: 56px;
+  height: 56px;
   border-radius: var(--r-md);
 }
-.wellness-dash__consent-text {
-  margin: 0;
-  color: var(--c-text-primary);
-  font-size: var(--font-size-200);
+
+/* Фокус — одной рамкой на всех элементах управления экрана. */
+.wellness-dash__head-link:focus-visible,
+.wellness-dash__onboarding-dismiss:focus-visible,
+.wellness-dash__plan-item--go:focus-visible,
+.wellness-dash__plan-add:focus-visible,
+.wellness-dash__qa-btn:focus-visible,
+.wellness-dash__toast-action:focus-visible {
+  outline: 2px solid var(--c-accent);
+  outline-offset: 2px;
 }
 
-/* DRF-2230 — приглашение в чат не ушло: сказано вслух, экран не закрыт. */
-.wellness-dash__consent-error {
-  margin: 0;
-  color: var(--c-danger);
-  font-size: var(--font-size-200);
-}
-
-/* «План на сегодня». */
-.wellness-dash__plan-today {
-  display: flex;
-  flex-direction: column;
-  gap: var(--s-2);
-}
-.wellness-dash__plan-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--s-2);
-}
-.wellness-dash__plan-head .wellness-dash__section-header {
-  margin: 0;
-}
-.wellness-dash__plan-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: var(--s-2);
-}
-.wellness-dash__plan-item {
-  display: grid;
-  grid-template-columns: auto 1fr auto;
-  grid-template-areas:
-    "icon main state"
-    "icon chip chip";
-  column-gap: var(--s-3);
-  row-gap: var(--s-1);
-  align-items: center;
-  padding: var(--s-3);
-  background: var(--c-surface-1);
-  border: 1px solid var(--c-divider);
-  border-radius: var(--r-md);
-}
-.wellness-dash__plan-icon {
-  grid-area: icon;
-  font-size: var(--font-size-400);
-  line-height: 1;
-}
-.wellness-dash__plan-main {
-  grid-area: main;
-  min-width: 0;
-}
-.wellness-dash__plan-label {
-  font-size: var(--font-size-200);
-  font-weight: 600;
-  color: var(--c-text-primary);
-}
-.wellness-dash__plan-period {
-  font-size: var(--font-size-100);
-  color: var(--c-text-secondary);
-}
-.wellness-dash__plan-state {
-  grid-area: state;
-  font-size: var(--font-size-200);
-  font-weight: 600;
-  color: var(--c-text-primary);
-  white-space: nowrap;
-}
-.wellness-dash__plan-done {
-  color: var(--c-success);
-}
-.wellness-dash__plan-chip {
-  grid-area: chip;
-  justify-self: start;
-  padding: 1px var(--s-2);
-  border-radius: var(--r-pill);
-  background: var(--c-accent-subtle);
-  color: var(--c-accent);
-  font-size: var(--font-size-100);
-}
-.wellness-dash__plan-attention {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--s-2);
-  padding: var(--s-3);
-  border-radius: var(--r-md);
-  background: color-mix(in srgb, var(--c-warning) 10%, var(--c-surface-2));
-}
-.wellness-dash__plan-attention-text {
-  margin: 0;
-  font-size: var(--font-size-200);
-  font-weight: 600;
-  color: var(--c-text-primary);
-}
-
-/* Карточка ближайшей записи — по макету: услуга + статус, мастер, когда +
-   цена (место под DRF-2172), адрес. */
-.wellness-dash__booking-top,
-.wellness-dash__booking-row {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: var(--s-2);
-}
-.wellness-dash__booking-top .wellness-dash__booking-what {
-  font-weight: 600;
-  color: var(--c-text-primary);
-}
-.wellness-dash__booking-price {
-  font-weight: 600;
-  color: var(--c-text-primary);
-  white-space: nowrap;
-}
-
-/* Быстрые действия — компактный ряд из пяти (макет H01). Flex, а не сетка
-   на пять колонок: при выключенном контуре питания кнопок три (DRF-2071), и
-   они делят ряд поровну, а не оставляют две пустые ячейки. */
-.wellness-dash__qa-grid--row {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--s-1);
-}
-.wellness-dash__qa-btn--compact {
-  flex: 1 1 0;
-  min-width: 56px;
-  align-items: center;
-  justify-content: flex-start;
-  min-height: 76px;
-  padding: var(--s-2) var(--s-1);
-  text-align: center;
-}
-@media (max-width: 360px) {
-  .wellness-dash__qa-btn--compact {
-    flex-basis: calc(33% - var(--s-1));
-  }
-}
-.wellness-dash__qa-btn--compact .wellness-dash__qa-label {
-  font-size: var(--font-size-100);
-  line-height: 1.2;
-  /* DRF-2266 (скрин владельца 21.09): «Скорректировать» — одно слово длиннее
-     плитки ряда (min-width 56px); без переноса оно рисовалось поверх соседа. */
-  max-width: 100%;
-  overflow-wrap: anywhere;
-  hyphens: auto;
-}
-
-/* DRF-2266 — вернуться в чат не вышло: подсказка вместо тишины. */
-.wellness-dash__chat-hint {
-  margin: 0;
-  color: var(--c-text-secondary);
-  font-size: var(--font-size-100);
-}
-
-/* «Продолжить разговор с Ayla». */
-.wellness-dash__ayla {
-  display: flex;
-  flex-direction: column;
-  gap: var(--s-2);
-}
-.wellness-dash__ayla-card {
-  display: flex;
-  flex-direction: column;
-  gap: var(--s-2);
-  padding: var(--s-3);
-  background: var(--c-surface-1);
-  border: 1px solid var(--c-divider);
-  border-radius: var(--r-lg);
-}
-.wellness-dash__ayla-topic-head {
-  display: flex;
-  justify-content: space-between;
-  gap: var(--s-2);
-  font-size: var(--font-size-100);
-  color: var(--c-text-secondary);
-}
-.wellness-dash__ayla-when {
-  white-space: nowrap;
-}
-.wellness-dash__ayla-topic {
-  margin: 0;
-  padding: var(--s-2) var(--s-3);
-  border-radius: var(--r-md);
-  background: var(--c-surface-2);
-  color: var(--c-text-primary);
-  font-size: var(--font-size-200);
-}
-.wellness-dash__ayla-card .wellness-dash__link-btn {
-  align-self: center;
-}
-.wellness-dash__weekly-list li {
-  font-size: var(--font-size-200);
-}
-.wellness-dash__weekly-more {
-  align-self: flex-start;
-}
+/* Полка «Ayla подобрала тебе» — обездвижена (§172, ответ 40), стили
+   оставлены вместе с кодом: включение — одна строка. */
 .wellness-dash__reco-list {
   list-style: none;
   padding: 0;
@@ -6373,10 +6414,6 @@ a {
   font-weight: 600;
   font-size: var(--font-size-200);
 }
-.wellness-dash__reco-reasoning {
-  font-size: var(--font-size-200);
-  color: var(--c-text-secondary);
-}
 .wellness-dash__reco-meta {
   font-size: var(--font-size-100);
   color: var(--c-text-secondary);
@@ -6395,23 +6432,8 @@ a {
   line-height: 1.4;
   color: var(--c-text-secondary);
 }
-.wellness-dash__block-error {
-  background: var(--c-surface-1);
-  border: 1px solid var(--c-divider);
-  border-radius: var(--r-md);
-  padding: var(--s-3);
-  display: flex;
-  flex-direction: column;
-  gap: var(--s-2);
-}
-.wellness-dash__block-error p {
-  margin: 0;
-  color: var(--c-text-primary);
-}
-.wellness-dash__skel-line {
-  border-radius: var(--r-sm);
-  width: 100%;
-}
+
+/* Нижняя панель — общая для пяти экранов клиента (CustomerTabBar). */
 .wellness-dash__nav {
   position: fixed;
   bottom: 0;

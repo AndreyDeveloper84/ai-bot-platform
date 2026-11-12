@@ -136,6 +136,10 @@ function serve(s: Served = {}) {
     vi.fn(async (url: unknown) => {
       const u = String(url);
       if (u.includes("/wellness/today")) return ok(today);
+      // Стакан воды (POST): принят. GET по этому пути экран не делает.
+      if (u.includes("/wellness/water")) {
+        return ok({ entry_id: "e-1", ml: 250, water_ml: 250, today_total_ml: 250, today_norm_ml: 0, water_glasses_eaten: 5 });
+      }
       if (u.includes("/recent-activity")) return ok(activity);
       if (u.includes("/plan/current")) {
         if (s.savedPlan === "error") return refused(502, "ayla_unavailable");
@@ -202,18 +206,23 @@ describe("H01 · нет цели", () => {
 // ---------------------------------------------------------------------------
 
 describe("H01 · цель без плана", () => {
-  it("карточка цели: метка, название, «План ещё не составлен», CTA «Составить план» → /customer/plan", async () => {
+  // Решение 12.11, п.4 (DRF-2950): кнопки плана — в шапке блока «План на
+  // сегодня»; «План ещё не составлен» переехала туда же из карточки цели.
+  it("строка цели — метка и название; «План ещё не составлен» и «Составить план» — в блоке плана → /customer/plan", async () => {
     serve();
     renderHome();
 
-    const card = (await screen.findByText("Активная цель")).closest("section");
-    expect(card).not.toBeNull();
-    expect(within(card as HTMLElement).getByText("Подтянуть фигуру")).toBeInTheDocument();
-    expect(within(card as HTMLElement).getByText("План ещё не составлен")).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Продолжить сегодняшний план" })).toBeNull();
-    expect(screen.queryByRole("heading", { name: "План на сегодня" })).toBeNull();
+    const card = (await screen.findByText("Активная цель")).closest("section") as HTMLElement;
+    expect(within(card).getByText("Подтянуть фигуру")).toBeInTheDocument();
+    expect(within(card).queryByText("План ещё не составлен")).toBeNull();
+    expect(within(card).queryByRole("button", { name: "Составить план" })).toBeNull();
 
-    fireEvent.click(within(card as HTMLElement).getByRole("button", { name: "Составить план" }));
+    const plan = screen.getByRole("heading", { name: "План на сегодня" }).closest("section") as HTMLElement;
+    expect(within(plan).getByText("План ещё не составлен")).toBeInTheDocument();
+    expect(within(plan).queryByRole("list")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Продолжить сегодняшний план" })).toBeNull();
+
+    fireEvent.click(within(plan).getByRole("button", { name: "Составить план" }));
     expect(screen.getByTestId("location")).toHaveTextContent("/customer/plan");
   });
 
@@ -231,11 +240,14 @@ describe("H01 · цель без плана", () => {
     expect(within(card).queryByText(/^До \d/)).toBeNull();
   });
 
-  it("«Посмотреть детали цели» — вторичное действие, ведёт на экран цели", async () => {
+  // Решение 12.11, п.2: вход на экран цели — сама строка «Моя цель ›» доски.
+  it("строка цели целиком — вход на экран цели; «Посмотреть детали цели» нет", async () => {
     serve();
     renderHome();
 
-    fireEvent.click(await screen.findByRole("button", { name: "Посмотреть детали цели" }));
+    const row = await screen.findByRole("button", { name: /Подтянуть фигуру/ });
+    expect(screen.queryByRole("button", { name: "Посмотреть детали цели" })).toBeNull();
+    fireEvent.click(row);
     expect(screen.getByTestId("location")).toHaveTextContent("/customer/goal-select");
   });
 
@@ -255,31 +267,71 @@ describe("H01 · цель без плана", () => {
 // ---------------------------------------------------------------------------
 
 describe("H01 · план", () => {
-  it("primary CTA «Продолжить сегодняшний план» → /customer/plan; строка adherence без процентов", async () => {
+  // Решения 12.11, п.2 и п.4 (DRF-2950): «Продолжить сегодняшний план» — в
+  // шапке блока плана; счёта действий нет нигде — ни «выполнено N из M
+  // действий» под целью, ни «N из 3» в шапке.
+  it("«Продолжить сегодняшний план» — в шапке блока плана → /customer/plan; счёта действий нет", async () => {
     serve({ plan: PLAN });
     renderHome();
 
     const cta = await screen.findByRole("button", { name: "Продолжить сегодняшний план" });
-    // 4 + 3 из 7 + 3 — adherence Plan Lite, не результат.
-    expect(screen.getByText("Неделя 2 · выполнено 7 из 10 действий")).toBeInTheDocument();
+    const block = screen.getByRole("heading", { name: "План на сегодня" }).closest("section") as HTMLElement;
+    expect(block).toContainElement(cta);
+    // Присутствие: строка цели со счётчиком недель на месте.
+    expect(screen.getByText("Неделя 2")).toBeInTheDocument();
+    expect(screen.queryByText(/действий/)).toBeNull();
+    expect(screen.queryByText(/из 10/)).toBeNull();
 
     fireEvent.click(cta);
     expect(screen.getByTestId("location")).toHaveTextContent("/customer/plan");
   });
 
-  it("«План на сегодня»: действия с меткой «из твоего плана», состояние, «Смотреть весь план»", async () => {
+  it("строки доски: подпись, период, «N из M»; сделанное — галочкой; «›» ведёт на экран плана", async () => {
     serve({ plan: PLAN });
     renderHome();
 
     const heading = await screen.findByRole("heading", { name: "План на сегодня" });
     const block = heading.closest("section") as HTMLElement;
-    const chips = within(block).getAllByText("из твоего плана");
-    expect(chips).toHaveLength(2);
     expect(within(block).getByText("4 из 7")).toBeInTheDocument();
-    // Выполненное — галочка, не «3 из 3».
-    expect(within(block).getByLabelText("Дневник: выполнено")).toBeInTheDocument();
+    // Чип «из твоего плана» старого макета снят: строки и так в блоке плана.
+    expect(within(block).queryByText("из твоего плана")).toBeNull();
+    // Выполненное — галочкой, не «3 из 3»; словом — для скринридера.
+    expect(within(block).queryByText("3 из 3")).toBeNull();
+    const food = within(block).getByRole("button", { name: /Дневник/ });
+    expect(food).toHaveAccessibleName(/выполнено/);
 
-    fireEvent.click(within(block).getByRole("button", { name: "Смотреть весь план" }));
+    fireEvent.click(food);
+    expect(screen.getByTestId("location")).toHaveTextContent("/customer/plan");
+  });
+
+  it("«+» у воды — то же действие, что «Стакан воды»: стакан уходит, экран остаётся", async () => {
+    serve({ plan: PLAN });
+    renderHome();
+
+    const block = (await screen.findByRole("heading", { name: "План на сегодня" })).closest(
+      "section",
+    ) as HTMLElement;
+    const water = within(block).getByText("Вода").closest("li") as HTMLElement;
+    fireEvent.click(within(water).getByRole("button", { name: "Добавить стакан воды" }));
+
+    expect(await screen.findByText("+1 стакан зачтён")).toBeInTheDocument();
+    // Экран не ушёл: щуп адреса рисуется только на чужом маршруте.
+    expect(screen.queryByTestId("location")).toBeNull();
+  });
+
+  it("без контура питания у воды нет «+»: строка ведёт на экран плана, кнопок стакана нет нигде", async () => {
+    serve({
+      plan: PLAN,
+      today: { display_name: "Анна", active_goals: TODAY_WITH_GOAL.active_goals, nutrition_disabled: true },
+    });
+    renderHome();
+
+    const block = (await screen.findByRole("heading", { name: "План на сегодня" })).closest(
+      "section",
+    ) as HTMLElement;
+    const water = within(block).getByRole("button", { name: /Вода/ });
+    expect(screen.queryByRole("button", { name: "Добавить стакан воды" })).toBeNull();
+    fireEvent.click(water);
     expect(screen.getByTestId("location")).toHaveTextContent("/customer/plan");
   });
 
@@ -526,6 +578,39 @@ describe("H01 · быстрые действия", () => {
 });
 
 // ---------------------------------------------------------------------------
+// «Шаги на сегодня» — карточка «Твой следующий шаг» доски (решение 12.11, п.3)
+// ---------------------------------------------------------------------------
+
+describe("H01 · шаги на сегодня (DRF-2950, п.3)", () => {
+  it("норма известна и не набрана: «Ещё N стаканов до нормы» и кнопка стакана, стакан уходит", async () => {
+    serve();
+    renderHome();
+
+    const card = (await screen.findByRole("heading", { name: "Шаги на сегодня" })).closest(
+      "section",
+    ) as HTMLElement;
+    expect(within(card).getByText("Ещё 4 стакана до нормы")).toBeInTheDocument();
+    const add = within(card).getByRole("button", { name: "Добавить стакан воды" });
+    // Видимая подпись — та же, что у быстрого действия.
+    expect(add).toHaveTextContent("Стакан воды");
+    fireEvent.click(add);
+    expect(await screen.findByText("+1 стакан зачтён")).toBeInTheDocument();
+  });
+
+  it.each([
+    ["норма набрана", { ...TODAY_WITH_GOAL, water_glasses_eaten: 8 }],
+    ["нормы нет (анкета питания не пройдена)", { ...TODAY_WITH_GOAL, water_glasses_target: undefined }],
+  ])("%s — карточки нет", async (_case, today) => {
+    serve({ today });
+    renderHome();
+
+    // Присутствие: экран отрисован, строка цели на месте.
+    expect(await screen.findByText("Активная цель")).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Шаги на сегодня" })).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // «Продолжить разговор с Ayla»
 // ---------------------------------------------------------------------------
 
@@ -698,19 +783,26 @@ const SAVED_PLAN = {
 };
 
 describe("H01 · сохранён новый план (решение владельца 09.10, вариант «а»)", () => {
-  it("блока «План на сегодня» и счёта действий нет, хотя прежний план есть", async () => {
+  // Решение 12.11, п.4: «Мой план» — в шапке блока «План на сегодня». Строк
+  // и счёта прежнего плана нет (09.10, вариант «а»): блок — одна шапка.
+  // Вопрос владельцу (DRF-2950, 12.11): оставить так или вернуть «Мой план»
+  // под строку цели.
+  it("шапка блока плана с «Мой план»; строк и счёта прежнего плана нет, хотя он есть", async () => {
     serve({ plan: PLAN, savedPlan: SAVED_PLAN });
     renderHome();
 
-    // Положительный контроль: карточка цели отрисована, счётчик недель на месте.
-    expect(await screen.findByText("Неделя 2")).toBeInTheDocument();
-    expect(screen.queryByRole("heading", { name: "План на сегодня" })).not.toBeInTheDocument();
+    const mine = await screen.findByRole("button", { name: "Мой план" });
+    const block = screen.getByRole("heading", { name: "План на сегодня" }).closest("section") as HTMLElement;
+    expect(block).toContainElement(mine);
+    // Положительный контроль: строка цели отрисована, счётчик недель на месте.
+    expect(screen.getByText("Неделя 2")).toBeInTheDocument();
+    expect(within(block).queryByRole("list")).not.toBeInTheDocument();
+    expect(screen.queryByText("4 из 7")).not.toBeInTheDocument();
     expect(screen.queryByText(/выполнено/i)).not.toBeInTheDocument();
-    expect(screen.queryByText("из твоего плана")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Продолжить сегодняшний план" })).not.toBeInTheDocument();
   });
 
-  it("вход в план — из карточки цели, существующей подписью, → /customer/plan", async () => {
+  it("вход в план — «Мой план», существующей подписью, → /customer/plan", async () => {
     serve({ plan: PLAN, savedPlan: SAVED_PLAN });
     renderHome();
 
@@ -744,6 +836,7 @@ describe("H01 · сохранён новый план (решение владе
     renderHome();
 
     expect(await screen.findByRole("heading", { name: "План на сегодня" })).toBeInTheDocument();
-    expect(screen.getByText("Неделя 2 · выполнено 7 из 10 действий")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Продолжить сегодняшний план" })).toBeInTheDocument();
+    expect(screen.getByText("4 из 7")).toBeInTheDocument();
   });
 });
