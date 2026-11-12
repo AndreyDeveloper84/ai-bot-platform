@@ -35,6 +35,27 @@ describe("Snackbar — отсчёт идёт от показа, а не от п�
     expect(first).not.toHaveBeenCalled();
   });
 
+  it("новое сообщение получает свой полный срок, а не остаток прежнего (ревью #2458)", () => {
+    vi.useFakeTimers();
+    const onTimeout = vi.fn();
+    const view = render(<Snackbar visible message="первое" durationMs={5000} onTimeout={onTimeout} />);
+
+    act(() => {
+      vi.advanceTimersByTime(4000);
+    });
+    view.rerender(<Snackbar visible message="второе" durationMs={5000} onTimeout={onTimeout} />);
+    act(() => {
+      vi.advanceTimersByTime(1500);
+    });
+    // Остаток первого срока (1 с) прошёл — второе сообщение ещё живо.
+    expect(onTimeout).not.toHaveBeenCalled();
+
+    act(() => {
+      vi.advanceTimersByTime(3500);
+    });
+    expect(onTimeout).toHaveBeenCalledTimes(1);
+  });
+
   it("скрытое сообщение не срабатывает вовсе", () => {
     vi.useFakeTimers();
     const onTimeout = vi.fn();

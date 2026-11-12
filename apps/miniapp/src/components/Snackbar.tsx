@@ -76,7 +76,9 @@ export function Snackbar({
         timerRef.current = null;
       }
     };
-  }, [visible, durationMs]);
+    // `message` — строка: перерисовка с тем же текстом срок не трогает, а новое
+    // сообщение получает свой полный срок, а не остаток прежнего (ревью #2458).
+  }, [visible, durationMs, message]);
 
   if (!visible) return null;
 

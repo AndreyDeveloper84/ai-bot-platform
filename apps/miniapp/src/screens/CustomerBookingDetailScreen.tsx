@@ -182,6 +182,11 @@ function statusLine(booking: BookingItem): string | null {
   return rendering.label;
 }
 
+/** 404 сервера — записи нет (или она не этого человека: сервер их не различает). */
+function isGone(err: unknown): boolean {
+  return err instanceof ApiError && err.status === 404;
+}
+
 export function CustomerBookingDetailScreen() {
   const navigate = useNavigate();
   const online = useOnline();
@@ -201,6 +206,10 @@ export function CustomerBookingDetailScreen() {
   const cancelTrigger = useRef<HTMLDivElement | null>(null);
   /** Номер чтения до нажатия «отменить»: исход — только из чтений новее. */
   const cancelStartedAt = useRef(0);
+  // «Записи больше нет» после действия человека (404 на отмене): нажатая
+  // кнопка размонтирована, фокус уводится на заголовок состояния. При
+  // первом показе экрана фокус ещё ничей — там состояние тихое.
+  const goneAfterAction = useRef(false);
   const alive = useRef(true);
   useEffect(() => {
     alive.current = true;
@@ -293,11 +302,21 @@ export function CustomerBookingDetailScreen() {
       // Исход неизвестен: запрос мог дойти, а ответ — потеряться. Правду
       // говорит запись, поэтому сначала читаем её.
       let fresh: BookingItem | null = null;
+      let rereadErr: unknown = null;
       try {
         fresh = await getBookingDetail(bookingId);
         if (settle(fresh)) return;
-      } catch {
+      } catch (e) {
         /* перечитать не вышло — решаем по самой ошибке ниже */
+        rereadErr = e;
+      }
+      if (isGone(err) && isGone(rereadErr)) {
+        // Записи нет ни для отмены, ни для чтения: это не «не удалось
+        // отменить» с повтором, а «Этой записи больше нет» (ревью #2458).
+        setView({ kind: "card" });
+        goneAfterAction.current = true;
+        setLoad({ kind: "error", err: rereadErr });
+        return;
       }
       if (fresh?.status === "cancel_requested") {
         // Отмена дошла и идёт: её добьёт сервер. «Не удалось» было бы ложью.
@@ -379,7 +398,7 @@ export function CustomerBookingDetailScreen() {
             icon="gone"
             title={DETAIL_COPY.goneTitle}
             body={<p>{DETAIL_COPY.goneBody}</p>}
-            quiet
+            quiet={!goneAfterAction.current}
             actions={
               <RecordButton variant="primary" onClick={() => navigate("/customer/records")}>
                 {DETAIL_COPY.toRecords}
