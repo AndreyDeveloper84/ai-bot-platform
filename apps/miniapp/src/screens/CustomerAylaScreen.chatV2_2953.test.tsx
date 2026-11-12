@@ -37,9 +37,8 @@ vi.mock("../lib/max-sdk", async (importOriginal) => {
   };
 });
 
-import { FAILED_TEXT } from "../components/AylaChat";
 import { primeDisplayName } from "../components/CustomerAvatarEntry";
-import { CustomerAylaChat } from "../components/CustomerAylaChat";
+import { CUSTOMER_FAILED_TEXT as FAILED_TEXT, CustomerAylaChat } from "../components/CustomerAylaChat";
 import { RECORDS_ERROR_COPY } from "../components/records/RecordsLoadError";
 import { authErrorCopy, OPEN_FROM_MAX_COPY } from "../lib/auth-error-copy";
 import { formatTopicWhen, formatTurnWhen } from "../lib/customer-last-topic";

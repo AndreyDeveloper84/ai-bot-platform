@@ -64,7 +64,6 @@ import { formatTurnWhen } from "../lib/customer-last-topic";
 import { SUPPORT_DEEPLINK } from "../lib/customer-profile";
 import { hapticSelection, openExternalLink, signalReady } from "../lib/max-sdk";
 import {
-  FAILED_TEXT,
   isHiddenTurn,
   MAX_QUESTION_CHARS,
   quickReplyRoute,
@@ -76,6 +75,17 @@ import { OpenFromMaxBody } from "./OpenFromMaxScreen";
 import { RecordIcon, type RecordIconName } from "./records/RecordIcons";
 import { RECORDS_ERROR_COPY } from "./records/RecordsLoadError";
 import { RecordButton } from "./records/RecordsState";
+
+/**
+ * Слова клиентского чата — на «ты», как весь клиентский голос приложения
+ * (решение владельца 12.11.2026, DRF-2953 п.2–3). Мастер и салон остаются
+ * на `FAILED_TEXT` из `AylaChat`.
+ */
+export const CUSTOMER_FAILED_TEXT = "Не получилось отправить. Попробуй ещё раз.";
+/** Заголовок карточки сбоя (кадр 15 макета). */
+export const CUSTOMER_FAILURE_TITLE = "Не удалось получить ответ от Ayla";
+/** Подсказка в поле ввода (макет «Чат с Ayla.png»). */
+export const COMPOSE_PLACEHOLDER = "Напиши сообщение…";
 
 interface Turn extends AylaChatMessage {
   buttons?: AylaQuickReply[];
@@ -101,7 +111,11 @@ type Failure =
  * или ответ не дочитался из истории). «Не получилось отправить» здесь было бы
  * неправдой — слова нейтральные, тело кадра 15 макета.
  */
-const UNKNOWN_OUTCOME: Failure = { kind: "retry", text: RECORDS_ERROR_COPY.failedBody };
+const UNKNOWN_OUTCOME: Failure = {
+  kind: "retry",
+  title: CUSTOMER_FAILURE_TITLE,
+  text: RECORDS_ERROR_COPY.failedBody,
+};
 
 /** Сколько раз переспросить тем же ключом, пока первый ход ещё идёт. */
 const RUNNING_POLLS = 3;
@@ -122,7 +136,9 @@ const SERVER_WORDS: ReadonlySet<string> = new Set([
 ]);
 
 function failureOf(err: unknown): Failure {
-  if (!(err instanceof ApiError)) return { kind: "retry", text: FAILED_TEXT };
+  if (!(err instanceof ApiError)) {
+    return { kind: "retry", title: CUSTOMER_FAILURE_TITLE, text: CUSTOMER_FAILED_TEXT };
+  }
   // Слаг `malformed` есть и у отказа входа (401), и у разбора тела этой ручки
   // (400) — различает их только статус.
   if (err.status === 401 && isTransportRefusalSlug(err.slug)) return { kind: "open_from_max" };
@@ -132,9 +148,11 @@ function failureOf(err: unknown): Failure {
     // временный, удалённый аккаунт — нет).
     return { kind: copy.retryLabel ? "retry" : "refused", title: copy.title, text: copy.body };
   }
-  const text = SERVER_WORDS.has(err.slug) && err.detail ? err.detail : FAILED_TEXT;
+  const text = SERVER_WORDS.has(err.slug) && err.detail ? err.detail : CUSTOMER_FAILED_TEXT;
   // 400 — вопрос не тот (пустой, длинный, не из MAX): тот же запрос даст тот же отказ.
-  return err.status === 400 ? { kind: "refused", text } : { kind: "retry", text };
+  return err.status === 400
+    ? { kind: "refused", text }
+    : { kind: "retry", title: CUSTOMER_FAILURE_TITLE, text };
 }
 
 function isActionable(reply: AylaQuickReply): boolean {
@@ -545,7 +563,7 @@ export function CustomerAylaChat({ greeting, onOpen, runningPollMs = RUNNING_POL
           <textarea
             className="cchat-compose__input"
             aria-label="Вопрос к Ayla"
-            placeholder="Спросите Ayla…"
+            placeholder={COMPOSE_PLACEHOLDER}
             value={draft}
             rows={1}
             onChange={(e) => setDraft(e.target.value)}
