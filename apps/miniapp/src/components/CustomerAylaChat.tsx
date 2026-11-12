@@ -5,14 +5,16 @@
  * служит мастеру и салону (предложения, подтверждения, карточки — у клиента
  * их нет), а у клиента свои быстрые ответы и своя раскладка. Общее взято
  * оттуда готовым — фильтр скрытых реплик, разбор кнопки «открыть Mini App»,
- * граница длины вопроса и слова сбоя; разметка мастера и салона не тронута
- * по построению.
+ * граница длины вопроса; разметка мастера и салона не тронута по построению.
  *
- * # Раскладка с макета, слова и поведение — действующие
+ * # Раскладка с макета, слова — действующие или владельца
  *
- * Ни одной новой фразы здесь нет. Приветствие, «Ayla думает…», подпись поля и
- * слова сбоя — те же, что были; «Нет подключения…», «Попробовать снова» и
- * «Написать в поддержку» — слова раздела «Записи» (`RECORDS_ERROR_COPY`).
+ * Приветствие и «Ayla думает…» — прежние; «Нет подключения…», «Попробовать
+ * снова» и «Написать в поддержку» — слова раздела «Записи»
+ * (`RECORDS_ERROR_COPY`). Подпись поля, слова сбоя и заголовок карточки
+ * сбоя — решение владельца 12.11 (DRF-2953, п.2–3): клиентский голос
+ * приложения везде «ты», поэтому «Спросите Ayla…» и «Попробуйте ещё раз» от
+ * чата мастера здесь не годятся. Чат мастера и салона их сохраняет.
  *
  * # Чего с макета нет — и почему
  *
@@ -64,7 +66,6 @@ import { formatTurnWhen } from "../lib/customer-last-topic";
 import { SUPPORT_DEEPLINK } from "../lib/customer-profile";
 import { hapticSelection, openExternalLink, signalReady } from "../lib/max-sdk";
 import {
-  FAILED_TEXT,
   isHiddenTurn,
   MAX_QUESTION_CHARS,
   quickReplyRoute,
@@ -76,6 +77,13 @@ import { OpenFromMaxBody } from "./OpenFromMaxScreen";
 import { RecordIcon, type RecordIconName } from "./records/RecordIcons";
 import { RECORDS_ERROR_COPY } from "./records/RecordsLoadError";
 import { RecordButton } from "./records/RecordsState";
+
+/** Слова чата клиента — решение владельца 12.11 (DRF-2953, п.2–3). */
+export const CLIENT_CHAT_COPY = {
+  placeholder: "Напиши сообщение…",
+  failed: "Не получилось отправить. Попробуй ещё раз.",
+  failedTitle: "Не удалось получить ответ от Ayla",
+} as const;
 
 interface Turn extends AylaChatMessage {
   buttons?: AylaQuickReply[];
@@ -122,7 +130,7 @@ const SERVER_WORDS: ReadonlySet<string> = new Set([
 ]);
 
 function failureOf(err: unknown): Failure {
-  if (!(err instanceof ApiError)) return { kind: "retry", text: FAILED_TEXT };
+  if (!(err instanceof ApiError)) return { kind: "retry", text: CLIENT_CHAT_COPY.failed };
   // Слаг `malformed` есть и у отказа входа (401), и у разбора тела этой ручки
   // (400) — различает их только статус.
   if (err.status === 401 && isTransportRefusalSlug(err.slug)) return { kind: "open_from_max" };
@@ -132,8 +140,10 @@ function failureOf(err: unknown): Failure {
     // временный, удалённый аккаунт — нет).
     return { kind: copy.retryLabel ? "retry" : "refused", title: copy.title, text: copy.body };
   }
-  const text = SERVER_WORDS.has(err.slug) && err.detail ? err.detail : FAILED_TEXT;
-  // 400 — вопрос не тот (пустой, длинный, не из MAX): тот же запрос даст тот же отказ.
+  const text = SERVER_WORDS.has(err.slug) && err.detail ? err.detail : CLIENT_CHAT_COPY.failed;
+  // 400 — вопрос не тот (пустой, длинный, не из MAX): тот же запрос даст тот же
+  // отказ. Заголовка «не удалось получить ответ» у него нет: сервер ответил —
+  // отказом, и говорит его словами.
   return err.status === 400 ? { kind: "refused", text } : { kind: "retry", text };
 }
 
@@ -271,15 +281,38 @@ export function CustomerAylaChat({ greeting, onOpen, runningPollMs = RUNNING_POL
     if (abandonedRef.current) {
       abandonedRef.current = false;
       try {
+        // Брошенный вопрос мог пройти: его ответ — только в истории. Берём
+        // ленту оттуда — там и он, и (обычно) ответ нового вопроса.
         const seen: Turn[] = visibleMessages((await customerAylaApi.history()).messages);
         if (!aliveRef.current) return;
-        const last = seen.at(-1);
-        // Кнопок история не несёт: к последней реплике они возвращаются,
-        // только если это тот самый ответ. Иначе — лента как была.
-        if (last && last.role === "assistant" && last.content === answer) {
-          setTurns(seen.map((t) => (t === last ? { ...t, buttons } : t)));
+        // Реплики Ayla после последнего вопроса — ответ нового хода. `answer`
+        // склеен из реплик хода через пустую строку и может нести строку
+        // памяти, которой в истории нет (`memory_announce`): поэтому
+        // «входит в ответ», а не «равен» и не «хвост» (ревью #2463).
+        const lastAsk = seen.map((t) => t.role).lastIndexOf("user");
+        const fresh = seen
+          .slice(lastAsk + 1)
+          .filter((t) => t.role === "assistant" && t.content.trim() !== "");
+        const ours = fresh.filter((t) => answer.includes(t.content.trim()));
+        const anchor = ours.at(-1);
+        if (anchor !== undefined) {
+          // Кнопок история не несёт — возвращаем их к нашей последней реплике.
+          setTurns(seen.map((t) => (t === anchor ? { ...t, buttons } : t)));
           return;
         }
+        // Ответа нового хода в истории не нашлось (запись консьержа — по
+        // возможности, ответ без текста, только с кнопками): ленту берём из
+        // истории, а ответ дописываем сами. Дубль лучше потери.
+        if (answer.trim() !== "" || buttons.length > 0) {
+          const at = new Date().toISOString();
+          setTurns([
+            ...seen,
+            { id: nextLocalId(), role: "assistant", content: answer, tool: "", created_at: at, buttons },
+          ]);
+        } else {
+          setTurns(seen);
+        }
+        return;
       } catch {
         // Дочитать не вышло — ответ на новый вопрос всё равно показываем.
       }
@@ -297,6 +330,9 @@ export function CustomerAylaChat({ greeting, onOpen, runningPollMs = RUNNING_POL
       setSending(true);
       setFailure(null);
       let polls = 0;
+      // Ключ перевыпускается не больше раза за прогон: у свежего ключа
+      // повтора быть не может, и второй `failed` подряд — не повод крутиться.
+      let rekeyed = false;
       try {
         for (;;) {
           try {
@@ -321,8 +357,13 @@ export function CustomerAylaChat({ greeting, onOpen, runningPollMs = RUNNING_POL
             const outcome = err.details?.turn;
             if (outcome === "failed") {
               // Хода нет и не будет — спрашиваем заново, не заставляя жать ещё
-              // раз. У нового ключа повтора быть не может: цикл не вечный.
+              // раз. Ключ прежний занят упавшим ходом.
               attempt.requestId = newRequestId();
+              if (rekeyed) {
+                setFailure(failureOf(new Error("rekeyed twice")));
+                return;
+              }
+              rekeyed = true;
               continue;
             }
             if (outcome === "running") {
@@ -520,7 +561,14 @@ export function CustomerAylaChat({ greeting, onOpen, runningPollMs = RUNNING_POL
       ) : failure?.kind === "refused" ? (
         <Notice icon="alert" danger title={failure.title} text={failure.text} />
       ) : failure?.kind === "retry" ? (
-        <Notice icon="alert" danger title={failure.title} text={failure.text}>
+        // Заголовок кадра 15 — у всякого сбоя, после которого есть повтор;
+        // у отказа входа заголовок свой (`authErrorCopy`).
+        <Notice
+          icon="alert"
+          danger
+          title={failure.title ?? CLIENT_CHAT_COPY.failedTitle}
+          text={failure.text}
+        >
           <RecordButton variant="primary" onClick={onRetry} disabled={sending}>
             {RECORDS_ERROR_COPY.retry}
           </RecordButton>
@@ -545,7 +593,7 @@ export function CustomerAylaChat({ greeting, onOpen, runningPollMs = RUNNING_POL
           <textarea
             className="cchat-compose__input"
             aria-label="Вопрос к Ayla"
-            placeholder="Спросите Ayla…"
+            placeholder={CLIENT_CHAT_COPY.placeholder}
             value={draft}
             rows={1}
             onChange={(e) => setDraft(e.target.value)}

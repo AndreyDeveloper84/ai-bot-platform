@@ -37,9 +37,8 @@ vi.mock("../lib/max-sdk", async (importOriginal) => {
   };
 });
 
-import { FAILED_TEXT } from "../components/AylaChat";
 import { primeDisplayName } from "../components/CustomerAvatarEntry";
-import { CustomerAylaChat } from "../components/CustomerAylaChat";
+import { CLIENT_CHAT_COPY, CustomerAylaChat } from "../components/CustomerAylaChat";
 import { RECORDS_ERROR_COPY } from "../components/records/RecordsLoadError";
 import { authErrorCopy, OPEN_FROM_MAX_COPY } from "../lib/auth-error-copy";
 import { formatTopicWhen, formatTurnWhen } from "../lib/customer-last-topic";
@@ -164,6 +163,37 @@ describe("Шапка и состав экрана", () => {
     expect(names).toEqual(expect.arrayContaining(["Назад", "Отправить"]));
     expect(names.join(" ")).not.toMatch(/микрофон|голос/i);
     expect(screen.queryByRole("navigation")).not.toBeInTheDocument();
+  });
+});
+
+describe("Слова владельца 12.11 (DRF-2953, п.2–3)", () => {
+  it("поле ввода и сбой — на «ты»; у сбоя заголовок «Не удалось получить ответ от Ayla»", async () => {
+    wire([[]], [new TypeError("Failed to fetch")]);
+    renderScreen();
+    await screen.findByText(GREETING);
+    expect(screen.getByRole("textbox", { name: "Вопрос к Ayla" })).toHaveAttribute(
+      "placeholder",
+      "Напиши сообщение…",
+    );
+
+    ask("хочу на массаж");
+
+    const alert = await screen.findByRole("alert");
+    expect(within(alert).getByRole("heading", { name: "Не удалось получить ответ от Ayla" })).toBeInTheDocument();
+    expect(within(alert).getByText("Не получилось отправить. Попробуй ещё раз.")).toBeInTheDocument();
+    expect(screen.queryByText(/Попробуйте|Спросите/)).not.toBeInTheDocument();
+  });
+
+  it("отказ 400 — словами сервера и без заголовка «не удалось получить ответ»: сервер ответил", async () => {
+    wire([[]], [refusal(400, "question_too_long", "Вопрос слишком длинный.")]);
+    renderScreen();
+    await screen.findByText(GREETING);
+
+    ask("хочу на массаж");
+
+    const alert = await screen.findByRole("alert");
+    expect(within(alert).getByText("Вопрос слишком длинный.")).toBeInTheDocument();
+    expect(within(alert).queryByRole("heading")).not.toBeInTheDocument();
   });
 });
 
@@ -428,7 +458,7 @@ describe("Сбой и повтор", () => {
     ask("хочу на массаж");
 
     const alert = await screen.findByRole("alert");
-    expect(within(alert).getByText(FAILED_TEXT)).toBeInTheDocument();
+    expect(within(alert).getByText(CLIENT_CHAT_COPY.failed)).toBeInTheDocument();
     expect(within(alert).getByRole("link", { name: RECORDS_ERROR_COPY.support })).toBeInTheDocument();
 
     fireEvent.click(within(alert).getByRole("button", { name: RECORDS_ERROR_COPY.retry }));
@@ -526,7 +556,7 @@ describe("Сбой и повтор", () => {
     await waitFor(() => expect(asked).toHaveLength(5));
     const alert = await screen.findByRole("alert");
     expect(within(alert).getByText(RECORDS_ERROR_COPY.failedBody)).toBeInTheDocument();
-    expect(screen.queryByText(FAILED_TEXT)).not.toBeInTheDocument();
+    expect(screen.queryByText(CLIENT_CHAT_COPY.failed)).not.toBeInTheDocument();
     expect(screen.queryByText(DUPLICATE)).not.toBeInTheDocument();
     expect(new Set(asked.map((a) => a.request_id)).size).toBe(1);
     expect(historyCalls()).toBe(1);
@@ -580,7 +610,7 @@ describe("Сбой и повтор", () => {
     fireEvent.click(await screen.findByRole("button", { name: RECORDS_ERROR_COPY.retry }));
 
     const alert = await screen.findByText(RECORDS_ERROR_COPY.failedBody);
-    expect(screen.queryByText(FAILED_TEXT)).not.toBeInTheDocument();
+    expect(screen.queryByText(CLIENT_CHAT_COPY.failed)).not.toBeInTheDocument();
     fireEvent.click(within(alert.closest("section")!).getByRole("button", { name: RECORDS_ERROR_COPY.retry }));
 
     expect(await screen.findByText("Подскажу.")).toBeInTheDocument();
@@ -619,7 +649,7 @@ describe("Сбой и повтор", () => {
     ask("хочу на массаж");
 
     const alert = await screen.findByRole("alert");
-    expect(within(alert).getByText(FAILED_TEXT)).toBeInTheDocument();
+    expect(within(alert).getByText(CLIENT_CHAT_COPY.failed)).toBeInTheDocument();
     expect(screen.queryByText(/Gateway/)).not.toBeInTheDocument();
     fireEvent.click(within(alert).getByRole("button", { name: RECORDS_ERROR_COPY.retry }));
 
@@ -650,6 +680,22 @@ describe("Сбой и повтор", () => {
     expect(screen.queryByText("cb:menu:book")).not.toBeInTheDocument();
   });
 
+  it("второй «ход упал» подряд — карточка сбоя, а не круг перевыпусков ключа", async () => {
+    const { asked } = wire(
+      [[]],
+      [new TypeError("Failed to fetch"), duplicate("failed"), duplicate("failed"), answer("не должен понадобиться")],
+    );
+    renderScreen();
+    await screen.findByText(GREETING);
+
+    ask("хочу на массаж");
+    fireEvent.click(await screen.findByRole("button", { name: RECORDS_ERROR_COPY.retry }));
+
+    const alert = await screen.findByRole("alert");
+    expect(within(alert).getByText(CLIENT_CHAT_COPY.failed)).toBeInTheDocument();
+    expect(asked).toHaveLength(3);
+  });
+
   it("лимит вопросов: английский detail человеку не показывается, ключ прежний", async () => {
     const { asked } = wire(
       [[]],
@@ -661,7 +707,7 @@ describe("Сбой и повтор", () => {
     ask("хочу на массаж");
 
     const alert = await screen.findByRole("alert");
-    expect(within(alert).getByText(FAILED_TEXT)).toBeInTheDocument();
+    expect(within(alert).getByText(CLIENT_CHAT_COPY.failed)).toBeInTheDocument();
     expect(screen.queryByText(/too many/)).not.toBeInTheDocument();
 
     fireEvent.click(within(alert).getByRole("button", { name: RECORDS_ERROR_COPY.retry }));
@@ -702,7 +748,7 @@ describe("Сбой и повтор", () => {
     ask("хочу на массаж");
 
     const alert = await screen.findByRole("alert");
-    expect(within(alert).getByText(FAILED_TEXT)).toBeInTheDocument();
+    expect(within(alert).getByText(CLIENT_CHAT_COPY.failed)).toBeInTheDocument();
     expect(screen.queryByText(OPEN_FROM_MAX_COPY.title)).not.toBeInTheDocument();
     expect(screen.queryByText(/UUID/)).not.toBeInTheDocument();
   });
@@ -751,8 +797,90 @@ describe("Сбой и повтор", () => {
     expect(container.querySelectorAll(".cchat-bubble--mine")).toHaveLength(2);
   });
 
+  it("брошенный вопрос, а ответ нового — из двух реплик: лента из истории, кнопки под последней (ревью #2463)", async () => {
+    const after = [
+      { id: "s1", role: "user", content: "мне плохо", tool: "", created_at: "2026-09-20T09:00:00+00:00" },
+      { id: "s2", role: "assistant", content: "Это вопрос к специалисту.", tool: "", created_at: "2026-09-20T09:00:04+00:00" },
+      { id: "s3", role: "user", content: "а про питание?", tool: "", created_at: "2026-09-20T09:01:00+00:00" },
+      { id: "s4", role: "assistant", content: "Сначала коротко.", tool: "", created_at: "2026-09-20T09:01:04+00:00" },
+      { id: "s5", role: "assistant", content: "Про питание.", tool: "", created_at: "2026-09-20T09:01:05+00:00" },
+    ];
+    wire(
+      [[], after],
+      [
+        new TypeError("Failed to fetch"),
+        answer("Сначала коротко.\n\nПро питание.", [{ label: "Мой план", open_app: "open_plan" }]),
+      ],
+    );
+    renderScreen();
+    await screen.findByText(GREETING);
+
+    ask("мне плохо");
+    await screen.findByRole("alert");
+    ask("а про питание?");
+
+    expect(await screen.findByText("Это вопрос к специалисту.")).toBeInTheDocument();
+    expect(screen.getByText("Сначала коротко.")).toBeInTheDocument();
+    const list = screen.getByRole("list", { name: "Варианты ответа" });
+    expect(within(list).getByRole("button", { name: "Мой план" })).toBeInTheDocument();
+    // Склеенный ответ хода не дублирует реплики истории.
+    expect(screen.getAllByText("Про питание.")).toHaveLength(1);
+  });
+
+  it("брошенный вопрос, а ответа нового хода в истории нет: лента из истории, ответ дописан — дубль лучше потери", async () => {
+    const after = [
+      { id: "s1", role: "user", content: "а про питание?", tool: "", created_at: "2026-09-20T09:01:00+00:00" },
+      { id: "s2", role: "assistant", content: "Что-то другое.", tool: "", created_at: "2026-09-20T09:01:04+00:00" },
+    ];
+    wire(
+      [[], after],
+      [new TypeError("Failed to fetch"), answer("Про питание.", [{ label: "Мой план", open_app: "open_plan" }])],
+    );
+    renderScreen();
+    await screen.findByText(GREETING);
+
+    ask("мне плохо");
+    await screen.findByRole("alert");
+    ask("а про питание?");
+
+    expect(await screen.findByText("Про питание.")).toBeInTheDocument();
+    expect(screen.getByText("Что-то другое.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Мой план" })).toBeInTheDocument();
+  });
+
+  it("брошенный вопрос, а ответ консьержа в истории без строки памяти: кнопки находят свою реплику", async () => {
+    // Консьерж пишет строку сам, а «Запомнила: …» дописывается к ответу
+    // позже и в историю не идёт (`memory_announce`): строка — НАЧАЛО ответа.
+    const after = [
+      { id: "s1", role: "user", content: "а про питание?", tool: "", created_at: "2026-09-20T09:01:00+00:00" },
+      { id: "s2", role: "assistant", content: "Про питание.", tool: "", created_at: "2026-09-20T09:01:04+00:00" },
+    ];
+    wire(
+      [[], after],
+      [
+        new TypeError("Failed to fetch"),
+        answer("Про питание.\n\nЗапомнила: без молочного.", [{ label: "Мой план", open_app: "open_plan" }]),
+      ],
+    );
+    renderScreen();
+    await screen.findByText(GREETING);
+
+    ask("мне плохо");
+    await screen.findByRole("alert");
+    ask("а про питание?");
+
+    const list = await screen.findByRole("list", { name: "Варианты ответа" });
+    expect(within(list).getByRole("button", { name: "Мой план" })).toBeInTheDocument();
+    expect(screen.getAllByText("Про питание.")).toHaveLength(1);
+  });
+
   it("новый вопрос поверх сбоя — новый ход своим ключом, карточка сбоя снята", async () => {
-    const { asked } = wire([[]], [new TypeError("Failed to fetch"), answer("Про питание.")]);
+    // Брошенный вопрос не дошёл: в истории только новый вопрос и ответ.
+    const after = [
+      { id: "s1", role: "user", content: "а про питание?", tool: "", created_at: "2026-09-20T09:01:00+00:00" },
+      { id: "s2", role: "assistant", content: "Про питание.", tool: "", created_at: "2026-09-20T09:01:04+00:00" },
+    ];
+    const { asked } = wire([[], after], [new TypeError("Failed to fetch"), answer("Про питание.")]);
     renderScreen();
     await screen.findByText(GREETING);
 
