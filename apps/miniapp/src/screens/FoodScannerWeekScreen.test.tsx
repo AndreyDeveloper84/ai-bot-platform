@@ -197,3 +197,82 @@ describe("неделя: отказы", () => {
     expect(mockedDays).toHaveBeenCalledTimes(2);
   });
 });
+
+describe("полоса недели (DRF-2954, решение владельца 12.11 п.8)", () => {
+  it("на каждый день — одна кнопка: число на виду, отметка в имени; строки ниже не нажимаются", async () => {
+    renderScreen();
+    await screen.findByText(WEEK_COPY.summary(3));
+
+    const days = screen.getAllByRole("button", { name: /^(Пн|Вт|Ср|Чт|Пт|Сб|Вс), \d\d\.\d\d/ });
+    expect(days).toHaveLength(7);
+    // Видимое «Пн 14» входит в имя кнопки (WCAG 2.5.3).
+    const monday = screen.getByRole("button", { name: /^Пн, 14\.09/ });
+    expect(monday).toHaveTextContent("Пн");
+    expect(monday).toHaveTextContent("14");
+    // Строки цифр — не кнопки: на каждый день ровно одна остановка фокуса.
+    expect(screen.getByText(WEEK_COPY.meals(2, 640)).closest("button")).toBeNull();
+  });
+
+  it("легенда — слова владельца; имя дня называет его отметку", async () => {
+    mockedDays.mockResolvedValue({
+      ...TODAY_WEEK,
+      days: TODAY_WEEK.days.map((d, i) =>
+        i === 0
+          ? { ...d, has_entries: true, meals_count: 2, kcal: 640, uncounted_meals: 0 }
+          : i === 1
+            ? { ...d, has_entries: true, meals_count: 1, kcal: null, uncounted_meals: 1 }
+            : { ...d, has_entries: false, meals_count: 0, kcal: null, uncounted_meals: 0 },
+      ),
+    });
+    renderScreen();
+    await screen.findByText(WEEK_COPY.summary(2));
+
+    expect(screen.getByText(WEEK_COPY.markCounted)).toBeInTheDocument();
+    expect(screen.getByText(WEEK_COPY.markUncounted)).toBeInTheDocument();
+    expect(screen.getByText(WEEK_COPY.markNone)).toBeInTheDocument();
+    expect(WEEK_COPY.markCounted).toBe("Калории посчитаны");
+    expect(WEEK_COPY.markUncounted).toBe("Есть записи, калории не посчитаны");
+    expect(WEEK_COPY.markNone).toBe("Нет записей");
+    // Слов доски «Полные данные» нет: при оценках ИИ это неправда.
+    expect(document.body.textContent).not.toMatch(/Полные данные/);
+
+    const [first, second, third] = screen.getAllByRole("button", { name: /^(Пн|Вт|Ср|Чт|Пт|Сб|Вс), / });
+    expect(first).toHaveAccessibleName(new RegExp(`: ${WEEK_COPY.markCounted}$`));
+    expect(second).toHaveAccessibleName(new RegExp(`: ${WEEK_COPY.markUncounted}$`));
+    expect(third).toHaveAccessibleName(new RegExp(`: ${WEEK_COPY.markNone}$`));
+  });
+
+  it("посчитано с оценками ИИ — имя дня говорит «включая оценки ИИ»", async () => {
+    mockedDays.mockResolvedValue({
+      ...TODAY_WEEK,
+      days: TODAY_WEEK.days.map((d, i) =>
+        i === 0
+          ? { ...d, has_entries: true, meals_count: 2, kcal: 640, uncounted_meals: 0, kcal_ai_included: 1 }
+          : d,
+      ),
+    });
+    renderScreen();
+    const [first] = await screen.findAllByRole("button", { name: /^(Пн|Вт|Ср|Чт|Пт|Сб|Вс), / });
+    expect(first).toHaveAccessibleName(/Калории посчитаны, включая оценки ИИ$/);
+  });
+
+  it("«Без чисел» — легенды про калории нет, имя дня — число приёмов", async () => {
+    mockedDays.mockResolvedValue({ ...TODAY_WEEK, nutrition_numbers_hidden: true });
+    const { container } = renderScreen();
+    await screen.findByText(WEEK_COPY.summary(3));
+
+    // И на картинке: ни галочки «посчитано», ни точки «не посчитано» —
+    // только нейтральная «есть записи».
+    expect(container.querySelector(".diary-mark--counted, .diary-mark--uncounted")).toBeNull();
+    expect(container.querySelectorAll(".diary-mark--entries")).toHaveLength(3);
+
+    expect(screen.queryByText(WEEK_COPY.markCounted)).not.toBeInTheDocument();
+    expect(screen.queryByText(WEEK_COPY.markUncounted)).not.toBeInTheDocument();
+    expect(document.body.textContent).not.toMatch(/Калори/);
+    const named = screen
+      .getAllByRole("button", { name: /^(Пн|Вт|Ср|Чт|Пт|Сб|Вс), / })
+      .map((b) => b.getAttribute("aria-label") ?? "");
+    expect(named.some((n) => n.endsWith(`: ${WEEK_COPY.mealsOnly(2)}`))).toBe(true);
+    expect(named.some((n) => n.endsWith(`: ${WEEK_COPY.markNone}`))).toBe(true);
+  });
+});

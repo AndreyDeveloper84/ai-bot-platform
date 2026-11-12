@@ -115,6 +115,43 @@ describe("источник правды — сервер, а не браузер
   });
 });
 
+describe("после согласия — куда (DRF-2954)", () => {
+  function renderFrom(state: Record<string, unknown>) {
+    return render(
+      <MemoryRouter initialEntries={[{ pathname: "/customer/food-scanner/capture", state }]}>
+        <Routes>
+          <Route path="/customer/food-scanner/capture" element={<FoodScannerCaptureScreen />} />
+          <Route path="/customer/food-scanner/diary" element={<div>ДНЕВНИК</div>} />
+          <Route path="/customer/food-scanner/week" element={<div>НЕДЕЛЯ</div>} />
+        </Routes>
+      </MemoryRouter>,
+    );
+  }
+
+  it("пришёл снимать (вход «Сфотографировать еду» в дневнике) — после согласия остаётся на камере", async () => {
+    const user = userEvent.setup();
+    mockedFetch.mockResolvedValue(legacy(null));
+    mockedGrant.mockResolvedValue("2026-09-08T12:00:00+00:00");
+    renderFrom({ returnTo: "/customer/food-scanner/diary", stayAfterConsent: true });
+
+    await user.click(await screen.findByRole("button", { name: /разреш/i }));
+
+    expect(await screen.findByRole("heading", { name: "Что ешь сейчас?" })).toBeInTheDocument();
+    expect(screen.queryByText("ДНЕВНИК")).not.toBeInTheDocument();
+  });
+
+  it("прислан сюда ради согласия (неделя) — после согласия возвращается туда, как было", async () => {
+    const user = userEvent.setup();
+    mockedFetch.mockResolvedValue(legacy(null));
+    mockedGrant.mockResolvedValue("2026-09-08T12:00:00+00:00");
+    renderFrom({ returnTo: "/customer/food-scanner/week" });
+
+    await user.click(await screen.findByRole("button", { name: /разреш/i }));
+
+    expect(await screen.findByText("НЕДЕЛЯ")).toBeInTheDocument();
+  });
+});
+
 describe("«не смогли спросить» ≠ «согласия нет»", () => {
   it("отказ чтения не показывает гейт и не переспрашивает согласие", async () => {
     mockedFetch.mockRejectedValue(new Error("[502] upstream"));

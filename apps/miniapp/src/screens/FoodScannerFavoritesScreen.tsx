@@ -21,9 +21,18 @@
  *
  * Чего здесь нет: «Добавить в избранное» словами — избранное растёт из
  * записей дневника («В избранное» на записи), не из свободного ввода.
+ *
+ * DRF-2954 — вид по доске «Дневник» (кадр 13): шапка вложенного экрана,
+ * блюда карточками со значком (признака снимка у избранного на проводе нет).
+ * Кнопки «Добавить из дневника» (кадры 13–14) нет — по той же причине.
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
+
+import { DiaryEntryCard } from "../components/diary/DiaryEntryCard";
+import { DiaryState } from "../components/diary/DiaryState";
+import { RecordIcon } from "../components/records/RecordIcons";
+import { RecordButton } from "../components/records/RecordsState";
 
 import { useScreenBack } from "../hooks/useScreenBack";
 import { ApiError } from "../lib/api";
@@ -152,98 +161,81 @@ export function FoodScannerFavoritesScreen() {
   );
 
   return (
-    <div className="food-scanner-screen">
-      <header className="records-screen__header">
-        <button type="button" className="records-screen__back" aria-label="Назад" onClick={onBack}>
-          <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
-            <path
-              d="M12 4l-6 6 6 6"
-              stroke="currentColor"
-              strokeWidth="2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            />
-          </svg>
+    <div className="cr-screen cr-screen--nested diary-screen">
+      <header className="cr-topbar diary-topbar">
+        <button type="button" className="cr-back" aria-label="Назад" onClick={onBack}>
+          <RecordIcon name="back" size={24} />
         </button>
-        <h1 className="records-screen__title">{FAVORITES_COPY.title}</h1>
+        <h1 className="diary-topbar__title">{FAVORITES_COPY.title}</h1>
       </header>
 
-      <main className="food-scanner-screen__main">
-        <div className="food-scanner-diary__notice-slot" aria-live="polite">
+      <main className="diary-main">
+        <div className="diary-notice-slot" aria-live="polite">
           {notice && (
-            <div className="food-scanner-diary__notice">
-              <span>{notice}</span>
+            <div className="diary-notice">
+              <span className="diary-notice__text">{notice}</span>
             </div>
           )}
         </div>
 
         {status.kind === "loading" && (
-          <p className="food-scanner-diary__caption" role="status">
+          <p className="diary-loading" role="status">
             {FAVORITES_COPY.loading}
           </p>
         )}
 
-        {status.kind === "diary_off" && (
-          <div className="food-scanner-diary__unreadable" role="status">
-            <p>{FAVORITES_COPY.diaryOff}</p>
-          </div>
-        )}
+        {status.kind === "diary_off" && <DiaryState icon="info" lead={FAVORITES_COPY.diaryOff} />}
 
         {status.kind === "error" && (
-          <div className="food-scanner-diary__unreadable" role="status">
-            <p>{status.text}</p>
-            <button type="button" className="btn-secondary" onClick={() => void load()}>
+          <DiaryState icon="alert" lead={status.text}>
+            <RecordButton variant="soft" onClick={() => void load()}>
               {FAVORITES_COPY.retry}
-            </button>
-          </div>
+            </RecordButton>
+          </DiaryState>
         )}
 
         {status.kind === "ready" && status.items.length === 0 && (
-          <div className="food-scanner-diary__unreadable" role="status">
-            <p>{FAVORITES_COPY.emptyTitle}</p>
-            <p className="food-scanner-diary__unreadable-hint">{FAVORITES_COPY.emptyHint}</p>
-          </div>
+          <DiaryState icon="star" lead={FAVORITES_COPY.emptyTitle} hint={FAVORITES_COPY.emptyHint} />
         )}
 
         {status.kind === "ready" && status.items.length > 0 && (
-          <ul className="food-scanner-diary__list">
+          <ul className="diary-list">
             {status.items.map((meal) => (
-              <li key={meal.id} className="food-scanner-diary__entry">
-                <div className="food-scanner-diary__entry-main">
-                  <span className="food-scanner-diary__entry-dish">{meal.dish_name}</span>
-                  <span className="food-scanner-diary__entry-time">
-                    {FAVORITES_COPY.portion(meal.portion_g)}
-                  </span>
-                </div>
+              <DiaryEntryCard
+                key={meal.id}
+                entry={null}
+                dish={meal.dish_name}
+                meta={FAVORITES_COPY.portion(meal.portion_g)}
+                actions={
+                  <>
+                    <button
+                      type="button"
+                      className="diary-entry__action"
+                      aria-label={`${FAVORITES_COPY.record}: ${meal.dish_name}`}
+                      disabled={pending}
+                      onClick={() => onRecord(meal)}
+                    >
+                      {FAVORITES_COPY.record}
+                    </button>
+                    <button
+                      type="button"
+                      className="diary-entry__action"
+                      aria-label={`${FAVORITES_COPY.remove}: ${meal.dish_name}`}
+                      disabled={pending}
+                      onClick={() => {
+                        void onRemove(meal);
+                      }}
+                    >
+                      {FAVORITES_COPY.remove}
+                    </button>
+                  </>
+                }
+              >
                 {/* DRF-2371 — снимок мог быть сделан с записи без чисел. */}
                 {!hideNumbers && meal.calories != null && (
-                  <span className="food-scanner-diary__entry-cal">
-                    {FAVORITES_COPY.kcal(meal.calories)}
-                  </span>
+                  <span className="diary-entry__kcal">{FAVORITES_COPY.kcal(meal.calories)}</span>
                 )}
-                <div className="food-scanner-diary__entry-actions">
-                  <button
-                    type="button"
-                    className="food-scanner-diary__entry-action"
-                    aria-label={`${FAVORITES_COPY.record}: ${meal.dish_name}`}
-                    disabled={pending}
-                    onClick={() => onRecord(meal)}
-                  >
-                    {FAVORITES_COPY.record}
-                  </button>
-                  <button
-                    type="button"
-                    className="food-scanner-diary__entry-action"
-                    aria-label={`${FAVORITES_COPY.remove}: ${meal.dish_name}`}
-                    disabled={pending}
-                    onClick={() => {
-                      void onRemove(meal);
-                    }}
-                  >
-                    {FAVORITES_COPY.remove}
-                  </button>
-                </div>
-              </li>
+              </DiaryEntryCard>
             ))}
           </ul>
         )}

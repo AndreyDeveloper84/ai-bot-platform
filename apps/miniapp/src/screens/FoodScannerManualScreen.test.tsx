@@ -13,7 +13,8 @@
  *   - `guardProd` на этой тропе НЕ стоит: `estimateFoodText`/`logFoodText` —
  *     настоящие request (с DRF-2098 и `scanPhoto`/`logMeal` тоже — D26 = v1
  *     покрывает фото; DRF-2106 снял последний stub `fetchHealthFlags`);
- *   - «Добавить приём» в дневнике и кнопка дашборда ведут сюда, а не в съёмку.
+ *   - «Записать текстом» в дневнике (DRF-2954) и кнопка дашборда ведут сюда;
+ *     фото — соседний вход дневника «Сфотографировать еду», он ведёт в съёмку.
  */
 import { configure, fireEvent, getConfig, render, screen } from "@testing-library/react";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
