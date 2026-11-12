@@ -1295,9 +1295,18 @@ describe("CustomerWellnessDashboardScreen — отмена стакана (DRF-1
     return calls;
   }
 
-  async function tapWater() {
+  /**
+   * `queued` — стаканы, ждущие в очереди к моменту тапа. Кладутся ПОСЛЕ
+   * отрисовки: с DRF-2950 экран сам отправляет очередь при открытии, и
+   * положенная до монтирования очередь ушла бы до тапа — узлы «старый и свой
+   * стакан в одной синхронизации» держались бы на совпадении.
+   */
+  async function tapWater(queued?: { ts: number; volume_ml: number; key: string }[]) {
     await renderScreen(true);
     const qa = within(await screen.findByRole("region", { name: "Быстрые действия" }));
+    if (queued) {
+      window.localStorage.setItem("max:wellness_water_offline_queue", JSON.stringify(queued));
+    }
     fireEvent.click(qa.getByRole("button", { name: "Добавить стакан воды" }));
   }
 
@@ -1398,7 +1407,6 @@ describe("CustomerWellnessDashboardScreen — отмена стакана (DRF-1
   });
 
   it("DRF-1919: принят старый стакан из очереди, а свой не ушёл — «зачтён» не сказан", async () => {
-    window.localStorage.setItem("max:wellness_water_offline_queue", JSON.stringify([{ ts: Date.now() - 60_000, volume_ml: 250, key: "water-old" }]));
     let n = 0;
     serveWater(
       () => new Response(null, { status: 204 }),
@@ -1408,7 +1416,7 @@ describe("CustomerWellnessDashboardScreen — отмена стакана (DRF-1
         throw new TypeError("Failed to fetch");
       },
     );
-    await tapWater();
+    await tapWater([{ ts: Date.now() - 60_000, volume_ml: 250, key: "water-old" }]);
 
     expect(await screen.findByText("+1 стакан · 1 стакан ждёт синхронизации")).toBeInTheDocument();
     expect(screen.queryByText(/зачтён/)).not.toBeInTheDocument();
@@ -1416,7 +1424,6 @@ describe("CustomerWellnessDashboardScreen — отмена стакана (DRF-1
   });
 
   it("DRF-1919: отказ старого стакана не затирается принятием нового", async () => {
-    window.localStorage.setItem("max:wellness_water_offline_queue", JSON.stringify([{ ts: Date.now() - 60_000, volume_ml: 250, key: "water-old" }]));
     let n = 0;
     serveWater(
       () => new Response(null, { status: 204 }),
@@ -1426,7 +1433,7 @@ describe("CustomerWellnessDashboardScreen — отмена стакана (DRF-1
         return json({ entry_id: "entry-9", ml: 250, water_ml: 250, today_total_ml: 250, today_norm_ml: 0, water_glasses_eaten: 1 });
       },
     );
-    await tapWater();
+    await tapWater([{ ts: Date.now() - 60_000, volume_ml: 250, key: "water-old" }]);
 
     expect(
       await screen.findByText(
@@ -1475,9 +1482,14 @@ describe("CustomerWellnessDashboardScreen — отмена стакана (DRF-1
       () => new Response(null, { status: 204 }),
       () => json({ error: "consent_required", detail: "no consent" }, 403),
     );
+    // Открыт без сети — очередь при открытии не уходит, и фразу скажет
+    // именно возврат сети (с DRF-2950 очередь уходит и при открытии с сетью).
+    const onLine = vi.spyOn(window.navigator, "onLine", "get").mockReturnValue(false);
     await renderScreen(true);
     await screen.findByRole("region", { name: "Быстрые действия" });
+    expect(screen.queryByText(/из очереди не записаны/)).not.toBeInTheDocument();
 
+    onLine.mockReturnValue(true);
     window.dispatchEvent(new Event("online"));
 
     expect(
@@ -1545,7 +1557,6 @@ describe("CustomerWellnessDashboardScreen — отмена стакана (DRF-1
   });
 
   it("DRF-1919: отказ своего и стакана из очереди — названы раздельно, каждый со своей причиной", async () => {
-    window.localStorage.setItem("max:wellness_water_offline_queue", JSON.stringify([{ ts: Date.now() - 60_000, volume_ml: 250, key: "water-old" }]));
     let n = 0;
     serveWater(
       () => new Response(null, { status: 204 }),
@@ -1555,7 +1566,7 @@ describe("CustomerWellnessDashboardScreen — отмена стакана (DRF-1
         return json({ error: "consent_required", detail: "no consent" }, 403);
       },
     );
-    await tapWater();
+    await tapWater([{ ts: Date.now() - 60_000, volume_ml: 250, key: "water-old" }]);
 
     expect(
       await screen.findByText(

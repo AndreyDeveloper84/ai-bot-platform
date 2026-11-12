@@ -330,94 +330,200 @@ export function CustomerWellnessDashboardScreen() {
   const shelfOn = aylaPicksShelfOn();
 
   // ── data fetch ────────────────────────────────────────────────────────
-  const fetchAll = useCallback(async () => {
-    setToday({ kind: "loading" });
-    setActivity({ kind: "loading" });
-    // Тёмная полка не «грузится» — её просто не спрашивают (DRF-2348).
-    setRecs(shelfOn ? { kind: "loading" } : { kind: "not_requested" });
-    setPlanSlice({ kind: "loading" });
+  //
+  // Загрузок две (DRF-2950, решение владельца 12.11, п.11):
+  //  * полная (`fetchAll`) — открытие экрана, «Обновить», отмена стакана:
+  //    скелеты и все ручки, как было всегда;
+  //  * тихая (`refreshQuietly`) — после принятого стакана: только то, что
+  //    стакан меняет (сводка дня и план), без скелетов. Раньше после стакана
+  //    не перечитывалось ничего, и «Вода» показывала старое число. Отказ
+  //    тихого чтения показанное НЕ роняет: стакан принят, и не суметь его
+  //    перечитать — не повод показать ошибку вместо чисел.
+  //
+  // Гонки. Сводку и план читают обе загрузки, ответы приходят в любом
+  // порядке. Ответ применяется, только если он НОВЕЕ последнего применённого
+  // для этого среза (`applied`); отказ поколение не продвигает — иначе
+  // упавшее свежее чтение закрыло бы дорогу верному, но опоздавшему ответу.
+  // Срезы, которые читает только полная загрузка (запись, тема, полка),
+  // принимают ответ лишь последней полной: два «Обновить» подряд не дадут
+  // старой записи затереть новую.
+  //
+  // Загрузчик не читает состояние срезов — только ref и функциональный
+  // setState: иначе `fetchAll` менялся бы с каждым ответом, и эффект
+  // `[fetchAll]` ниже перезапускал бы загрузку по кругу.
+  const dayGen = useRef(0);
+  const applied = useRef({ today: 0, plan: 0 });
+  const fullGen = useRef(0);
 
-    // Per-slice isolation — Promise.allSettled so one failure doesn't
-    // blank the other blocks. (Tau §5 State 5 partial render.)
-    // `getCatalogBrowse` зовётся ТОЛЬКО при зажжённой полке: решение
-    // владельца гасит полку, а обращение уходило всё равно — при каждом
-    // открытии экрана, хотя показывать нечего (DRF-2348, §172 ответ 40).
-    // Ветка `null` держит форму `allSettled` и порядок распаковки: так
-    // включение полки возвращает запрос одной строкой в `aylaPicksShelfOn`,
-    // а не раскопками.
-    const [todayRes, activityRes, recsRes, planRes, topicRes, savedPlanRes] = await Promise.allSettled([
-      getWellnessToday(),
-      getRecentActivity(),
-      shelfOn ? getCatalogBrowse() : Promise.resolve(null),
-      getPlanLite(),
-      getLastTopicAndChatLink(),
+  const load = useCallback(
+    async (mode: "full" | "quiet") => {
+      const quiet = mode === "quiet";
+      const gen = ++dayGen.current;
+      const full = quiet ? 0 : ++fullGen.current;
+      if (!quiet) {
+        setToday({ kind: "loading" });
+        setActivity({ kind: "loading" });
+        // Тёмная полка не «грузится» — её просто не спрашивают (DRF-2348).
+        setRecs(shelfOn ? { kind: "loading" } : { kind: "not_requested" });
+        setPlanSlice({ kind: "loading" });
+      }
+
+      // Per-slice isolation — Promise.allSettled so one failure doesn't
+      // blank the other blocks. (Tau §5 State 5 partial render.)
+      // `getCatalogBrowse` зовётся ТОЛЬКО при зажжённой полке: решение
+      // владельца гасит полку, а обращение уходило всё равно — при каждом
+      // открытии экрана, хотя показывать нечего (DRF-2348, §172 ответ 40).
+      // Ветка `null` держит форму `allSettled` и порядок распаковки: так
+      // включение полки возвращает запрос одной строкой в `aylaPicksShelfOn`,
+      // а не раскопками.
+      const todayP = getWellnessToday();
+      const restP = quiet
+        ? null
+        : Promise.allSettled([
+            getRecentActivity(),
+            shelfOn ? getCatalogBrowse() : Promise.resolve(null),
+          ]);
+      const planP = getPlanLite();
+      const topicP = quiet ? null : Promise.allSettled([getLastTopicAndChatLink()]);
       // DRF-2876 — есть ли сохранённый план нового механизма (`null` — нет
       // или механизм выключен на сервере).
-      getSavedPlan(),
-    ]);
+      const savedP = getSavedPlan();
+      const [[todayRes, planRes, savedPlanRes], rest, topic] = await Promise.all([
+        Promise.allSettled([todayP, planP, savedP]),
+        restP,
+        topicP,
+      ]);
 
-    if (todayRes.status === "fulfilled") {
-      setToday({ kind: "ok", data: todayRes.value });
-    } else {
-      setToday({ kind: "error", reason: loadErrorReason(todayRes.reason) });
-    }
+      // ── сводка дня ──
+      if (todayRes.status === "fulfilled") {
+        if (gen > applied.current.today) {
+          applied.current.today = gen;
+          setToday({ kind: "ok", data: todayRes.value });
+        }
+      } else if (quiet) {
+        const reason = loadErrorReason(todayRes.reason);
+        setToday((prev) => (prev.kind === "loading" ? { kind: "error", reason } : prev));
+      } else if (gen > applied.current.today) {
+        setToday({ kind: "error", reason: loadErrorReason(todayRes.reason) });
+      }
 
-    if (activityRes.status === "fulfilled") {
-      setActivity({ kind: "ok", data: activityRes.value });
-    } else {
-      setActivity({ kind: "error", reason: loadErrorReason(activityRes.reason) });
-    }
+      // ── план ──
+      // Выключен на сервере (`plan_lite_disabled`) или не ответил —
+      // «недоступен», без ошибки на экране: Главная от плана не зависит.
+      //
+      // DRF-2876 — сохранённый новый план важнее прежнего: с ним счётчики
+      // прежнего плана не показываются. Не удалось узнать, есть ли он, — о
+      // плане молчим («недоступен»): показать счётчики прежнего плана рядом с
+      // новым в «Моём плане» было бы противоречием.
+      const plan: PlanSlice | null =
+        savedPlanRes.status === "rejected"
+          ? null
+          : savedPlanRes.value
+            ? { kind: "saved" }
+            : planRes.status === "fulfilled"
+              ? { kind: "ok", data: planRes.value }
+              : null;
+      if (plan) {
+        if (gen > applied.current.plan) {
+          applied.current.plan = gen;
+          setPlanSlice(plan);
+        }
+      } else if (quiet) {
+        setPlanSlice((prev) => (prev.kind === "loading" ? { kind: "unavailable" } : prev));
+      } else if (gen > applied.current.plan) {
+        setPlanSlice({ kind: "unavailable" });
+      }
 
-    if (!shelfOn) {
-      // Вопроса не было — и в срезе стоит именно это, а не пустой ответ.
-      setRecs({ kind: "not_requested" });
-    } else if (recsRes.status === "rejected") {
-      // Recommendations errors hide the whole block silently per spec.
-      setRecs({ kind: "error", reason: loadErrorReason(recsRes.reason) });
-    } else {
-      // Всё остальное при зажжённой полке — ответ. Ветки «а если `null`»
-      // здесь намеренно нет: `null` кладёт только выключенная полка, её
-      // забрал первый случай. Отдельное условие на `null` выглядело бы
-      // аккуратнее, а на деле оставляло бы срез в «грузится» навсегда,
-      // если `getCatalogBrowse` однажды станет возвращать `null` — то
-      // есть меняло бы тип ошибки на самую тихую (найдено ревью).
-      setRecs({ kind: "ok", data: recsRes.value as CatalogBrowseData });
-    }
+      // ── только полная загрузка ──
+      if (!rest || !topic || full !== fullGen.current) return;
+      const [activityRes, recsRes] = rest;
+      if (activityRes.status === "fulfilled") {
+        setActivity({ kind: "ok", data: activityRes.value });
+      } else {
+        setActivity({ kind: "error", reason: loadErrorReason(activityRes.reason) });
+      }
 
-    // План: выключен на сервере (`plan_lite_disabled`) или не ответил —
-    // «недоступен», без ошибки на экране: Главная от плана не зависит.
-    //
-    // DRF-2876 — сохранённый новый план важнее прежнего: с ним счётчики
-    // прежнего плана не показываются. Не удалось узнать, есть ли он, — о
-    // плане молчим («недоступен»): показать счётчики прежнего плана рядом с
-    // новым в «Моём плане» было бы противоречием.
-    if (savedPlanRes.status === "rejected") {
-      setPlanSlice({ kind: "unavailable" });
-    } else if (savedPlanRes.value) {
-      setPlanSlice({ kind: "saved" });
-    } else {
-      setPlanSlice(
-        planRes.status === "fulfilled" ? { kind: "ok", data: planRes.value } : { kind: "unavailable" },
-      );
+      if (!shelfOn) {
+        // Вопроса не было — и в срезе стоит именно это, а не пустой ответ.
+        setRecs({ kind: "not_requested" });
+      } else if (recsRes.status === "rejected") {
+        // Recommendations errors hide the whole block silently per spec.
+        setRecs({ kind: "error", reason: loadErrorReason(recsRes.reason) });
+      } else {
+        // Всё остальное при зажжённой полке — ответ. Ветки «а если `null`»
+        // здесь намеренно нет: `null` кладёт только выключенная полка, её
+        // забрал первый случай. Отдельное условие на `null` выглядело бы
+        // аккуратнее, а на деле оставляло бы срез в «грузится» навсегда,
+        // если `getCatalogBrowse` однажды станет возвращать `null` — то
+        // есть меняло бы тип ошибки на самую тихую (найдено ревью).
+        setRecs({ kind: "ok", data: recsRes.value as CatalogBrowseData });
+      }
+
+      const [topicRes] = topic;
+      setLastTopic(topicRes.status === "fulfilled" ? topicRes.value.topic : null);
+      setChatLink(topicRes.status === "fulfilled" ? topicRes.value.chatLink : null);
+    },
+    [shelfOn],
+  );
+
+  const fetchAll = useCallback(() => load("full"), [load]);
+
+  // Тихие чтения склеиваются: одно в пути и, если за это время пришёл ещё
+  // повод, ровно одно после него. Пять быстрых стаканов — два чтения, а не
+  // пять: каждое — это три запроса к Ayla.
+  const quietBusy = useRef(false);
+  const quietAgain = useRef(false);
+  const refreshQuietly = useCallback(async () => {
+    if (quietBusy.current) {
+      quietAgain.current = true;
+      return;
     }
-    setLastTopic(topicRes.status === "fulfilled" ? topicRes.value.topic : null);
-    setChatLink(topicRes.status === "fulfilled" ? topicRes.value.chatLink : null);
-  }, [shelfOn]);
+    quietBusy.current = true;
+    try {
+      do {
+        quietAgain.current = false;
+        await load("quiet");
+      } while (quietAgain.current);
+    } finally {
+      quietBusy.current = false;
+    }
+  }, [load]);
 
   useEffect(() => {
     void fetchAll();
   }, [fetchAll]);
 
   // ── online / offline transitions ─────────────────────────────────────
+  //
+  // Очередь стаканов уходит в двух случаях: сеть вернулась (Tau §11.8) и
+  // экран открыт с сетью, а в очереди что-то лежит (DRF-2950, решение
+  // владельца 12.11, п.11): сеть могла вернуться, пока приложение было
+  // закрыто, и события `online` тогда не будет — стаканы ждали бы
+  // следующего нажатия. Двойной отправки нет: проход очереди один на всех
+  // (`flushInFlight`), ключ идемпотентности у стакана постоянный.
+  // Отказы стаканов из очереди скажет подписка `onWaterQueueRefused`
+  // (DRF-1919). Принятые стаканы меняют числа — их перечитываем тихо.
+  const flushQueue = useCallback(() => {
+    void flushWaterQueue()
+      .then((accepted) => {
+        setWaterQueueLen(readWaterQueue().length);
+        if (accepted > 0) void refreshQuietly();
+      })
+      .catch(() => {
+        // Очередь цела (стакан уходит из неё только принятым) — уйдёт в
+        // следующий раз; индикатор продолжает говорить «ждёт».
+      });
+  }, [refreshQuietly]);
+
+  useEffect(() => {
+    if (isOnline() && readWaterQueue().length > 0) flushQueue();
+  }, [flushQueue]);
+
   useEffect(() => {
     if (typeof window === "undefined") return;
     const onOnline = () => {
       setOnline(true);
-      // Auto-flush water queue on reconnect (Tau §11.8).
-      // Отказы стаканов из очереди скажет подписка `onWaterQueueRefused` (DRF-1919).
-      void flushWaterQueue().then(() => {
-        setWaterQueueLen(readWaterQueue().length);
-      });
+      flushQueue();
     };
     const onOffline = () => setOnline(false);
     window.addEventListener("online", onOnline);
@@ -426,7 +532,7 @@ export function CustomerWellnessDashboardScreen() {
       window.removeEventListener("online", onOnline);
       window.removeEventListener("offline", onOffline);
     };
-  }, []);
+  }, [flushQueue]);
 
   // Auto-clear transient toasts after 3s — 8s while «Отменить» is on offer:
   // за три секунды кнопку не успеть нажать.
@@ -495,8 +601,14 @@ export function CustomerWellnessDashboardScreen() {
       const note = queueRefusalNote.current;
       queueRefusalNote.current = null;
       setWaterToast(joinSentences(note ? [ownText, note] : [ownText]));
+      // DRF-2950 (п.11) — числа воды и плана после стакана. «Отказан» тоже:
+      // в том же проходе могли уйти стаканы очереди. «Остался в очереди» —
+      // нет: сеть не ответила, и чтение не ответит тоже.
+      if (outcome.kind === "accepted" || outcome.kind === "rejected") {
+        void refreshQuietly();
+      }
     });
-  }, [online]);
+  }, [online, refreshQuietly]);
 
   const onUndoWater = useCallback(() => {
     // Фраза об отказах из очереди уже показана — к следующему тосту не приклеивать.
