@@ -486,9 +486,11 @@ describe("кадр 10 — отмена не удалась", () => {
     await user.click(await cancelButton());
     await user.click(confirmYes());
 
-    expect(await screen.findByRole("heading", { name: DETAIL_COPY.goneTitle })).toBeInTheDocument();
+    const heading = await screen.findByRole("heading", { name: DETAIL_COPY.goneTitle });
     expect(screen.queryByText(DETAIL_COPY.failedTitle)).not.toBeInTheDocument();
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    // Нажатая кнопка ушла вместе с диалогом — фокус на заголовке, а не в никуда.
+    expect(heading).toHaveFocus();
   });
 
   it("404 на отмене, а запись читается — это отказ, не «записи нет»", async () => {

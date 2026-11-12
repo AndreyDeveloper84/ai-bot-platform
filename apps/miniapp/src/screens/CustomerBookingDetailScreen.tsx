@@ -206,6 +206,10 @@ export function CustomerBookingDetailScreen() {
   const cancelTrigger = useRef<HTMLDivElement | null>(null);
   /** Номер чтения до нажатия «отменить»: исход — только из чтений новее. */
   const cancelStartedAt = useRef(0);
+  // «Записи больше нет» после действия человека (404 на отмене): нажатая
+  // кнопка размонтирована, фокус уводится на заголовок состояния. При
+  // первом показе экрана фокус ещё ничей — там состояние тихое.
+  const goneAfterAction = useRef(false);
   const alive = useRef(true);
   useEffect(() => {
     alive.current = true;
@@ -310,6 +314,7 @@ export function CustomerBookingDetailScreen() {
         // Записи нет ни для отмены, ни для чтения: это не «не удалось
         // отменить» с повтором, а «Этой записи больше нет» (ревью #2458).
         setView({ kind: "card" });
+        goneAfterAction.current = true;
         setLoad({ kind: "error", err: rereadErr });
         return;
       }
@@ -393,7 +398,7 @@ export function CustomerBookingDetailScreen() {
             icon="gone"
             title={DETAIL_COPY.goneTitle}
             body={<p>{DETAIL_COPY.goneBody}</p>}
-            quiet
+            quiet={!goneAfterAction.current}
             actions={
               <RecordButton variant="primary" onClick={() => navigate("/customer/records")}>
                 {DETAIL_COPY.toRecords}
