@@ -58,6 +58,15 @@ STRANGER = "2799200"
 
 
 @pytest.fixture(autouse=True)
+def _fresh_quota():
+    """Квота вопросов — 10 в минуту на человека в общем кэше, а узлов одного
+    и того же человека в файле больше: без сброса поздние получали бы 429."""
+    from django.core.cache import cache
+
+    cache.clear()
+
+
+@pytest.fixture(autouse=True)
 def _redis(monkeypatch):
     from apps.orchestrator.memory.tests.test_short_term import _FakeRedis
 
@@ -223,6 +232,107 @@ def test_t5_a_repeated_request_is_not_a_second_turn(client: Client, tenant, wire
         ).count()
         == 1
     )
+    # DRF-2953: повтор узнаёт исход первого хода — ответ уже лежит в истории.
+    assert second.json()["details"] == {"turn": "done"}
+
+
+def test_t5b_a_repeat_of_a_failed_turn_says_so(client: Client, tenant, wire, monkeypatch) -> None:
+    """DRF-2953. Ключ остаётся занятым и после 502, поэтому повтор обязан
+    отличать «ход упал — спроси заново» от «ход прошёл — дочитай историю»."""
+    _person_shell(tenant)
+    request_id = str(uuid.uuid4())
+
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("turn exploded")
+
+    with monkeypatch.context() as patched:
+        patched.setattr(max_handler, "_handle_global_max_event_inner", boom)
+        first = _ask(client, "привет", request_id=request_id)
+    second = _ask(client, "привет", request_id=request_id)
+
+    assert first.status_code == 502
+    assert first.json()["error"] == "turn_failed"
+    assert second.status_code == 409
+    assert second.json()["details"] == {"turn": "failed"}
+
+
+def _claim_without_mark(request_id: uuid.UUID, *, age_seconds: int) -> None:
+    """Занятый ключ хода без отметки исхода — ход идёт или умер, не отметившись."""
+    from apps.miniapp_api.views_customer_assistant import TURN_KEY_TTL_SECONDS, _turn_key
+    from apps.tools.models import IdempotencyKey
+
+    IdempotencyKey.objects.create(
+        key=_turn_key(PERSON, request_id.hex),
+        expires_at=timezone.now() + timedelta(seconds=TURN_KEY_TTL_SECONDS - age_seconds),
+        payload={},
+    )
+
+
+def test_t5c_a_repeat_while_the_first_turn_is_running_says_so(client: Client, tenant, wire) -> None:
+    """DRF-2953. Пока ход идёт, повтор не утверждает, что ответ готов."""
+    _person_shell(tenant)
+    request_id = uuid.uuid4()
+    _claim_without_mark(request_id, age_seconds=5)
+
+    response = _ask(client, "привет", request_id=str(request_id))
+
+    assert response.status_code == 409
+    assert response.json()["details"] == {"turn": "running"}
+    assert not Message.all_tenants.filter(
+        conversation__in=_global_threads(), role=Message.Role.USER
+    ).exists()
+
+
+def test_t5d_a_turn_that_never_reported_is_failed_after_the_ceiling(
+    client: Client, tenant, wire
+) -> None:
+    """DRF-2953. Процесс убит посреди хода (таймаут, память, выкладка) — отметки
+    нет и не будет. Вечное ``running`` запирало бы вопрос на сутки: за потолком
+    хода повтор слышит ``failed`` и вправе спросить заново новым ключом."""
+    from apps.miniapp_api.views_customer_assistant import TURN_CEILING_SECONDS
+
+    _person_shell(tenant)
+    request_id = uuid.uuid4()
+    _claim_without_mark(request_id, age_seconds=TURN_CEILING_SECONDS + 5)
+
+    response = _ask(client, "привет", request_id=str(request_id))
+
+    assert response.status_code == 409
+    assert response.json()["details"] == {"turn": "failed"}
+
+
+def test_t5e_a_killed_turn_still_marks_failed(client: Client, tenant, wire, monkeypatch) -> None:
+    """DRF-2953. Таймаут сервера приложений снимает ход через ``SystemExit`` —
+    это не ``Exception``, а отметка нужна и тогда."""
+    from apps.miniapp_api.views_customer_assistant import _turn_key
+    from apps.tools.models import IdempotencyKey
+
+    _person_shell(tenant)
+    request_id = uuid.uuid4()
+
+    def killed(*_args, **_kwargs):
+        raise SystemExit(1)
+
+    monkeypatch.setattr(max_handler, "_handle_global_max_event_inner", killed)
+    with pytest.raises(SystemExit):
+        _ask(client, "привет", request_id=str(request_id))
+
+    row = IdempotencyKey.objects.get(key=_turn_key(PERSON, request_id.hex))
+    assert row.payload == {"turn": "failed"}
+
+
+def test_t5f_the_turn_key_belongs_to_the_person(client: Client, tenant, wire) -> None:
+    """DRF-2953. 409 теперь несёт исход хода, поэтому ключ привязан к человеку:
+    чужой ``request_id`` — не повтор, а свой собственный вопрос."""
+    _person_shell(tenant)
+    _person_shell(tenant, STRANGER)
+    request_id = str(uuid.uuid4())
+
+    mine = _ask(client, "привет", request_id=request_id)
+    theirs = _ask(client, "привет", request_id=request_id, as_user=STRANGER)
+
+    assert mine.status_code == 200
+    assert theirs.status_code == 200
 
 
 def test_t6_over_the_quota_is_refused_before_the_turn(

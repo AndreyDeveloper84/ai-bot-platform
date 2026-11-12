@@ -58,3 +58,21 @@ export function formatTopicWhen(iso: string, now: Date = new Date()): string {
   const time = d.toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" });
   return `${day}, ${time}`;
 }
+
+/**
+ * Время реплики в ленте разговора (DRF-2953): сегодняшняя — «11:30», прежняя —
+ * как у темы, «20 сент., 11:30». Это МОМЕНТ хода, а не время визита: читается
+ * в поясе устройства, как и «Последняя тема» той же нити. Пустая строка —
+ * времени нет (реплика ещё не подтверждена сервером) или дата нечитаема.
+ */
+export function formatTurnWhen(iso: string, now: Date = new Date()): string {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  const sameDay =
+    d.getFullYear() === now.getFullYear() &&
+    d.getMonth() === now.getMonth() &&
+    d.getDate() === now.getDate();
+  if (!sameDay) return formatTopicWhen(iso, now);
+  return d.toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" });
+}

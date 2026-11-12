@@ -13073,3 +13073,363 @@ button.ss-card {
   flex-direction: column;
   gap: var(--s-2);
 }
+
+/* ===========================================================================
+   Чат клиента с Ayla — макет «Чат с Ayla.png» (DRF-2953).
+
+   Свой блок `cchat-*`, а не правка `.ayla-*`: те классы носят мастер, салон
+   и день салона, и клиентский вид не должен до них дотянуться. Нижней панели
+   у экрана нет, поэтому поле ввода стоит у самого низа — над безопасной зоной.
+   =========================================================================== */
+
+.cchat-screen {
+  display: flex;
+  flex-direction: column;
+  min-height: 100dvh;
+}
+
+/* Шапка остаётся на месте: на длинном разговоре стрелка и имя не уезжают. */
+.cchat-topbar {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--c-bg);
+}
+
+.cchat-title {
+  flex: 1;
+  min-width: 0;
+  padding: 0 var(--s-2);
+}
+
+.cchat-title__name {
+  display: flex;
+  align-items: center;
+  gap: var(--s-1);
+  margin: 0;
+  font-size: var(--font-size-500);
+  font-weight: 700;
+  line-height: 1.2;
+  color: var(--c-text-primary);
+}
+
+.cchat-title__mark {
+  display: inline-flex;
+  color: var(--c-accent);
+}
+
+.cchat-title__sub {
+  margin: 0;
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+
+.cchat-main {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  padding: 0 var(--s-4);
+}
+
+.cchat-list {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: var(--s-3);
+  padding: var(--s-2) 0 var(--s-3);
+}
+
+/* Фокус сюда ставит сам экран, когда нажатая кнопка исчезает; рамка вокруг
+   всей ленты ничего бы не сообщала. */
+.cchat-list:focus {
+  outline: none;
+}
+
+/* Метка конца ленты: прокрутка ставит её к низу вьюпорта, а там поле ввода —
+   поле прокрутки поднимает последнюю реплику над ним. */
+.cchat-list__end {
+  scroll-margin-bottom: calc(var(--ayla-compose-height) + var(--safe-bottom));
+}
+
+.cchat-note {
+  margin: 0;
+  padding: var(--s-3) 0;
+  font-size: var(--font-size-200);
+  color: var(--c-text-secondary);
+}
+
+.cchat-item {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+
+.cchat-row {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s-2);
+}
+
+.cchat-row--mine {
+  justify-content: flex-end;
+}
+
+/* Знак Ayla у её реплик. Фото на макете — файла изображения в приложении нет. */
+.cchat-mark {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  color: var(--c-accent);
+  background: var(--c-accent-subtle);
+}
+
+/* Вторая и следующие реплики подряд: место знака держится, сам знак — нет. */
+.cchat-mark--blank {
+  background: transparent;
+}
+
+.cchat-turn {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+  min-width: 0;
+  max-width: 86%;
+}
+
+.cchat-row--mine .cchat-turn {
+  align-items: flex-end;
+}
+
+.cchat-bubble {
+  padding: var(--s-3);
+  border-radius: var(--r-lg);
+  font-size: var(--font-size-300);
+  line-height: var(--leading-base);
+  overflow-wrap: anywhere;
+}
+
+.cchat-bubble p {
+  margin: 0;
+  white-space: pre-wrap;
+}
+
+.cchat-bubble p + p {
+  margin-top: var(--s-2);
+}
+
+.cchat-bubble--ayla {
+  color: var(--c-text-primary);
+  background: var(--c-surface-1);
+  border: 1px solid var(--c-divider);
+  border-top-left-radius: 6px;
+}
+
+/* Реплика человека — отметка «моё», а не кнопка: отклика на нажатие ей не
+   положено (primaryPress.build.test.ts, NOT_BUTTONS). */
+.cchat-bubble--mine {
+  color: var(--c-text-on-accent);
+  background: var(--c-accent);
+  border-bottom-right-radius: 6px;
+}
+
+.cchat-time {
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+
+/* Быстрые ответы — под репликой, в её колонке (кадры 3, 9, 11). */
+.cchat-replies {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  margin: 0;
+  padding: 0 0 0 calc(32px + var(--s-2));
+  list-style: none;
+  /* Подпись кнопки — слова бота любой длины: длинное слово переносится, а
+     не раздвигает экран. */
+  overflow-wrap: anywhere;
+}
+
+.cchat-replies li {
+  min-width: 0;
+}
+
+.cchat-typing {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-2);
+  margin: 0;
+  font-size: var(--font-size-200);
+  color: var(--c-text-secondary);
+}
+
+.cchat-dots {
+  display: inline-flex;
+  gap: 4px;
+}
+
+.cchat-dots i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  animation: cchat-dot 1.2s ease-in-out infinite;
+}
+
+.cchat-dots i:nth-child(2) {
+  animation-delay: 0.15s;
+}
+
+.cchat-dots i:nth-child(3) {
+  animation-delay: 0.3s;
+}
+
+@keyframes cchat-dot {
+  0%,
+  80%,
+  100% {
+    opacity: 0.35;
+    transform: translateY(0);
+  }
+  40% {
+    opacity: 1;
+    transform: translateY(-2px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cchat-dots i {
+    animation: none;
+  }
+}
+
+/* «Нет сети» и «не получилось» (кадры 14, 15) — карточкой над полем ввода:
+   на макете состояние занимает экран, здесь разговор остаётся виден. */
+.cchat-notice {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--s-2);
+  margin: 0 0 var(--s-3);
+  padding: var(--s-4);
+  text-align: center;
+  background: var(--c-surface-1);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-lg);
+}
+
+.cchat-notice__badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  color: var(--c-accent);
+  background: var(--c-accent-subtle);
+}
+
+.cchat-notice__badge--danger {
+  color: var(--c-danger);
+  background: color-mix(in srgb, var(--c-danger) 12%, var(--c-surface-1));
+}
+
+.cchat-notice__title {
+  margin: 0;
+  font-size: var(--font-size-300);
+  font-weight: 700;
+  color: var(--c-text-primary);
+}
+
+.cchat-notice__text {
+  margin: 0;
+  font-size: var(--font-size-200);
+  color: var(--c-text-secondary);
+}
+
+.cchat-notice__actions {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  width: 100%;
+  margin-top: var(--s-2);
+}
+
+.cchat-compose {
+  position: sticky;
+  bottom: 0;
+  margin-top: auto;
+  padding: var(--s-2) 0 calc(var(--s-2) + var(--safe-bottom));
+  background: var(--c-bg);
+}
+
+.cchat-compose__row {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--s-2);
+}
+
+.cchat-compose__input {
+  flex: 1;
+  min-height: 48px;
+  max-height: 140px;
+  padding: var(--s-3) var(--s-4);
+  font: inherit;
+  /* Не меньше 16px: иначе iOS увеличивает страницу при фокусе в поле. */
+  font-size: var(--font-size-300);
+  line-height: var(--leading-base);
+  color: var(--c-text-primary);
+  background: var(--c-surface-1);
+  border: 1px solid var(--c-divider);
+  border-radius: 24px;
+  resize: none;
+}
+
+.cchat-compose__input:focus {
+  border-color: var(--c-accent);
+  outline: 2px solid var(--c-accent-subtle);
+  outline-offset: 1px;
+}
+
+/* Круг на месте микрофона макета: голоса в Mini App нет (DRF-2427), поэтому
+   здесь отправка — действие, которое экран действительно умеет. */
+.cchat-compose__send {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 48px;
+  height: 48px;
+  color: var(--c-text-on-accent);
+  background: var(--c-accent);
+  border: 0;
+  border-radius: 50%;
+  cursor: pointer;
+}
+
+.cchat-compose__send:active {
+  background: var(--c-accent-pressed);
+}
+
+.cchat-compose__send:disabled {
+  color: var(--c-text-secondary);
+  background: var(--c-surface-2);
+  cursor: not-allowed;
+}
+
+.cchat-compose__send:focus-visible {
+  outline: 2px solid var(--c-accent);
+  outline-offset: 2px;
+}
+
+.cchat-compose__counter {
+  margin: var(--s-1) 0 0;
+  font-size: var(--font-size-100);
+  color: var(--c-danger);
+  text-align: end;
+}
+

@@ -45,6 +45,7 @@ from __future__ import annotations
 import json
 import logging
 import uuid
+from datetime import timedelta
 from typing import Any
 
 from django.db.models import F, Q
@@ -69,6 +70,73 @@ ASK_PER_MINUTE = 10
 HISTORY_LIMIT = 50
 
 _SURFACE = "miniapp"
+
+
+#: Исход хода под ключом запроса — то, что узнаёт повтор с тем же ``request_id``.
+TURN_RUNNING = "running"
+TURN_DONE = "done"
+TURN_FAILED = "failed"
+
+#: Сколько живёт ключ запроса.
+TURN_KEY_TTL_SECONDS = 86_400
+
+#: Потолок хода. Ключ без отметки старше потолка — ход, который отметки уже не
+#: поставит: процесс убит таймаутом сервера, памятью или выкладкой. Запас над
+#: таймаутами прокси и сервера приложений (30 с) — с избытком.
+TURN_CEILING_SECONDS = 180
+
+
+def _turn_key(person_id: str, request_key: str) -> str:
+    """Ключ хода. Человек — часть ключа: по чужому UUID исход чужого хода не узнать."""
+    return f"webhook:max_global:{_SURFACE}:{person_id}:{request_key}"
+
+
+def _mark_turn(claim: Any, outcome: str) -> None:
+    """Записать исход хода в строку ключа: текста там нет, только отметка.
+
+    Нужна повтору (DRF-2953): экран, не получивший ответа, шлёт тот же
+    ``request_id`` и по отметке узнаёт, дочитывать ли ответ из истории
+    (``done``), спрашивать ли заново (``failed``) или подождать (``running``).
+    Сбой записи отметки ход не роняет — без неё повтор сначала увидит
+    ``running``, а за потолком хода — ``failed``.
+    """
+    from apps.tools.models import IdempotencyKey
+
+    try:
+        IdempotencyKey.objects.filter(pk=claim.pk).update(payload={"turn": outcome})
+    except Exception:
+        logger.exception("miniapp_api.assistant.turn_mark_failed outcome=%s", outcome)
+
+
+def _turn_outcome(row: Any) -> str:
+    """Исход хода по строке его ключа.
+
+    Без отметки ход либо идёт, либо умер, не успев её поставить. Вечное
+    ``running`` запирало бы вопрос на сутки: повтор тем же ключом не пройдёт
+    никогда, а новый ключ экран берёт только по ``failed``. Поэтому строка
+    без отметки старше потолка хода — ``failed``. Возраст считается от
+    ``expires_at``: при сбросе истёкшего ключа ``created_at`` остаётся старым.
+    """
+    payload = row.payload if isinstance(row.payload, dict) else {}
+    outcome = payload.get("turn")
+    if outcome in (TURN_DONE, TURN_FAILED):
+        return str(outcome)
+    claimed_at = row.expires_at - timedelta(seconds=TURN_KEY_TTL_SECONDS)
+    if timezone.now() - claimed_at > timedelta(seconds=TURN_CEILING_SECONDS):
+        return TURN_FAILED
+    return TURN_RUNNING
+
+
+def _duplicate(row: Any) -> JsonResponse:
+    """409 повтора: тот же слаг и те же слова, плюс исход первого хода."""
+    return JsonResponse(
+        {
+            "error": "duplicate_request",
+            "detail": "Этот вопрос уже обработан.",
+            "details": {"turn": _turn_outcome(row)},
+        },
+        status=409,
+    )
 
 
 def _person_max_id(bot_user: BotUser) -> str | None:
@@ -200,15 +268,27 @@ def customer_assistant_ask(request: HttpRequest) -> HttpResponse:
         raw={"source": _SURFACE},
     )
     trace_id = uuid.uuid4()
+    turn_key = _turn_key(person_id, request_key)
     try:
         with (
             capturing(chat_id=chat_id, user_id=person_id) as delivery,
-            with_idempotency(f"webhook:max_global:{_SURFACE}:{request_key}", ttl_seconds=86_400),
+            with_idempotency(turn_key, ttl_seconds=TURN_KEY_TTL_SECONDS) as claim,
             global_surface_scope(),
         ):
-            _handle_global_max_event_inner(event, trace_id)
-    except AlreadyClaimed:
-        return _error("duplicate_request", "Этот вопрос уже обработан.", 409)
+            try:
+                _handle_global_max_event_inner(event, trace_id)
+            except BaseException:
+                # ``BaseException``: таймаут сервера приложений снимает ход
+                # через ``SystemExit`` — отметка нужна и тогда.
+                _mark_turn(claim, TURN_FAILED)
+                raise
+            _mark_turn(claim, TURN_DONE)
+    except AlreadyClaimed as claimed:
+        if claimed.row.key != turn_key:
+            # Занят не наш ключ, а чей-то внутри хода: это сбой хода, а не повтор.
+            logger.exception("miniapp_api.assistant.ask_failed trace=%s", trace_id)
+            return _error("turn_failed", "Не получилось ответить. Попробуй ещё раз.", 502)
+        return _duplicate(claimed.row)
     except Exception:
         logger.exception("miniapp_api.assistant.ask_failed trace=%s", trace_id)
         return _error("turn_failed", "Не получилось ответить. Попробуй ещё раз.", 502)
