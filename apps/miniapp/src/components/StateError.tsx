@@ -38,6 +38,9 @@ type Copy = { title?: string; body: string };
 export function stateErrorCopy(err: unknown): Copy & { noResponse: boolean } {
   // `noResponse` — ответа от сервера не было вовсе: тот же признак, по
   // которому `pickCopy` выбирает фразу про интернет.
+  // DRF-2446: `detail` уходит в журнал и отсюда тоже, иначе экран со своим
+  // видом ошибки (GoalSelectScreen) теряет его молча.
+  logDetail(err);
   return { ...pickCopy(err), noResponse: !(err instanceof ApiError) };
 }
 
