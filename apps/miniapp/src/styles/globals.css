@@ -196,8 +196,8 @@ a {
    отклик на нажатие, как второстепенная». Род отклика — тот же, что у
    `.btn-secondary:active` (смена фона при нажатии); значение — то, каким
    в словаре уже отзываются все остальные главные кнопки
-   (`.cta-bar__button`, `.ayla-btn--primary`, `.wellness-dash__cta`,
-   `.m6-btn-primary`, `.salon-today__cta`): `--c-accent-pressed`.
+   (`.cta-bar__button`, `.ayla-btn--primary`, `.m6-btn-primary`,
+   `.salon-today__cta`): `--c-accent-pressed`.
    ======================================================================== */
 .btn-primary {
   background: var(--c-accent);
@@ -5761,6 +5761,11 @@ a {
   flex: none;
   color: var(--c-text-secondary);
 }
+/* « · часть» — разделитель переносится вместе со следующей частью и не
+   повисает в конце строки на узком экране. */
+.wellness-dash__sep-part {
+  white-space: nowrap;
+}
 
 /* Заголовок раздела и ссылка справа от него (Д11, решение 12.11 п.4). */
 .wellness-dash__plan-today,
@@ -5785,8 +5790,11 @@ a {
   font-weight: 700;
   color: var(--c-text-primary);
 }
+/* Справа и тогда, когда ссылка не уместилась рядом с заголовком и ушла на
+   свою строку (длинное «Продолжить сегодняшний план →» на 360 px). */
 .wellness-dash__head-link {
   min-height: 44px;
+  margin-left: auto;
   padding: 0 var(--s-1);
   font: inherit;
   font-size: var(--font-size-200);
@@ -6170,6 +6178,10 @@ a {
   color: var(--c-surface-1);
   background: var(--c-text-primary);
   border-radius: var(--r-md);
+}
+.wellness-dash__toast:focus-visible {
+  outline: 2px solid var(--c-accent);
+  outline-offset: 2px;
 }
 .wellness-dash__toast-text {
   min-width: 0;

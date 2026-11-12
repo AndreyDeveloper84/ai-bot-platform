@@ -487,21 +487,12 @@ describe("CustomerWellnessDashboardScreen — goal truthfulness (DRF-1476)", () 
     // класса, который она стережёт: число + «шаг» (5000 шагов) и
     // «шагомер». Заголовок §5.2 через неё проходит, счётчик — нет.
     //
-    // Число и «шаг» ищутся в СОБСТВЕННОМ тексте каждого элемента, а не в
-    // склейке `textContent` всего экрана: с DRF-2950 «Шаги на сегодня»
-    // стоят сразу за строкой цели, и склейка давала «Неделя 3Шаги» —
-    // соседство двух узлов, а не счётчик. `{n} шагов` в одном элементе
-    // по-прежнему ловится.
-    const ownTexts = Array.from(document.body.querySelectorAll("*")).map((el) =>
-      Array.from(el.childNodes)
-        .filter((n) => n.nodeType === Node.TEXT_NODE)
-        .map((n) => n.textContent ?? "")
-        .join(""),
-    );
-    expect(ownTexts.some((t) => t.includes("Шаги на сегодня"))).toBe(true); // присутствие
-    for (const own of ownTexts) {
-      expect(own).not.toMatch(/\d+\s*шаг/i);
-    }
+    // С DRF-2950 «Шаги на сегодня» стоят сразу за строкой цели, и склейка
+    // `textContent` даёт «Неделя 3Шаги» — соседство двух узлов, а не
+    // счётчик. Поэтому после числа запрещён «шаг», за которым НЕ идёт «и»:
+    // «3 шага», «5000 шагов», «<b>5000</b> шагов» ловятся по-прежнему.
+    expect(screen.getByRole("heading", { name: "Шаги на сегодня" })).toBeInTheDocument(); // присутствие
+    expect(text).not.toMatch(/\d+\s*шаг(?!и)/i);
     expect(text).not.toMatch(/шагов/i);
   });
 });

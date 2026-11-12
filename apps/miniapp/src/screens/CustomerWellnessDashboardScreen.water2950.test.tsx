@@ -67,7 +67,11 @@ type TodayAnswer = () => Response | Promise<Response>;
  * Сервер: `/wellness/today` отвечает по очереди из `todays` (последний ответ
  * повторяется), POST воды — `post`. Возвращает журнал запросов.
  */
-function serve(todays: TodayAnswer[], post: () => Response | Promise<Response> = () => json(ACCEPTED)) {
+function serve(
+  todays: TodayAnswer[],
+  post: () => Response | Promise<Response> = () => json(ACCEPTED),
+  undo: () => Response = () => new Response(null, { status: 204 }),
+) {
   const calls: string[] = [];
   let todayN = 0;
   vi.stubGlobal(
@@ -77,6 +81,7 @@ function serve(todays: TodayAnswer[], post: () => Response | Promise<Response> =
       const method = (init?.method ?? "GET").toUpperCase();
       calls.push(`${method} ${u}`);
       if (method === "POST" && u.includes("/wellness/water")) return post();
+      if (method === "DELETE" && u.includes("/wellness/water/")) return undo();
       if (u.includes("/wellness/today")) {
         const answer = todays[Math.min(todayN, todays.length - 1)]!;
         todayN += 1;
@@ -210,6 +215,61 @@ describe("стакан добрал норму — карточка шага у�
     );
     expect(screen.getByText("8 / 8 стаканов")).toBeInTheDocument();
     await waitFor(() => expect(document.activeElement).toBe(undo));
+  });
+
+  it("стакан с карточки не добрал норму, норму добрал стакан из быстрых действий — фокус остаётся на нажатой", async () => {
+    // Ревью: флаг «нажато на карточке» оставался взведённым от первого
+    // стакана и уводил фокус после второго. Перевод фокуса привязан к id
+    // стакана с карточки.
+    let n = 0;
+    serve([() => json(day(6)), () => json(day(7)), () => json(day(8))], () => {
+      n += 1;
+      return json({ ...ACCEPTED, entry_id: `entry-${n}` });
+    });
+    renderHome();
+
+    const card = (await screen.findByRole("heading", { name: "Шаги на сегодня" })).closest(
+      "section",
+    ) as HTMLElement;
+    fireEvent.click(within(card).getByRole("button", { name: "Добавить стакан воды" }));
+    expect(await screen.findByText("7 / 8 стаканов")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Шаги на сегодня" })).toBeInTheDocument();
+
+    const qa = within(screen.getByRole("region", { name: "Быстрые действия" }));
+    const quick = qa.getByRole("button", { name: "Добавить стакан воды" });
+    quick.focus();
+    fireEvent.click(quick);
+    expect(await screen.findByText("8 / 8 стаканов")).toBeInTheDocument();
+    await waitFor(() =>
+      expect(screen.queryByRole("heading", { name: "Шаги на сегодня" })).toBeNull(),
+    );
+    await settleScenario();
+    expect(document.activeElement).toBe(quick);
+  });
+
+  it("«Отменить» нажата — фокус остаётся в тосте, а не падает в никуда; перечитывание тихое", async () => {
+    const afterUndo = held();
+    const srv = serve([() => json(day(7)), () => json(day(8)), afterUndo.answer]);
+    renderHome();
+
+    const card = (await screen.findByRole("heading", { name: "Шаги на сегодня" })).closest(
+      "section",
+    ) as HTMLElement;
+    fireEvent.click(within(card).getByRole("button", { name: "Добавить стакан воды" }));
+    const undo = await screen.findByRole("button", { name: "Отменить стакан" });
+    await waitFor(() => expect(document.activeElement).toBe(undo));
+
+    fireEvent.click(undo);
+    expect(await screen.findByText("Стакан убран")).toBeInTheDocument();
+    const toast = screen.getByText("Стакан убран").closest(".wellness-dash__toast");
+    expect(document.activeElement).toBe(toast);
+    // Отмена перечитывает тихо: пока чтение в пути — прежнее число и ни
+    // одного скелета (верх экрана не проваливается под фокусом).
+    await waitFor(() => expect(srv.todayGets()).toBe(3));
+    expect(screen.getByText("8 / 8 стаканов")).toBeInTheDocument();
+    expect(skeletons()).toBe(0);
+    afterUndo.release(json(day(7)));
+    expect(await screen.findByText("7 / 8 стаканов")).toBeInTheDocument();
   });
 
   it("стакан из быстрых действий — фокус не трогается (его кнопка на месте)", async () => {

@@ -13,41 +13,43 @@
  *   - `project_ayla_personal_ai` — first-person Ayla voice, «ты»,
  *     lowercase «ayla» wordmark
  *
- * # Layout — H01 по макету DRF-1321 v1.2 (UX FREEZE 25.08), DRF-2144
+ * # Layout — доски владельца, DRF-2950 (решения 12.11, `docs/OPEN_DECISIONS.md` §175)
  *
- * Решение владельца 20.09 (§55): строить по макету в рамках §49/§82 — без
- * веса, «−2,4 кг», процентов, графиков прогресса, «Добавить замер» и
- * «Самочувствие». Порядок сверху вниз:
+ * Раскладка — с досок «Презентация UI Ayla…» (кадры 1–2, 5–7) и «Мобильное
+ * приложение Ayla…» (кадры 1–3); слова и поведение — прежние. Основа —
+ * H01 по макету DRF-1321 v1.2 (DRF-2144) в рамках §49/§82 (§55): без веса,
+ * процентов цели, графиков прогресса, «Добавить замер» и «Самочувствие».
  *
- * Порядок по макету — решение владельца 22.09 (Д32, DRF-2330):
- * цель → план → запись → быстрые действия → Ayla → дневник.
+ * Порядок блоков — Д32 (DRF-2330) с «Шагами на сегодня» вторыми (§175):
+ * цель → шаги → план → запись → быстрые действия → Ayla → дневник.
  *
- *   Block 1 — Greeting + human one-liner (Tau §3 / §11.9 + §11.10);
- *     внутри — карточка «Начнём с малого?» (Д31 а): подсказка первого шага
- *     человеку с пустым днём, поэтому наверху, а не в конце экрана
- *   Block G — карточка активной цели: «Активная цель», название,
- *     «Неделя N · выполнено N из M действий» (adherence Plan Lite),
- *     primary «Продолжить сегодняшний план →» / «Составить план»,
- *     вторичное «Посмотреть детали цели»; без цели — «Выбери цель»
- *   Block P — «План на сегодня» из Plan Lite (тот же источник, что у
- *     PlanLiteScreen); без плана блока нет
- *   Block 5 — Ближайшая запись: карточка (услуга, мастер, когда, адрес,
- *     статус, «Открыть запись»); «Все мои записи» — справа от заголовка
- *     (Д11); нет записи — «Записей нет» + «Записаться»
- *   Block 3 — Быстрые действия по фризу: записать питание / стакан воды /
- *     новая запись / скорректировать план («Профиль» снят — DRF-2950)
+ *   Шапка — знак «ayla» слева, вход в профиль справа (§175 п.1)
+ *   Block 1 — одно приветствие `h1` + фраза дня (Tau §3 / §11.9 + §11.10);
+ *     под ним карточка «Начнём с малого?» (Д31 а) человеку с пустым днём
+ *   Block G — строка цели «Моя цель ›»: «Активная цель», цель, срок и
+ *     «Неделя N»; вся строка — экран цели; без цели — «Выбери цель»
+ *   Block 4 — «Шаги на сегодня» карточкой шага: «Ещё N стаканов до нормы»
+ *     и «Стакан воды» (норма из анкеты питания, Д31 б, §175 п.3)
+ *   Block P — «План на сегодня» из Plan Lite: кнопка плана в шапке блока,
+ *     строки с «✓», «+» у воды, «›» у остальных (§175 п.4)
+ *   Block 5 — Ближайшая запись: плитка-значок, услуга, бейдж, мастер и
+ *     салон, время, адрес и цена, «Открыть запись»; «Все мои записи» —
+ *     справа от заголовка (Д11); нет записи — «Записей нет» + «Записаться»
+ *   Block 3 — Быстрые действия: записать питание / стакан воды / новая
+ *     запись / скорректировать план («Профиль» снят — §175 п.9)
  *   Block A — «Продолжить разговор с Ayla» с последней темой
- *     (`customer/last-topic/`); без темы — нейтрально. ЕДИНСТВЕННЫЙ вход в
- *     чат с этого экрана (Д2)
+ *     (`customer/last-topic/`); без темы — нейтрально
  *   Block C — ОДИН блок согласия дневника (вместо двух абзацев); стоит над
- *     полосой дневника, которую и закрывает
- *   Block 2 — Pulse strip (Питание + Вода) — Tau §3 + §11.1
- *   Block 4 — Шаги на сегодня (норма воды из анкеты; иной источник, чем
- *     план) — сразу после дневника: это его числа (Д31 б)
+ *     сводкой дня, которую и закрывает
+ *   Block 2 — сводка дня (Питание + Вода) — Tau §3 + §11.1, карточкой
  *   Block 7 — Recommendations embed: СКРЫТ (Д31 г), см.
  *     `lib/ayla-picks-shelf` и ответ 40 (§172). Тот же выключатель
  *     снимает и запрос за данными полки (DRF-2348)
  *   Bottom nav — Главная · План · Дневник · Записи · Профиль (§55 б)
+ *
+ * В разговор с Ayla (внутри Mini App) ведут «Продолжить разговор», «Задать
+ * новый вопрос» (DRF-2799), «Скорректировать с Ayla» и «Скорректировать
+ * план» (§175 п.10). В чат MAX, закрывая приложение, — только согласие.
  *
  * Снято решением владельца 22.09: кнопка «спросить» из шапки (Д2) и блок
  * «Прогресс недели» (Д31 в — сервер этих данных и так не слал).
@@ -237,6 +239,20 @@ type PlanSlice =
   | { kind: "saved" }
   | { kind: "unavailable" };
 
+/**
+ * Фокус пришёл с клавиатуры (`:focus-visible`)? Только тогда тост держится,
+ * пока фокус в нём: касание пальцем тоже фокусирует кнопку (Android), и
+ * тост, переживший касание, висел бы до следующего касания. Движок без
+ * `:focus-visible` — считаем клавиатурой: лишнее удержание лучше потери.
+ */
+function keyboardFocus(target: EventTarget): boolean {
+  try {
+    return target instanceof Element && target.matches(":focus-visible");
+  } catch {
+    return true;
+  }
+}
+
 function isOnline(): boolean {
   if (typeof navigator === "undefined") return true;
   return navigator.onLine !== false;
@@ -308,6 +324,27 @@ export function CustomerWellnessDashboardScreen() {
   // Ручка отмены (`DELETE /wellness/water/{id}`, `undoWaterLog`) была, а
   // кнопки не было ни одной: ошибочный тап оставался в дневнике навсегда.
   const [undoEntryId, setUndoEntryId] = useState<string | null>(null);
+  // DRF-2950 — стакан, нажатый на карточке «Шаги на сегодня»: если он добрал
+  // норму, карточка уходит вместе с нажатой кнопкой, и фокус надо перевести
+  // на «Отменить» ИМЕННО этого стакана (сверка по id, а не флагом: флаг
+  // оставался взведённым от стакана, не добравшего норму, и потом уводил
+  // фокус после стакана из быстрых действий — найдено ревью).
+  const stepUndo = useRef<string | null>(null);
+  // Тост и фокус в нём: пока фокус с клавиатуры внутри тоста, тост не
+  // прячется — иначе он исчезал бы вместе с кнопкой под фокусом, и фокус
+  // падал бы в никуда.
+  const toastRef = useRef<HTMLDivElement>(null);
+  const undoRef = useRef<HTMLButtonElement>(null);
+  const [toastFocused, setToastFocused] = useState(false);
+  // Экран ушёл — тихие чтения больше не нужны (проход очереди или стакан
+  // могли завершиться уже после ухода).
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
   const [onboardingDismissed, setOnboardingDismissed] = useState<boolean>(
     () => isOnboardingDismissed(),
   );
@@ -462,6 +499,7 @@ export function CustomerWellnessDashboardScreen() {
   const quietBusy = useRef(false);
   const quietAgain = useRef(false);
   const refreshQuietly = useCallback(async () => {
+    if (!mounted.current) return;
     if (quietBusy.current) {
       quietAgain.current = true;
       return;
@@ -471,7 +509,7 @@ export function CustomerWellnessDashboardScreen() {
       do {
         quietAgain.current = false;
         await load("quiet");
-      } while (quietAgain.current);
+      } while (quietAgain.current && mounted.current);
     } finally {
       quietBusy.current = false;
     }
@@ -523,9 +561,10 @@ export function CustomerWellnessDashboardScreen() {
   }, [flushQueue]);
 
   // Auto-clear transient toasts after 3s — 8s while «Отменить» is on offer:
-  // за три секунды кнопку не успеть нажать.
+  // за три секунды кнопку не успеть нажать. Пока фокус с клавиатуры в тосте,
+  // он не прячется (DRF-2950): часы идут с момента, когда фокус ушёл.
   useEffect(() => {
-    if (!waterToast) return;
+    if (!waterToast || toastFocused) return;
     const t = setTimeout(
       () => {
         setWaterToast(null);
@@ -535,14 +574,14 @@ export function CustomerWellnessDashboardScreen() {
       undoEntryId ? 8000 : 3000,
     );
     return () => clearTimeout(t);
-  }, [waterToast, undoEntryId]);
+  }, [waterToast, undoEntryId, toastFocused]);
   // ── quick-action handlers ────────────────────────────────────────────
   //
   // Отдельного «📸 Сфотографируй еду» нет (снято в DRF-1546, пока у
   // съёмки не было ручки). Ручки подключены (DRF-2098/2106), и фото
   // теперь — вход «Записать питание» (DRF-2289, ниже).
 
-  const onWaterTap = useCallback(() => {
+  const addGlass = useCallback((fromStep: boolean) => {
     // §11.8 — offline: queue to localStorage 24h TTL. Real POST is
     // wired by W4; STUB MODE simulates instant accept when online.
     setUndoEntryId(null);
@@ -569,6 +608,7 @@ export function CustomerWellnessDashboardScreen() {
       let ownText: string;
       if (outcome.kind === "accepted") {
         setUndoEntryId(outcome.result.entry_id);
+        stepUndo.current = fromStep ? outcome.result.entry_id : null;
         ownText = "+1 стакан зачтён";
       } else {
         // «Отменить» могла остаться от стакана другого тапа — рядом с этим
@@ -597,12 +637,17 @@ export function CustomerWellnessDashboardScreen() {
       }
     });
   }, [online, refreshQuietly]);
+  const onWaterTap = useCallback(() => addGlass(false), [addGlass]);
+  const onStepWaterTap = useCallback(() => addGlass(true), [addGlass]);
 
   const onUndoWater = useCallback(() => {
     // Фраза об отказах из очереди уже показана — к следующему тосту не приклеивать.
     queueRefusalNote.current = null;
     const id = undoEntryId;
     if (!id) return;
+    // «Отменить» сейчас исчезнет. Фокус, стоявший на ней, — в сам тост (он
+    // остаётся со словами об исходе), а не в никуда.
+    if (toastRef.current?.contains(document.activeElement)) toastRef.current.focus();
     setUndoEntryId(null);
     void undoWaterLog(id).then(
       (removed) => {
@@ -614,7 +659,10 @@ export function CustomerWellnessDashboardScreen() {
             ? "Стакан убран"
             : "Уже не убрать: окно отмены закрылось, стакан остался в дневнике",
         );
-        if (removed) void fetchAll();
+        // Отмена меняет только воду (сводку и план) — перечитываем тихо, без
+        // скелетов: верх экрана (цель, шаг, план) не проваливается под
+        // фокусом (DRF-2950).
+        if (removed) void refreshQuietly();
       },
       (err: unknown) => {
         // DRF-1919: дневник выключен — повтор не поможет, кнопку не возвращаем.
@@ -627,7 +675,7 @@ export function CustomerWellnessDashboardScreen() {
         setWaterToast("Не получилось убрать — попробуй ещё раз");
       },
     );
-  }, [undoEntryId, fetchAll]);
+  }, [undoEntryId, refreshQuietly]);
 
   const onGoalTap = useCallback(() => {
     // §11.2 — context-aware label; the destination is the real goal
@@ -844,10 +892,13 @@ export function CustomerWellnessDashboardScreen() {
   // ── «План на сегодня»: что стоит в шапке блока (DRF-2950, п.4) ─────────
   //
   // Кнопки плана переехали из карточки цели в шапку блока плана (решение
-  // владельца 12.11). Условия — прежние условия этих кнопок: «Продолжить
-  // сегодняшний план» — когда план есть; «Составить план» и «Мой план»
-  // (DRF-2876) — только при цели, как и раньше в её карточке. Без кнопки
-  // блока нет: план недоступен или ещё грузится — о плане молчим.
+  // владельца 12.11) — на место «Смотреть весь план». «Составить план» и
+  // «Мой план» (DRF-2876) — только при цели, как и раньше в её карточке.
+  // «Продолжить сегодняшний план» — при любом плане: раньше при плане без
+  // цели (цели нет, слой цели или сводка не ответили) в шапке блока стояла
+  // «Смотреть весь план» с тем же переходом; теперь её место занимает эта
+  // кнопка (названо в §175). Без кнопки блока нет: план недоступен или ещё
+  // грузится — о плане молчим.
   //
   // «Мой план» при сохранённом новом плане — шапка без строк: шаги нового
   // плана на Главной не дублируются (решение 09.10, вариант «а»). Вопрос
@@ -862,18 +913,13 @@ export function CustomerWellnessDashboardScreen() {
         ? "mine"
         : null;
 
-  // Стакан, добравший норму, снимает карточку шага вместе с нажатой кнопкой:
-  // фокус ушёл бы в никуда, а блок плана поднялся бы под палец. Фокус —
-  // на «Отменить» тоста: это следующее, что человеку может понадобиться.
-  const stepTap = useRef(false);
-  const undoRef = useRef<HTMLButtonElement>(null);
-  const onStepWaterTap = useCallback(() => {
-    stepTap.current = true;
-    onWaterTap();
-  }, [onWaterTap]);
+  // Стакан с карточки шага, добравший норму, снимает карточку вместе с
+  // нажатой кнопкой: фокус ушёл бы в никуда, а блок плана поднялся бы под
+  // палец. Фокус — на «Отменить» этого стакана: это следующее, что человеку
+  // может понадобиться.
   useEffect(() => {
-    if (!undoEntryId || !stepTap.current || showTodayGoals) return;
-    stepTap.current = false;
+    if (!undoEntryId || undoEntryId !== stepUndo.current || showTodayGoals) return;
+    stepUndo.current = null;
     undoRef.current?.focus();
   }, [undoEntryId, showTodayGoals]);
 
@@ -1336,9 +1382,17 @@ export function CustomerWellnessDashboardScreen() {
           действий оказывался за краем. */}
       {waterToast && (
         <div
+          ref={toastRef}
           className="wellness-dash__toast"
           role="status"
           aria-live="polite"
+          tabIndex={-1}
+          onFocus={(e) => {
+            if (keyboardFocus(e.target)) setToastFocused(true);
+          }}
+          onBlur={(e) => {
+            if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setToastFocused(false);
+          }}
         >
           <span className="wellness-dash__toast-text">{waterToast}</span>
           {undoEntryId && (
@@ -1717,15 +1771,29 @@ function GoalCard({
         <h2 id="goal-header" className="wellness-dash__goal-eyebrow">
           Активная цель
         </h2>
-        <button type="button" className="wellness-dash__goal-row" onClick={onGoal}>
+        {/* Имя — цель словами человека; «Активная цель» — описание. */}
+        <button
+          type="button"
+          className="wellness-dash__goal-row"
+          aria-describedby="goal-header"
+          onClick={onGoal}
+        >
           <span className="wellness-dash__goal-title">{goal.title}</span>
           {/* DRF-2173 — срок «До 1 ноября 2026»; без срока его нет. Части —
               отдельными строками текста, разделитель — украшение. */}
           {(due || week) && (
             <span className="wellness-dash__goal-meta">
               {due && <span>{due}</span>}
-              {due && week && <span aria-hidden="true"> · </span>}
-              {week && <span>{week}</span>}
+              {due && week ? (
+                // Разделитель — вместе со следующей частью: на узком
+                // экране он не повисает в конце строки.
+                <span className="wellness-dash__sep-part">
+                  <span aria-hidden="true"> · </span>
+                  <span>{week}</span>
+                </span>
+              ) : (
+                week && <span>{week}</span>
+              )}
             </span>
           )}
         </button>
@@ -1802,12 +1870,12 @@ function PlanToday({
                     // «✓» словом — для скринридера; глазу его говорит круг.
                     <span className="visually-hidden">, выполнено</span>
                   ) : (
-                    <>
+                    <span className="wellness-dash__sep-part">
                       <span aria-hidden="true"> · </span>
                       <span className="wellness-dash__plan-count">
                         {PLAN_LITE_COPY.ofTotal(a.done_count, a.target_count)}
                       </span>
-                    </>
+                    </span>
                   )}
                 </span>
               </span>
@@ -1965,10 +2033,10 @@ function BookingCard({
           <div className="wellness-dash__booking-where">
             <span>{visitAddressText(b.address)}</span>
             {price && (
-              <>
+              <span className="wellness-dash__sep-part">
                 <span aria-hidden="true"> · </span>
                 <span className="wellness-dash__booking-price">{price}</span>
-              </>
+              </span>
             )}
           </div>
           {/* §11.3 — multi-record indicator. */}

@@ -286,6 +286,23 @@ describe("H01 · план", () => {
     expect(screen.getByTestId("location")).toHaveTextContent("/customer/plan");
   });
 
+  // Названное отклонение (§175): раньше при плане без цели в шапке блока
+  // стояла «Смотреть весь план», а «Продолжить сегодняшний план» жила в
+  // карточке цели. Решение 4 ставит кнопки плана на место «Смотреть весь
+  // план» — значит, при любом плане там «Продолжить сегодняшний план», с тем
+  // же переходом.
+  it("цели нет, план есть — в шапке блока «Продолжить сегодняшний план» → /customer/plan; «Составить план» нет", async () => {
+    serve({ plan: PLAN, today: { ...TODAY_WITH_GOAL, active_goals: [] } });
+    renderHome();
+
+    expect(await screen.findByRole("button", { name: "Выбери цель" })).toBeInTheDocument();
+    const block = screen.getByRole("heading", { name: "План на сегодня" }).closest("section") as HTMLElement;
+    const cta = within(block).getByRole("button", { name: "Продолжить сегодняшний план" });
+    expect(screen.queryByRole("button", { name: "Составить план" })).toBeNull();
+    fireEvent.click(cta);
+    expect(screen.getByTestId("location")).toHaveTextContent("/customer/plan");
+  });
+
   it("строки доски: подпись, период, «N из M»; сделанное — галочкой; «›» ведёт на экран плана", async () => {
     serve({ plan: PLAN });
     renderHome();
