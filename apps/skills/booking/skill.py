@@ -2799,6 +2799,14 @@ def _price_payload(result: BookingToolResult) -> dict[str, Any] | None:
         "final_price": str(p.final_price) if p.final_price is not None else None,
         "discount_percent": p.discount_percent,
         "promo_status": p.promo_status,
+        # «от …»: the masters price differently and none was chosen, so the
+        # figure is the LOWEST, not the price (owner decision 12.11.2026).
+        # The model sees the bare number above and would otherwise state it
+        # as exact — the flag is what keeps the «от» on the LLM path too.
+        "price_is_from": p.price_is_from,
+        # Solo workspace: no administrator to «озвучить цену» — the
+        # rendered_text already says so; the flag stops a salon rephrase.
+        "solo": p.solo,
         # Pre-rendered text — the deterministic fallback. The LLM may
         # rephrase but should preserve the numbers verbatim.
         "rendered_text": result.text,
