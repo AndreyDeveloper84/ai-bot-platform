@@ -36,7 +36,7 @@ from apps.miniapp_api.tests.test_customer_assistant_2799 import (
 from apps.orchestrator import plan_engine_card as card
 from apps.orchestrator.decision_readiness import state as state_mod
 from apps.orchestrator.decision_readiness.tests.fakes import FakeRedis
-from apps.orchestrator.tests.test_plan_engine_card_2885 import TOKEN, FakeCatalog
+from apps.orchestrator.tests.test_plan_engine_card_2885 import DECISION_ID, TOKEN, FakeCatalog
 
 #: Человек этих узлов назван в списке приёмки Плана; сам замок — test_plan_access_2885.
 pytestmark = [pytest.mark.django_db, pytest.mark.usefixtures("plan_open_to_everyone")]
@@ -113,9 +113,10 @@ def test_e2_the_tap_saves_with_the_confirming_turns_own_revision(
     # она одна на все нажатия; вердикт несёт ревизию хода НАЖАТИЯ.
     assert command["confirmation"]["state_revision"] == composed_at
     assert command["safety_state"] == "NORMAL"
-    # Ревизия хода ПОДТВЕРЖДЕНИЯ: выше ревизии хода сборки, а не её повтор.
-    assert revision > composed_at
-    assert revision == state_mod.peek_revision(conversation_id)
+    # §174: нажатие своего вердикта не чеканит — несёт вердикт последнего
+    # ТЕКСТОВОГО хода (здесь — хода сборки) и ревизии не открывает.
+    assert revision == composed_at
+    assert state_mod.peek_revision(conversation_id) == composed_at
 
 
 def test_e3_an_unlisted_account_gets_no_card_and_the_catalog_is_not_asked(
@@ -146,8 +147,8 @@ def test_e4_a_second_tap_through_the_real_turn_keeps_the_confirmation(
     one, two = catalog.saved
     assert one["confirmation"] == two["confirmation"]
     assert one["decision_id"] == two["decision_id"]
-    # Ходы разные — и это видно по ревизии вердикта, а не подтверждения.
-    assert two["evaluated_at_revision"] > one["evaluated_at_revision"]
+    # §174: оба нажатия несут вердикт одного и того же последнего текстового хода.
+    assert two["evaluated_at_revision"] == one["evaluated_at_revision"]
 
 
 def test_e5_removing_a_step_through_the_real_turn_and_saving_what_is_left(
@@ -173,8 +174,10 @@ def test_e5_removing_a_step_through_the_real_turn_and_saving_what_is_left(
     assert saved.json()["answer"] == "PLAN_SAVED · тест"
     command = catalog.saved[0]
     assert [s["capability_ref"] for s in command["decision"]["steps"]] == ["cap.evening_walk"]
-    # Подтверждение опознаётся ревизией показа НОВОЙ карточки; вердикт — своей.
-    assert command["evaluated_at_revision"] > command["confirmation"]["state_revision"]
+    # §174: пересборка по нажатию и сохранение по нажатию несут вердикт
+    # последнего текстового хода; новая карточка опознаётся новым decision_id.
+    assert command["evaluated_at_revision"] == command["confirmation"]["state_revision"]
+    assert command["decision_id"] != DECISION_ID
 
 
 def test_e6_a_free_request_composes_with_the_triple_of_the_real_turn(
@@ -334,5 +337,6 @@ def test_e11_saving_over_an_active_plan_asks_and_replaces_through_the_real_turn(
     assert done.json()["answer"] == "PLAN_REPLACED · тест"
     sent = catalog.replaced[0]
     assert sent["replaces_plan_id"] == "5a5a5a5a-1111-4222-8333-999999999999"
-    # Замена несёт вердикт хода нажатия «Заменить план», а не хода сохранения.
-    assert sent["evaluated_at_revision"] > catalog.saved[0]["evaluated_at_revision"]
+    # §174: и сохранение, и замена — нажатия; оба несут вердикт последнего
+    # текстового хода, своей ревизии ни одно не открывает.
+    assert sent["evaluated_at_revision"] == catalog.saved[0]["evaluated_at_revision"]

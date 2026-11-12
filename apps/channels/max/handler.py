@@ -1911,9 +1911,20 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
     # DRF-2885 — запись стоит ДО первого выхода из хода: ход заблокированного
     # человека и ход под оператором тоже несут вердикт, и экран плана не
     # должен прочесть вместо него прежний.
+    #
+    # §174 реестра (DRF-2877) — нажатие кнопки не высказывание: пропущенное
+    # воротами нажатие своего вердикта не пишет и действия с планом ведёт по
+    # вердикту последнего текстового хода. Иначе «нормально» по тексту
+    # ``cb:plan:step:…`` затирало «стоп» после тревожной фразы минуту назад.
     from apps.orchestrator.dr_shadow import record_turn_safety
+    from apps.orchestrator.safety.plan_turn import is_structural_turn, records_its_own_verdict
 
-    turn_safety_recorded = record_turn_safety(conversation, safety)
+    turn_records_verdict = records_its_own_verdict(
+        structural=is_structural_turn(event), gate_outcome=safety
+    )
+    turn_safety_recorded = (
+        record_turn_safety(conversation, safety) if turn_records_verdict else None
+    )
     if blocked_at is not None and not reaches_through_handoff(safety):
         _answer_blocked(
             conversation=conversation,
@@ -2046,8 +2057,11 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
         # DRF-2885 — тройка для действий с планом: вердикт и ревизия ЭТОГО
         # хода. Зовётся лениво и только путём плана — на остальных ходах
         # ревизия, как и раньше, открывается одним теневым контуром.
-        from apps.orchestrator.safety.plan_turn import plan_turn_safety
+        from apps.orchestrator.safety.plan_turn import inherited_turn_safety, plan_turn_safety
 
+        if not turn_records_verdict:
+            # §174: нажатие несёт вердикт последнего текста, своего не чеканит.
+            return inherited_turn_safety(conversation)
         return plan_turn_safety(conversation, safety, recorded=turn_safety_recorded)
 
     # Тот же источник — на объекте разговора: до инструмента модели
