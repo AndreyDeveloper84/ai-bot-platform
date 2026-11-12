@@ -57,7 +57,9 @@ _MEASURED_CANCELLING = 16
 # (owner delta 18.09, #1841, docs-only run — the count test did not run
 # there) is the 17th, `[checked]`, not amnestied. Bump it when the registry
 # gains a cancelling section; the amnesty size above does not move.
-_LIVE_CANCELLING = 17
+# 12.11.2026: §175 (DRF-2950, Главная клиента — отменяет §172 ответ 41 и
+# Д1) is the 18th, `[checked]`.
+_LIVE_CANCELLING = 18
 
 
 def _scan(text: str, baseline: set[str] | None = None):
