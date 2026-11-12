@@ -1,6 +1,6 @@
 /**
  * Значки раздела клиента: «Записи» (макет «Записи.png», DRF-2952), дневник питания
- * (DRF-2954).
+ * (DRF-2954), Главная (DRF-2950).
  *
  * Линейные, цвет — `currentColor`: значок берёт цвет строки, в которой стоит,
  * и не несёт собственного. Все декоративные (`aria-hidden`) — смысл строки
@@ -29,7 +29,8 @@ export type RecordIconName =
   | "bowl"
   | "camera"
   | "text"
-  | "image";
+  | "image"
+  | "plus";
 
 const PATHS: Record<RecordIconName, ReactNode> = {
   back: <path d="M15 5l-7 7 7 7" />,
@@ -141,6 +142,8 @@ const PATHS: Record<RecordIconName, ReactNode> = {
       <path d="M4 17.5l5-5 3.5 3.5 2.5-2.5 5 5" />
     </>
   ),
+  // DRF-2950: «+» у стакана воды на Главной (строка плана и кнопка шага).
+  plus: <path d="M12 5v14M5 12h14" />,
 };
 
 export function RecordIcon({ name, size = 20 }: { name: RecordIconName; size?: number }) {
