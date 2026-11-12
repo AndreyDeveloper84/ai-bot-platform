@@ -521,6 +521,7 @@ export function FoodScannerResultScreen() {
               ref={clarifyTriggerRef}
               type="button"
               className={isLowConf ? "cr-btn cr-btn--soft diary-result__hint" : "cr-btn cr-btn--soft"}
+              disabled={busy}
               onClick={openClarify}
             >
               <span>Уточнить</span>
@@ -545,7 +546,7 @@ export function FoodScannerResultScreen() {
               Написать вручную
             </RecordButton>
           )}
-          <RecordButton variant="text" onClick={onReject}>
+          <RecordButton variant="text" disabled={busy} onClick={onReject}>
             Не то
           </RecordButton>
         </div>
