@@ -1070,6 +1070,20 @@ class MasterServiceAdmin(AylaAdminMedia, admin.ModelAdmin):
             },
         ),
         (
+            "Цена и длительность у этого мастера",
+            {
+                "fields": ("price", "duration_min"),
+                "description": (
+                    "Что мастер поставил на экране «Услуги и цены» в своём "
+                    "кабинете: приезжает синхронизацией вместе со связью, "
+                    "руками не правится — следующий такт всё равно перепишет. "
+                    "Пусто — у связи своей цены нет (заведена руками или "
+                    "мастер цену не ставил); у услуги без цены в каталоге "
+                    "«от … ₽» собирается как минимум по таким строкам."
+                ),
+            },
+        ),
+        (
             "Служебное",
             {
                 "classes": ("collapse",),
@@ -1121,7 +1135,18 @@ class MasterServiceAdmin(AylaAdminMedia, admin.ModelAdmin):
     # он ``editable=False``, и без явного readonly Django отказывается
     # рисовать его в fieldsets. Ничьих прав это не меняет — поле не было
     # правимым и раньше.
-    readonly_fields = ("id", "source", "created_by_actor_id", "created_at", "updated_at")
+    # ``price`` / ``duration_min`` — тоже зеркало (пишет только синк, см.
+    # ``upsert_master_services``): правимые в админке, они жили бы до
+    # ближайшего такта и обманывали бы того, кто их поставил.
+    readonly_fields = (
+        "id",
+        "source",
+        "created_by_actor_id",
+        "created_at",
+        "updated_at",
+        "price",
+        "duration_min",
+    )
 
     def get_queryset(self, request):
         return self.model.all_tenants.all().select_related("master", "service", "tenant")

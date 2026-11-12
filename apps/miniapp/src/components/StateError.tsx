@@ -30,6 +30,20 @@ interface Props {
 
 type Copy = { title?: string; body: string };
 
+/**
+ * Слова состояния ошибки — отдельно от разметки. Экран, который рисует сбой
+ * в своей раскладке (экран цели, кадры 15–16 макета «Первый контакт»,
+ * DRF-2949), берёт слова отсюда: фраза одна на все экраны, вид — свой.
+ */
+export function stateErrorCopy(err: unknown): Copy & { noResponse: boolean } {
+  // `noResponse` — ответа от сервера не было вовсе: тот же признак, по
+  // которому `pickCopy` выбирает фразу про интернет.
+  // DRF-2446: `detail` уходит в журнал и отсюда тоже, иначе экран со своим
+  // видом ошибки (GoalSelectScreen) теряет его молча.
+  logDetail(err);
+  return { ...pickCopy(err), noResponse: !(err instanceof ApiError) };
+}
+
 function pickCopy(err: unknown): Copy {
   if (err instanceof ApiError) {
     // DRF-1319 D-1. Отказ входа (нет/протух initData, удалённый аккаунт,

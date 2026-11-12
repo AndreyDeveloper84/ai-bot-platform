@@ -57,7 +57,7 @@ beforeEach(() => {
 });
 
 describe("GoalSelectScreen (dumb renderer over the decision document)", () => {
-  it("loading → ok: renders chips and prompt texts from the document", async () => {
+  it("loading → ok: renders goal cards and prompt texts from the document", async () => {
     mockedFetch.mockResolvedValue(BASE_DOC);
     renderScreen();
 
@@ -78,7 +78,7 @@ describe("GoalSelectScreen (dumb renderer over the decision document)", () => {
     ).toBeInTheDocument();
   });
 
-  it("chip click → postGoalSelect({goal_key}) → re-renders the returned document", async () => {
+  it("goal card click → postGoalSelect({goal_key}) → re-renders the returned document", async () => {
     const user = userEvent.setup();
     mockedFetch.mockResolvedValue(BASE_DOC);
     const updated: DecisionContext = {

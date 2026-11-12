@@ -7,7 +7,8 @@
  * user action is a POST `/goals/select`; the returned document
  * replaces state verbatim and the UI re-renders from it:
  *
- *   1. Suggestions (`suggestions`) — chips; click POSTs `{goal_key}`.
+ *   1. Suggestions (`suggestions`) — cards (DRF-2949; chips before); click
+ *      POSTs `{goal_key}`.
  *   2. Free-form input (intent `formulate_own`) — same surface, not a
  *      separate branch: textarea + submit POSTs `{goal_text}`.
  *   3. Guidance (intent `need_guidance`) — button POSTs
@@ -76,15 +77,36 @@
  * это не мешало; теперь на анкету ведёт приглашение с домашнего экрана,
  * и без выхода назад она стала бы тупиком — то есть загородила бы
  * дорогу к записи.
+ *
+ * Вид шага цели — макет «Первый контакт» (набор владельца от 06.10.2026,
+ * DRF-2949, кадры 1, 2, 8, 11, 15, 16). Решение владельца 11.11.2026: путь
+ * первого контакта остаётся в переписке, с макета берётся только ВИД этого
+ * экрана. Что перенесено:
+ *
+ *   - шаг цели: поле своего текста СВЕРХУ, под ним цели карточками во всю
+ *     ширину. Варианты и подписи по-прежнему серверные, нажатие шлёт тот же
+ *     ответ, что раньше фишка;
+ *   - на корне — приветствие над шагом цели и «Пропустить» с кадром «Можно
+ *     настроить план позже». Пропуск серверу ничего не шлёт: это уход с
+ *     экрана, новизну по-прежнему решает сервер;
+ *   - отказ гейта здоровья — карточкой-предупреждением, сбой загрузки —
+ *     значок, фраза, кнопка. Слова прежние.
+ *
+ * Чего с макета нет: фото Ayla (в приложении нет ни одного изображения),
+ * кнопки «Продолжить» (выбор отправляется сразу — поведение не меняется),
+ * полоски шагов (счётчик запрещён, DRF-1743), нижней панели (экран не
+ * вкладка).
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { AlreadyNoted } from "../components/AlreadyNoted";
-import { AnketaStepInput, renderedMode } from "../components/AnketaStepInput";
+import { AnketaStepInput, GoalOptionMark, renderedMode } from "../components/AnketaStepInput";
+import { RecordIcon } from "../components/records/RecordIcons";
+import { RecordButton, RecordsState } from "../components/records/RecordsState";
 import { ScreenLayout } from "../components/ScreenLayout";
 import { DelayedSkeleton, ServiceCardSkeleton } from "../components/Skeleton";
-import { StateError } from "../components/StateError";
+import { StateError, stateErrorCopy } from "../components/StateError";
 import { StickyBar, StickyCtaButton } from "../components/StickyCta";
 import { SurfaceSwitchExit, useSurfaceMode } from "../components/SurfaceSwitch";
 import {
@@ -97,9 +119,17 @@ import {
   isSafetyStop,
   type SafetyStop,
 } from "../lib/customer-goals";
+import { ApiError } from "../lib/api";
+import { isTransportRefusalSlug } from "../lib/auth-error-copy";
 import { SAFETY_KIND_CLARIFY } from "../lib/health-gate-copy";
 import { returnToChat } from "../lib/max-sdk";
-import { backToOrigin, originFrom, screenRoot, type BackIntent } from "../lib/screen-back";
+import {
+  backByAction,
+  backToOrigin,
+  originFrom,
+  screenRoot,
+  type BackIntent,
+} from "../lib/screen-back";
 import {
   DEADLINE_PASSED_CTA,
   DEADLINE_STEP,
@@ -168,6 +198,34 @@ const FREE_TEXT_FALLBACK_LABEL = "Опиши своими словами";
  * экран. Сторож на отсутствие счётчика — `GoalSelectScreen.progress.test.tsx`.
  */
 const LAST_QUESTION_NOTE = "Ещё один короткий вопрос";
+
+/**
+ * Шаг цели — тот, где сервер предлагает сами цели. Экран узнаёт его по токену
+ * шага, как и шаг срока (`DEADLINE_STEP`): от этого зависит только ВИД
+ * (карточки вместо фишек, поле сверху), ни одного решения о содержании.
+ * Незнакомый токен — шаг рисуется как раньше.
+ */
+export const GOAL_STEP = "goal";
+
+/**
+ * Приветствие на корне (кадр 1 макета). Слова — те же, что говорит бот первым
+ * сообщением (текст владельца 19.09, `GLOBAL_WELCOME_TEXT` в
+ * `apps/channels/max/global_onboarding.py`): решение владельца 11.11.2026 —
+ * слова макета не берём, и у Ayla одно приветствие на обе поверхности.
+ * Паритет держит `test_welcome_greeting_in_miniapp_2949.py`.
+ */
+export const HELLO_TITLE = "Привет! Я Ayla";
+// Одной строкой намеренно: сторож паритета ищет фразу бота литералом целиком.
+export const HELLO_TEXT =
+  "Помогу разобраться, что может подойти, найти услугу и записаться. Можно просто рассказать, чего хочется или что сейчас беспокоит.";
+
+/** Кадр 11 макета — после «Пропустить». Текст кадра дословно. */
+export const SKIP_LABEL = "Пропустить";
+export const LATER_TITLE = "Можно настроить план позже";
+export const LATER_TEXT =
+  "Ты всегда сможешь рассказать о своей цели, и я подберу для тебя подходящие шаги.";
+export const LATER_HOME = "Перейти на главную";
+const RETRY_LABEL = "Попробовать снова";
 
 /** The anketa step currently on the surface, if the server sent one. */
 function currentAnketaStep(doc: DecisionContext): MissingItem | null {
@@ -247,6 +305,23 @@ export function GoalSelectScreen({ initialDoc }: Props = {}) {
     pendingBody: GoalSelectBody;
   } | null>(null);
   const [safetyAnswer, setSafetyAnswer] = useState("");
+  // DRF-2949 — «Пропустить» на корне: кадр «Можно настроить план позже».
+  // Серверу ничего не уходит — человек просто не отвечает сейчас.
+  const [skipped, setSkipped] = useState(false);
+  // Сделал ли человек на экране хоть что-то. Приветствие — только до первого
+  // действия: после «не понимаю, чего хочу» или отказа здороваться поздно.
+  const [touched, setTouched] = useState(false);
+  // Кадр «настроить позже» заменяет экран целиком — фокус уходит на его
+  // заголовок, а при возврате — обратно на «Пропустить» (иначе он падал в
+  // `body`, и читающий с экрана не узнавал о смене кадра).
+  const laterTitleRef = useRef<HTMLHeadingElement | null>(null);
+  const skipRef = useRef<HTMLButtonElement | null>(null);
+  const wasSkipped = useRef(false);
+  useEffect(() => {
+    if (skipped) laterTitleRef.current?.focus();
+    else if (wasSkipped.current) skipRef.current?.focus();
+    wasSkipped.current = skipped;
+  }, [skipped]);
 
   const load = useCallback(() => {
     setState({ kind: "loading" });
@@ -315,7 +390,10 @@ export function GoalSelectScreen({ initialDoc }: Props = {}) {
     return () => window.clearTimeout(timer);
   }, [isCompleted, navigate, origin]);
 
-  const back: BackIntent = isRoot
+  const back: BackIntent = skipped
+    ? // С кадра «настроить позже» назад — к шагу цели.
+      backByAction(() => setSkipped(false))
+    : isRoot
     ? screenRoot(
         "Поверхность цели смонтирована на `/` первым экраном клиента — " +
           "истории за корнем нет, вести кнопке некуда.",
@@ -323,6 +401,7 @@ export function GoalSelectScreen({ initialDoc }: Props = {}) {
     : backToOrigin(routerState, "/customer/main");
 
   const submit = useCallback((body: GoalSelectBody) => {
+    setTouched(true);
     setSubmitting(true);
     setSubmitError(null);
     setSavedNotice(null);
@@ -392,7 +471,49 @@ export function GoalSelectScreen({ initialDoc }: Props = {}) {
           ) : undefined
         }
       >
-        <StateError err={state.err} onRetry={load} screenId="goal-select" />
+        {/* Кадры 15–16 макета: значок, фраза, кнопка. Слова — прежние, общие
+            со всеми экранами (`stateErrorCopy`). Отказ транспорта рисует сам
+            `StateError`: там не повтор, а возврат в MAX (DRF-1893). */}
+        {state.err instanceof ApiError && isTransportRefusalSlug(state.err.slug) ? (
+          <StateError err={state.err} onRetry={load} screenId="goal-select" />
+        ) : (
+          <LoadFailure err={state.err} onRetry={load} />
+        )}
+      </ScreenLayout>
+    );
+  }
+
+  // Кадр 11 — «Пропустить» нажато. Выход многоролевого остаётся и здесь
+  // (DRF-2198: состояние не убирает навигацию).
+  if (skipped) {
+    return (
+      <ScreenLayout
+        back={back}
+        cta={
+          isRoot && canSwitch ? (
+            <StickyBar>
+              <SurfaceSwitchExit />
+            </StickyBar>
+          ) : undefined
+        }
+      >
+        <section className="goal-select__later" aria-labelledby="goal-select-later">
+          <h1
+            id="goal-select-later"
+            ref={laterTitleRef}
+            tabIndex={-1}
+            className="goal-select__later-title"
+          >
+            {LATER_TITLE}
+          </h1>
+          <p className="goal-select__later-text">{LATER_TEXT}</p>
+          <RecordButton
+            variant="primary"
+            onClick={() => navigate(HOME_ROUTE, { replace: true })}
+          >
+            {LATER_HOME}
+          </RecordButton>
+        </section>
       </ScreenLayout>
     );
   }
@@ -441,19 +562,38 @@ export function GoalSelectScreen({ initialDoc }: Props = {}) {
           data-testid="goal-safety-frame"
           data-safety-kind={stop.kind}
         >
-          <h2 id="goal-select-safety" className="goal-select__section-title">
-            {clarify ? "Сначала уточню" : "Здесь я не подскажу"}
-          </h2>
           {/* Сервер прислал — экран показал. Ни одной своей строки о
               самочувствии здесь нет: копия признания и вопросы приходят по
               проводу (`health-gate-copy.ts` — только для паритета). */}
-          {stop.acknowledgement && (
-            <p className="goal-select__current">{stop.acknowledgement}</p>
-          )}
-          {stop.text && (
-            <p className="goal-select__current" style={{ whiteSpace: "pre-line" }}>
-              {stop.text}
-            </p>
+          {clarify ? (
+            <>
+              <h2 id="goal-select-safety" className="goal-select__section-title">
+                Сначала уточню
+              </h2>
+              {stop.acknowledgement && (
+                <p className="goal-select__current">{stop.acknowledgement}</p>
+              )}
+              {stop.text && <p className="goal-select__current goal-select__pre">{stop.text}</p>}
+            </>
+          ) : (
+            // Отказ — карточкой-предупреждением (кадр 8 макета): заголовок и
+            // слова сервера внутри одной карточки.
+            <div className="goal-select__stop">
+              <span className="goal-select__stop-mark">
+                <RecordIcon name="alert" size={24} />
+              </span>
+              <div>
+                <h2 id="goal-select-safety" className="goal-select__stop-title">
+                  Здесь я не подскажу
+                </h2>
+                {stop.acknowledgement && (
+                  <p className="goal-select__stop-text">{stop.acknowledgement}</p>
+                )}
+                {stop.text && (
+                  <p className="goal-select__stop-text goal-select__pre">{stop.text}</p>
+                )}
+              </div>
+            </div>
           )}
           {clarify && (stop.questions?.length ?? 0) > 0 && (
             <ol className="goal-select__safety-questions">
@@ -517,6 +657,10 @@ export function GoalSelectScreen({ initialDoc }: Props = {}) {
     ? () => submit({ intent: "start_anketa", source_channel: "miniapp" })
     : null;
   const anketaStep = currentAnketaStep(doc);
+  // Шаг цели на экране (и не в пересмотре ответа): тогда поле своего текста
+  // стоит над целями, а цели — карточками. Прежний документ каталога шаг цели
+  // не знал и слал цели рядом `suggestions` — тот же вид и ему.
+  const goalStep = anketaStep?.step === GOAL_STEP ? anketaStep : null;
   const knownAnswers = doc.known.anketa ?? [];
   // DRF-2173 — строка срока; пустая, когда срока нет или дата нечитаема.
   const deadlineLine = formatGoalDue(knownGoal?.target_date);
@@ -608,6 +752,32 @@ export function GoalSelectScreen({ initialDoc }: Props = {}) {
   // с одним действием на одном экране — это вопрос «в чём разница», а
   // разницы нет.
   const freeTextPending = showFreeText && goalText.trim().length > 0;
+  const suggestionsRow = !knownGoal && doc.suggestions.length > 0;
+  // Кадры 1–2: «своими словами» — первым, варианты — под ним.
+  const freeTextFirst = showFreeText && !revisingStep && (goalStep !== null || suggestionsRow);
+  // Первый экран новичка: корень, цели нет. На нём и приветствие, и «Пропустить».
+  const firstScreen = isRoot && !knownGoal && !revisingStep;
+  // Кадр 1: приветствие — пока человек ничего не сделал и перед ним цели.
+  // После «не понимаю, чего хочу» каталог присылает наводящий вопрос И те же
+  // цели рядом `suggestions` — здороваться там поздно, поэтому признак не
+  // содержимое документа, а первое действие (`touched`).
+  const greeting = firstScreen && !touched && (goalStep !== null || suggestionsRow);
+  // «Пропустить» — выход с первого экрана, пока у документа нет своей дороги
+  // дальше (`onward`): с ней выход уже есть, а третий ряд липкой панели
+  // накрыл бы низ экрана. Пока человек пишет своё, кнопка уступает место
+  // «Отправить».
+  const skip =
+    firstScreen && !freeTextPending && !nextRoute ? (
+      <button
+        ref={skipRef}
+        type="button"
+        className="goal-select__skip"
+        disabled={submitting}
+        onClick={() => setSkipped(true)}
+      >
+        {SKIP_LABEL}
+      </button>
+    ) : null;
   const saveFreeText = freeTextPending ? (
     <StickyCtaButton
       disabled={submitting}
@@ -617,25 +787,71 @@ export function GoalSelectScreen({ initialDoc }: Props = {}) {
     </StickyCtaButton>
   ) : null;
 
-  const stickyCount = [saveFreeText, onward, surfaceExit].filter(Boolean).length;
+  const stickyCount = [saveFreeText, onward, skip, surfaceExit].filter(Boolean).length;
+
+  const freeTextSection = showFreeText ? (
+    <section aria-labelledby="goal-select-own">
+      <h2 id="goal-select-own" className="goal-select__section-title">
+        {freeTextLabel}
+      </h2>
+      <textarea
+        className="goal-select__textarea"
+        value={goalText}
+        onChange={(e) => setGoalText(e.target.value)}
+        maxLength={GOAL_TEXT_MAX}
+        rows={2}
+        placeholder={
+          anketaStep?.step === DEADLINE_STEP ? DEADLINE_TEXT_PLACEHOLDER : "Опиши своими словами"
+        }
+        aria-label={freeTextLabel}
+        disabled={submitting}
+      />
+      {/* Пока текста нет — кнопка стоит здесь, отключённая, и показывает,
+          что с полем вообще можно сделать. Как только текст появился,
+          сохранение уезжает в липкую панель (см. `saveFreeText`), и
+          здесь не остаётся ничего: два «Отправить» на одном экране — это
+          вопрос «в чём разница». */}
+      {!freeTextPending && (
+        <div className="goal-select__actions">
+          <button type="button" className="btn-secondary" disabled>
+            Отправить
+          </button>
+        </div>
+      )}
+    </section>
+  ) : null;
 
   return (
     <ScreenLayout
       back={back}
       // DRF-2177 — макет C03 (DRF-1178) заголовка не рисует: кадры с
       // известной целью идут без него; шаг цели — как прежде.
-      title={knownGoal ? undefined : "Какая у тебя цель?"}
+      // С приветствием заголовок стоит ПОД ним (кадр 1), поэтому рисуется в
+      // теле экрана, а не каркасом.
+      title={knownGoal || greeting ? undefined : "Какая у тебя цель?"}
       tallCta={stickyCount > 1}
       cta={
         stickyCount > 0 ? (
           <StickyBar>
             {saveFreeText}
             {onward}
+            {skip}
             {surfaceExit}
           </StickyBar>
         ) : undefined
       }
     >
+      {greeting && (
+        <>
+          <div className="goal-select__hello">
+            <p className="goal-select__hello-title">
+              {HELLO_TITLE} <span aria-hidden="true">👋</span>
+            </p>
+            <p className="goal-select__hello-text">{HELLO_TEXT}</p>
+          </div>
+          <h1 className="screen__title">Какая у тебя цель?</h1>
+        </>
+      )}
       {/* Отказ виден сразу, а не в самом низу длинного документа. */}
       {submitError && (
         <div className="callout callout--danger" role="alert">
@@ -788,12 +1004,21 @@ export function GoalSelectScreen({ initialDoc }: Props = {}) {
                 <p className="goal-select__progress">{LAST_QUESTION_NOTE}</p>
               )}
               <p className="goal-select__prompt">{item.prompt}</p>
+              {/* Кадры 1–2: на шаге цели поле своего текста — между вопросом
+                  и целями. */}
+              {item === goalStep && freeTextFirst && freeTextSection}
+              {/* Подпись ряда целей — та же серверная, что у прежнего ряда
+                  `suggestions`; на макете на этом месте «или выбери вариант». */}
+              {item === goalStep && intentLabel("choose_suggested") && (
+                <h2 className="goal-select__section-title">{intentLabel("choose_suggested")}</h2>
+              )}
               {/* DRF-1746 — компонент по типу ответа (`mode`); экран
                   ничего не выводит, только рисует то, что прислано. */}
               {item.step && (
                 <AnketaStepInput
                   item={item}
                   submitting={submitting}
+                  layout={item === goalStep ? "cards" : "chips"}
                   onAnswer={(answer) =>
                     submit({ answer, source_channel: "miniapp" } as GoalSelectBody)
                   }
@@ -808,7 +1033,10 @@ export function GoalSelectScreen({ initialDoc }: Props = {}) {
           только за «Изменить» (start_anketa → шаг цели с теми же
           опциями). Ряд остаётся в документе ради подписи цели у прежних
           читателей, поэтому правило здесь, а не на сервере. */}
-      {!knownGoal && doc.suggestions.length > 0 && (
+      {/* Прежний документ: шага цели нет, цели — рядом `suggestions`. Поле
+          своего текста — над ними, как на кадре 2. */}
+      {!goalStep && freeTextFirst && freeTextSection}
+      {suggestionsRow && (
         <section aria-labelledby="goal-select-suggestions">
           <h2
             id="goal-select-suggestions"
@@ -817,7 +1045,7 @@ export function GoalSelectScreen({ initialDoc }: Props = {}) {
             {intentLabel("choose_suggested") ?? "Выбери из вариантов"}
           </h2>
           <div
-            className="chip-row"
+            className="goal-select__options"
             role="radiogroup"
             aria-labelledby="goal-select-suggestions"
           >
@@ -829,12 +1057,13 @@ export function GoalSelectScreen({ initialDoc }: Props = {}) {
                   type="button"
                   role="radio"
                   aria-checked={false}
-                  className="chip"
+                  className="goal-select__option"
                   disabled={submitting}
                   onClick={() =>
                     submit({ goal_key: s.key, source_channel: "miniapp" })
                   }
                 >
+                  <GoalOptionMark />
                   {s.label}
                 </button>
               );
@@ -843,37 +1072,8 @@ export function GoalSelectScreen({ initialDoc }: Props = {}) {
         </section>
       )}
 
-      {showFreeText && (
-        <section aria-labelledby="goal-select-own">
-          <h2 id="goal-select-own" className="goal-select__section-title">
-            {freeTextLabel}
-          </h2>
-          <textarea
-            className="goal-select__textarea"
-            value={goalText}
-            onChange={(e) => setGoalText(e.target.value)}
-            maxLength={GOAL_TEXT_MAX}
-            rows={2}
-            placeholder={
-              anketaStep?.step === DEADLINE_STEP ? DEADLINE_TEXT_PLACEHOLDER : "Опиши своими словами"
-            }
-            aria-label={freeTextLabel}
-            disabled={submitting}
-          />
-          {/* Пока текста нет — кнопка стоит здесь, отключённая, и показывает,
-              что с полем вообще можно сделать. Как только текст появился,
-              сохранение уезжает в липкую панель (см. `saveFreeText`), и
-              здесь не остаётся ничего: два «Отправить» на одном экране — это
-              вопрос «в чём разница». */}
-          {!freeTextPending && (
-            <div className="goal-select__actions">
-              <button type="button" className="btn-secondary" disabled>
-                Отправить
-              </button>
-            </div>
-          )}
-        </section>
-      )}
+      {/* Во всех прочих документах поле стоит на прежнем месте — внизу. */}
+      {!freeTextFirst && freeTextSection}
 
       {/* Побочные намерения сервера — оба ведут ВГЛУБЬ вопросов, поэтому
           стоят в одном тихом ряду, а не двумя кнопками в столбик.
@@ -908,5 +1108,29 @@ export function GoalSelectScreen({ initialDoc }: Props = {}) {
         </div>
       )}
     </ScreenLayout>
+  );
+}
+
+/**
+ * Сбой загрузки документа — раскладка кадров 15–16 макета, слова прежние.
+ * Фраза идёт заголовком целиком: её ищут и люди, и тесты, резать нечего.
+ * Значок «нет сети» — по признаку `noResponse`: ответа от сервера не было
+ * вовсе; по нему же `StateError` выбирает фразу про интернет.
+ */
+function LoadFailure({ err, onRetry }: { err: unknown; onRetry: () => void }) {
+  const copy = stateErrorCopy(err);
+  return (
+    <RecordsState
+      icon={copy.noResponse ? "offline" : "alert"}
+      tone="danger"
+      title={copy.title ?? copy.body}
+      body={copy.title ? <p>{copy.body}</p> : undefined}
+      quiet
+      actions={
+        <RecordButton variant="primary" onClick={onRetry}>
+          {RETRY_LABEL}
+        </RecordButton>
+      }
+    />
   );
 }
