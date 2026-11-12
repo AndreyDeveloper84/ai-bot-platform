@@ -1196,15 +1196,14 @@ function StepPathPanel({
         ))}
         <div className="plan-path__choices">
           {path.slots.map((iso, index) => (
-            <button
+            <RecordButton
               key={iso}
-              type="button"
-              className="cr-btn cr-btn--soft"
+              variant="soft"
               disabled={busy}
               onClick={() => onBook(path, index)}
             >
               {formatDayMonthTime(iso)}
-            </button>
+            </RecordButton>
           ))}
         </div>
         {/* Остальные дни со свободным временем — датами; показанный день
@@ -1238,14 +1237,9 @@ function StepPathPanel({
               {line}
             </span>
           ))}
-          <button
-            type="button"
-            className="cr-btn cr-btn--soft"
-            disabled={busy}
-            onClick={() => onChoose(path, index)}
-          >
+          <RecordButton variant="soft" disabled={busy} onClick={() => onChoose(path, index)}>
             {`${option.service_name} · ${option.master_name}`}
-          </button>
+          </RecordButton>
         </div>
       ))}
     </div>
