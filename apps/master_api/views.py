@@ -30,6 +30,11 @@ All endpoints resolve tenant from the BotUser (HMAC-verified init-data
 caller can't forge a different tenant: init-data is signed by MAX's
 HMAC and the BotUser FK is tenant-scoped at the DB level. Invite
 token lookup is filtered by tenant explicitly as defence-in-depth.
+
+The one exception is ``claim`` / ``accept`` / ``reject`` for an invitee
+the SALON bot signed who has no working row yet (DRF-1503): there is no
+BotUser to take the tenant from, so the TOKEN names the salon (DRF-1784,
+:func:`_invitee`) and every later read and write is scoped to it.
 """
 
 from __future__ import annotations
@@ -111,6 +116,7 @@ from apps.events.vocabulary import (
     MASTER_PROFILE_INITIALIZED,
 )
 from apps.identity.models import BotUser
+from apps.identity.services.resolver import resolve_or_create_bot_user
 from apps.master_api.auth import (
     INVITE_TOKEN_SLUG_TO_STATUS,
     InviteTokenError,
@@ -125,6 +131,8 @@ from apps.tenancy.billing_gate import (
     assert_can_add_master,
     master_add_refusal_response,
 )
+from apps.tenancy.context import tenant_scope
+from apps.tenancy.models import Tenant
 
 logger = logging.getLogger(__name__)
 
@@ -227,14 +235,18 @@ def _master_card(master: CatalogMaster, *, include_services: bool = True) -> dic
 
 
 def _audit_payload(
-    master: CatalogMaster, bot_user: BotUser, extra: dict[str, Any] | None = None
+    master: CatalogMaster, bot_user: BotUser | None, extra: dict[str, Any] | None = None
 ) -> dict[str, Any]:
-    """Standard audit-row payload for master.onboarding_* events."""
+    """Standard audit-row payload for master.onboarding_* events.
+
+    ``bot_user`` is ``None`` for an invitee the platform has no row for yet
+    (DRF-1503, :func:`_invitee`): claim and reject create none.
+    """
 
     out: dict[str, Any] = {
         "tenant_id": str(master.tenant_id),
         "master_id": str(master.id),
-        "bot_user_id": str(bot_user.id),
+        "bot_user_id": str(bot_user.id) if bot_user is not None else None,
     }
     if extra:
         out.update(extra)
@@ -390,6 +402,84 @@ def _land_on_glue_row(
     return glue_row
 
 
+# --- the invitee: salon signature, no working row (DRF-1503) --------------
+
+
+def _invitee(
+    request: HttpRequest, token: str | uuid.UUID
+) -> tuple[Tenant, BotUser | None] | JsonResponse:
+    """Name the salon by the TOKEN and find this person's row there — without writing.
+
+    The decorator hands over ``bot_user=None`` when the SALON bot signed and
+    the person has no working row — a master invited by link whom the bot
+    only delivered the invitation to (``require_init_data_only``). The token
+    says which salon (DRF-1784, the bot already reads it so,
+    ``salon_handler._handle_master_invite``).
+
+    The person may well HAVE a row in that salon: ``/me`` creates a customer
+    row in ``MAX_BOT_TENANT_SLUG`` on every Mini App open (on the pilot that
+    is the salon the invitations come from). Such a row goes through the ordinary path
+    with all its checks (an archived card linked to it, the DRF-1507 glue,
+    ``wrong_recipient``) — skipping them would be a 500 on the OneToOne
+    ``linked_bot_user`` or on the ``ayla_user_id`` uniqueness. A deleted
+    row is refused here, by READING: the resolver would refill its blanked
+    name into an account erased under 152-ФЗ.
+
+    Returns ``(tenant, row_or_None)`` or the refusal response.
+    """
+
+    try:
+        with transaction.atomic():
+            master = validate_invite_token(token)
+    except InviteTokenError as exc:
+        return _error(exc.slug, exc.detail, INVITE_TOKEN_SLUG_TO_STATUS.get(exc.slug, 400))
+
+    verified = request.verified_init_data  # type: ignore[attr-defined]
+    row = (
+        BotUser.all_tenants.filter(
+            tenant=master.tenant, channel="max", channel_user_id=verified.user_id
+        )
+        .select_related("tenant")
+        .first()
+    )
+    if row is not None and row.deleted_at is not None:
+        return _error("user_deleted", "this account was deleted", 403)
+    return master.tenant, row
+
+
+def _new_invitee_row(request: HttpRequest, tenant: Tenant) -> BotUser:
+    """The invitee's row in the invitation's salon — born on ACCEPT only.
+
+    The same moment the staff-code path creates its row
+    (``staff_invites.redeem_staff_invite_by_identity``): redemption is the
+    proof, so the row and the role appear together. Claim and reject leave
+    nothing behind (D2→(б): no row for a stranger before a proven path).
+    Name, chat and the salon's time zone as
+    ``miniapp_api.views._lazy_register_bot_user`` does; unlike it, the
+    resolver also applies the §2 classification to the person's other rows.
+    """
+
+    verified = request.verified_init_data  # type: ignore[attr-defined]
+    user = verified.user or {}
+    first = str(user.get("first_name") or "").strip()
+    last = str(user.get("last_name") or "").strip()
+    raw_chat_id = (verified.chat or {}).get("id")
+    chat_id = "" if raw_chat_id is None else str(raw_chat_id).strip()[:128]
+    with tenant_scope(tenant):
+        row = resolve_or_create_bot_user(
+            channel="max",
+            channel_user_id=verified.user_id,
+            display_name=f"{first} {last}".strip()[:200],
+            chat_id=chat_id,
+        )
+    if not row.timezone and tenant.timezone:
+        # Как ``_lazy_register_bot_user``: часовой пояс салона, пока свой не задан.
+        row.timezone = tenant.timezone
+        row.save(update_fields=["timezone"])
+    logger.info("master_api.onboarding.invitee_row bot_user=%s", row.pk)
+    return row
+
+
 # --- POST /onboarding/claim -----------------------------------------------
 
 
@@ -403,16 +493,18 @@ def onboarding_claim(request: HttpRequest) -> HttpResponse:
     multiple times during step 1 (e.g. if the user backs out and
     re-opens the deeplink).
 
-    Cross-tenant safety: ``validate_invite_token`` filters by the
-    BotUser's tenant. A token from another tenant returns 404 (deliberate
-    information-leak suppression).
+    Cross-tenant safety: for a person with a working row,
+    ``validate_invite_token`` filters by that row's tenant. A token from
+    another tenant returns 404 (deliberate information-leak suppression).
+    For an invitee without a working row (DRF-1503) the token names the
+    salon — :func:`_invitee`.
 
     Wrong-recipient guard: if the master is already linked to a DIFFERENT
     BotUser, returns 403 — someone forwarded the deeplink. We do NOT
     consume the token in this case; the rightful owner can still claim.
     """
 
-    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    bot_user: BotUser | None = request.bot_user  # type: ignore[attr-defined]
     body = _parse_json_body(request)
     if isinstance(body, JsonResponse):
         return body
@@ -421,9 +513,30 @@ def onboarding_claim(request: HttpRequest) -> HttpResponse:
     if not token:
         return _error("bad_request", "token is required", 400)
 
+    if bot_user is None:
+        found = _invitee(request, token)
+        if isinstance(found, JsonResponse):
+            return found
+        tenant, bot_user = found
+        request.tenant = tenant  # type: ignore[attr-defined]
+        with tenant_scope(tenant):
+            return _claim(request, bot_user, token, tenant)
+    return _claim(request, bot_user, token, bot_user.tenant)
+
+
+def _claim(
+    request: HttpRequest, bot_user: BotUser | None, token: str, tenant: Tenant
+) -> HttpResponse:
+    """The claim itself; ``bot_user`` is ``None`` for an invitee with no row yet.
+
+    ``tenant`` — the salon the token is looked up in: the row's, or the one
+    :func:`_invitee` named by the token. One source for the lookup and for
+    the scope the audit lands in.
+    """
+
     try:
         with transaction.atomic():
-            master = validate_invite_token(token, bot_user.tenant)
+            master = validate_invite_token(token, tenant)
     except InviteTokenError as exc:
         return _error(
             exc.slug,
@@ -436,7 +549,9 @@ def onboarding_claim(request: HttpRequest) -> HttpResponse:
     # forwarded link. (Note: validate_invite_token rejects already-used
     # invites already, so a linked master with status=PENDING is an
     # impossible state — defence-in-depth check anyway.)
-    if master.linked_bot_user_id is not None and master.linked_bot_user_id != bot_user.id:
+    if master.linked_bot_user_id is not None and (
+        bot_user is None or master.linked_bot_user_id != bot_user.id
+    ):
         return _error(
             "wrong_recipient",
             "this invite was sent to a different MAX account",
@@ -448,14 +563,14 @@ def onboarding_claim(request: HttpRequest) -> HttpResponse:
         target="catalog.CatalogMaster",
         target_id=master.id,
         payload=_audit_payload(master, bot_user),
-        actor_id=bot_user.id,
+        actor_id=bot_user.id if bot_user is not None else None,
     )
     emit(MASTER_ONBOARDING_STARTED, properties=_audit_payload(master, bot_user))
 
     max_user = {
-        "first_name": bot_user.display_name
+        "first_name": (bot_user.display_name if bot_user is not None else "")
         or request.verified_init_data.user.get("first_name", ""),  # type: ignore[attr-defined]
-        "phone_masked": _mask_phone(bot_user.phone),
+        "phone_masked": _mask_phone(bot_user.phone if bot_user is not None else ""),
         "max_handle": master.max_handle,
     }
     return JsonResponse(
@@ -508,7 +623,7 @@ def onboarding_accept(request: HttpRequest) -> HttpResponse:
       * Audit row + event ``master.onboarding_accepted``
     """
 
-    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    bot_user: BotUser | None = request.bot_user  # type: ignore[attr-defined]
     body = _parse_json_body(request)
     if isinstance(body, JsonResponse):
         return body
@@ -517,14 +632,41 @@ def onboarding_accept(request: HttpRequest) -> HttpResponse:
     if not token:
         return _error("bad_request", "token is required", 400)
 
-    # Idempotency probe — if the SAME bot_user already accepted, reuse
-    # the existing row + re-issue a session token. We look up by
-    # linked_bot_user (NOT invite_token, which is cleared on accept).
     try:
         token_uuid = uuid.UUID(str(token))
     except (TypeError, ValueError):
         return _error("invalid_invite_token", "token is not a valid UUID", 404)
 
+    if bot_user is None:
+        # DRF-1503 — приглашённый без рабочей строки под подписью салонного
+        # бота: салон называет токен, строка этого человека там — если есть —
+        # идёт обычным путём со всеми проверками (:func:`_invitee`).
+        found = _invitee(request, token_uuid)
+        if isinstance(found, JsonResponse):
+            return found
+        tenant, bot_user = found
+        request.tenant = tenant  # type: ignore[attr-defined]
+        with tenant_scope(tenant):
+            return _accept(request, bot_user, token_uuid, tenant)
+    return _accept(request, bot_user, token_uuid, bot_user.tenant)
+
+
+def _accept(
+    request: HttpRequest, bot_user: BotUser | None, token_uuid: uuid.UUID, tenant: Tenant
+) -> HttpResponse:
+    """The acceptance itself.
+
+    ``bot_user`` is ``None`` only for an invitee who has no row in the
+    invitation's salon yet (DRF-1503). Then there is nothing to repeat and
+    nothing to glue by, and the row is created inside the landing
+    transaction AFTER every refusal below — so a refused accept leaves no
+    row behind (D2→(б)), and the row and the role appear together, like the
+    staff-code redemption does it.
+    """
+
+    # Idempotency probe — if the SAME bot_user already accepted, reuse
+    # the existing row + re-issue a session token. We look up by
+    # linked_bot_user (NOT invite_token, which is cleared on accept).
     existing = (
         CatalogMaster.all_tenants.filter(
             linked_bot_user=bot_user,
@@ -533,8 +675,11 @@ def onboarding_accept(request: HttpRequest) -> HttpResponse:
         )
         .select_related("tenant")
         .first()
+        if bot_user is not None
+        else None
     )
     if existing is not None:
+        assert bot_user is not None  # проба ищет по строке: без строки existing нет
         # DRF-1507 — проба смотрит на предъявленный токен, а не только на
         # связанного пользователя.
         #
@@ -622,12 +767,14 @@ def onboarding_accept(request: HttpRequest) -> HttpResponse:
     landed: CatalogMaster
     try:
         with transaction.atomic():
-            master = validate_invite_token(token_uuid, bot_user.tenant)
+            master = validate_invite_token(token_uuid, tenant)
 
             # Wrong-recipient guard (mirrors claim's check; can't happen
             # with status=PENDING but defence-in-depth — see claim's
             # comment).
-            if master.linked_bot_user_id is not None and master.linked_bot_user_id != bot_user.id:
+            if master.linked_bot_user_id is not None and (
+                bot_user is None or master.linked_bot_user_id != bot_user.id
+            ):
                 return _error(
                     "wrong_recipient",
                     "this invite was sent to a different MAX account",
@@ -655,15 +802,25 @@ def onboarding_accept(request: HttpRequest) -> HttpResponse:
             # the honest gap already has a correct downstream behaviour, because
             # an empty ``CatalogMaster.ayla_user_id`` is a named state
             # (``ayla_unlinked``), not a crash.
+            #
+            # DRF-1503: an invitee with no row yet has no key — nothing to glue by.
             person_ayla_user_id = (
-                _as_uuid(bot_user.ayla_user_id) if bot_user.ayla_user_id_is_proxy is False else None
+                _as_uuid(bot_user.ayla_user_id)
+                if bot_user is not None and bot_user.ayla_user_id_is_proxy is False
+                else None
             )
             glue = _glue_target(
-                tenant_id=bot_user.tenant_id,
+                tenant_id=master.tenant_id,
                 ayla_user_id=person_ayla_user_id,
                 exclude_pk=master.pk,
             )
-            if glue is not None and glue.linked_bot_user_id not in (None, bot_user.id):
+            # Закрыто по умолчанию (DRF-1503): связанная карточка склейки чужая,
+            # если строки у человека ещё нет вовсе — иначе тихо забрали бы её.
+            if (
+                glue is not None
+                and glue.linked_bot_user_id is not None
+                and (bot_user is None or glue.linked_bot_user_id != bot_user.id)
+            ):
                 # Один ``ayla_user_id`` на двух разных ``BotUser`` в одном
                 # салоне — расхождение личности, а не ретрай. Молча забрать
                 # чужую строку было бы ровно тем перенаправлением, которое
@@ -673,7 +830,7 @@ def onboarding_accept(request: HttpRequest) -> HttpResponse:
                     "invite_master=%s glue_master=%s linked_bot_user=%s — строка "
                     "с тем же ayla_user_id уже связана с другим MAX-аккаунтом "
                     "(DRF-1507).",
-                    bot_user.id,
+                    bot_user.id if bot_user is not None else None,
                     master.id,
                     glue.id,
                     glue.linked_bot_user_id,
@@ -694,6 +851,12 @@ def onboarding_accept(request: HttpRequest) -> HttpResponse:
                 )
             except MasterAddRefused as exc:
                 return master_add_refusal_response(exc)
+
+            # DRF-1503 — the invitee's row is born HERE: after the last refusal
+            # above (no ``return`` follows inside this transaction), together
+            # with the landing that gives it its role.
+            if bot_user is None:
+                bot_user = _new_invitee_row(request, master.tenant)
 
             if glue is not None:
                 landed = _land_on_glue_row(
@@ -789,6 +952,7 @@ def onboarding_accept(request: HttpRequest) -> HttpResponse:
     # ПОСЛЕ коммита и НЕ ломая приём: мастер уже принял, токен уже погашен, и
     # откат ради недоступного каталога потерял бы одноразовое приглашение. Отказ
     # уходит в лог по имени; дозвонить можно командой ``link_master_identities``.
+    assert bot_user is not None  # создан в транзакции приземления выше
     _link_identity_in_catalog(landed, bot_user)
 
     session_token, exp_ts = issue_master_session_token(
@@ -867,10 +1031,13 @@ def onboarding_reject(request: HttpRequest) -> HttpResponse:
 
     Audit captures the bot_user_id of whoever clicked reject — useful
     for ops if a master complains their invite was rejected before they
-    saw it.
+    saw it. An invitee with no row in the salon yet (DRF-1503) rejects
+    without one: no row is created for «Это не я», so the audit row has no
+    actor — the salon and the master card are still recorded (the token
+    stays on the card).
     """
 
-    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    bot_user: BotUser | None = request.bot_user  # type: ignore[attr-defined]
     body = _parse_json_body(request)
     if isinstance(body, JsonResponse):
         return body
@@ -879,9 +1046,23 @@ def onboarding_reject(request: HttpRequest) -> HttpResponse:
     if not token:
         return _error("bad_request", "token is required", 400)
 
+    if bot_user is None:
+        found = _invitee(request, token)
+        if isinstance(found, JsonResponse):
+            return found
+        tenant, bot_user = found
+        request.tenant = tenant  # type: ignore[attr-defined]
+        with tenant_scope(tenant):
+            return _reject(bot_user, token, tenant)
+    return _reject(bot_user, token, bot_user.tenant)
+
+
+def _reject(bot_user: BotUser | None, token: str, tenant: Tenant) -> HttpResponse:
+    """The rejection itself; ``bot_user`` is ``None`` for an invitee with no row yet."""
+
     try:
         with transaction.atomic():
-            master = validate_invite_token(token, bot_user.tenant)
+            master = validate_invite_token(token, tenant)
             master.invite_status = CatalogMaster.InviteStatus.CANCELLED
             # Keep invite_token populated on reject — ops may want to
             # forensically tie the cancellation to the original token in
@@ -894,7 +1075,7 @@ def onboarding_reject(request: HttpRequest) -> HttpResponse:
                 target="catalog.CatalogMaster",
                 target_id=master.id,
                 payload=_audit_payload(master, bot_user),
-                actor_id=bot_user.id,
+                actor_id=bot_user.id if bot_user is not None else None,
             )
             emit(
                 MASTER_ONBOARDING_REJECTED,

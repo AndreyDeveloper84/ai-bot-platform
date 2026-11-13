@@ -49,6 +49,7 @@ from apps.catalog.models import CatalogMaster
 from apps.identity.models import BotUser
 from apps.identity.services.bot_user_resolver import (
     SalonChoiceRequired,
+    is_staff_surface,
     resolve_bot_user,
     salon_choice_from,
 )
@@ -430,10 +431,27 @@ def require_init_data_only(
 ) -> Callable[..., HttpResponse]:
     """Init-data verification WITHOUT requiring a linked master.
 
-    Used by the ``/onboarding/*`` endpoints — at claim/accept time, the
-    BotUser may not yet be linked to any master. The decorator still
-    resolves + attaches the BotUser + Tenant + enters tenant_scope so
-    downstream queries are scoped correctly.
+    Used by the ``/onboarding/claim|accept|reject`` endpoints — and only by
+    them — at claim/accept time, the BotUser may not yet be linked to any
+    master. The decorator still resolves + attaches the BotUser + Tenant +
+    enters tenant_scope so downstream queries are scoped correctly.
+
+    ### The invitee: salon signature, no working row (DRF-1503)
+
+    A master invited by link opens the Mini App from the SALON bot before
+    the platform has any working row for them: the bot only delivers the
+    invitation (``salon_handler._handle_master_invite`` — no row, by the
+    owner's ruling D2→(б)), and since DRF-1785 a salon signature without a
+    working row resolves to nobody. Every new master by link got 404
+    ``user_not_registered`` — «Не удалось загрузить приглашение».
+
+    So for exactly this case the view is called with ``request.bot_user =
+    None`` and ``request.tenant = None``, inside ``tenant_scope(None)`` — a
+    client ``X-Tenant`` header must not decide where the audit lands. The
+    view names the salon by the TOKEN (DRF-1784) and does its own scoping.
+    Only the salon bot's signature gets this: a legacy single-token
+    signature and the client bot keep the 404 (the DEBUG dev-bypass always
+    brings a row, so it never reaches this branch).
 
     On failure: same envelope as :func:`require_master_init_data` minus
     the master-linkage checks.
@@ -461,6 +479,14 @@ def require_init_data_only(
                 # shows the chooser and repeats with X-Salon-Choice.
                 return _salon_choice_response(exc)
         if bot_user is None:
+            if verified is not None and is_staff_surface(verified):
+                # DRF-2009: без MAX id — только поверхность.
+                logger.info("master_api.auth.onboarding_invitee_without_row")
+                request.verified_init_data = verified  # type: ignore[attr-defined]
+                request.bot_user = None  # type: ignore[attr-defined]
+                request.tenant = None  # type: ignore[attr-defined]
+                with tenant_scope(None):
+                    return view_func(request, *args, **kwargs)
             return _error(
                 "user_not_registered",
                 "first interact with the bot before opening the Mini App",
