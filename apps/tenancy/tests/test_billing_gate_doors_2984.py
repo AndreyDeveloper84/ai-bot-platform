@@ -80,7 +80,7 @@ EXEMPT: dict[str, str] = {
         "создаёт САМ тенант соло вместе с единственным мастером: подписки ещё нет"
     ),
     "apps/master_api/views.py::_land_on_glue_row": (
-        "зовётся только из onboarding_accept после гейта (master_id=glue.id)"
+        "зовётся только из _accept (onboarding_accept) после гейта (master_id=glue.id)"
     ),
 }
 
@@ -126,7 +126,7 @@ def test_d1_the_scan_sees_the_known_doors():
 
     for door in (
         "apps/identity/services/staff_invites.py::link_master_to_person",
-        "apps/master_api/views.py::onboarding_accept",
+        "apps/master_api/views.py::_accept",
         "apps/admin_api/services/master_deactivation.py::reactivate_master",
         "apps/catalog/services/verification.py::_verify",
         "apps/admin_api/views.py::_master_update",
