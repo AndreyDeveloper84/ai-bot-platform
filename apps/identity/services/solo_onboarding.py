@@ -83,6 +83,7 @@ import re
 import struct
 from dataclasses import dataclass
 from enum import Enum
+from collections.abc import Iterable
 from typing import TYPE_CHECKING, Optional
 from uuid import UUID
 
@@ -292,6 +293,40 @@ def is_own_solo_slug(slug: str, channel: str, channel_user_id: str) -> bool:
     # ASCII digits, no leading zero: ``-02`` and ``-²`` are not what
     # ``_next_solo_slug`` writes, so they are not one's own either.
     return slug.startswith(prefix) and _SUFFIX_RE.fullmatch(tail) is not None and int(tail) >= 2
+
+
+def slug_proven_by(slug: str, identities: Iterable[tuple[str, str]]) -> bool:
+    """Is ``slug`` a solo cabinet self-registration made for one of ``identities``.
+
+    ``identities`` — the owners' ``(channel, channel_user_id)`` pairs. The proof
+    is a recompute of the slug from an owner identity, never the ``solo-``
+    prefix: a solo-shaped slug could have been written by anyone, a slug that
+    recomputes from its owner was written by provisioning for that person
+    (DRF-2325, :mod:`~apps.identity.management.commands.list_solo_tenant_slugs`).
+    """
+    return any(is_own_solo_slug(slug, channel, cuid) for channel, cuid in identities)
+
+
+def owner_identities(tenant_id: object) -> set[tuple[str, str]]:
+    """``(channel, channel_user_id)`` of EVERY owner row of the tenant.
+
+    Active and deactivated alike: the question is the cabinet's origin, not
+    today's authority. Ownership transfer deactivates the old row and adds a
+    new one, and the slug was computed once, from the first owner.
+    """
+    rows = TenantStaff.all_tenants.filter(
+        tenant_id=tenant_id, role=TenantStaff.Role.OWNER
+    ).values_list("bot_user__channel", "bot_user__channel_user_id")
+    return {(channel, cuid) for channel, cuid in rows if channel and cuid}
+
+
+def is_proven_solo_tenant(tenant: Tenant) -> bool:
+    """Was ``tenant`` created by solo provisioning for one of its owners.
+
+    Says nothing about ``is_active``: callers that need a live cabinet check
+    that themselves.
+    """
+    return slug_proven_by(tenant.slug, owner_identities(tenant.id))
 
 
 def solo_tenant_family(channel: str, channel_user_id: str) -> list[Tenant]:

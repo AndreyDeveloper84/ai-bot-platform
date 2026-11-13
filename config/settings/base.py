@@ -2768,6 +2768,12 @@ EVENT_INGEST_TENANT_VERIFY_FAIL_OPEN = (
 # branch only when its tenant AND its event name are both explicitly listed
 # AND the tenant exists in the bot DB.
 #
+# One exception on the TENANT dimension only (owner decision 13.11.2026,
+# OPEN_DECISIONS §176): an unlisted tenant passes when it is an active,
+# PROVEN solo cabinet — its slug recomputes from one of its owners'
+# identities. Solo masters self-register into fresh tenants nobody lists.
+# The event list still applies to them.
+#
 # BOTH default to empty = DENY ALL. An empty (or unset) value must never be
 # read as "no restriction". Parsing is strict — malformed input raises
 # ImproperlyConfigured at import time rather than silently widening access;
