@@ -114,7 +114,8 @@ class _FakeEntry:
     kcal: int = 0
     milestone_text: Any = None
     today_total_ml: int = 1250
-    # Ориентира нет ни у кого до утверждения методики (§82, §85).
+    # По умолчанию ориентира нет: норма приходит только с подтверждённым
+    # происхождением (§82, §85; DRF-2257).
     today_norm_ml: int | None = None
     alcohol_recovery_hint: bool = False
     raw: dict = field(default_factory=dict)

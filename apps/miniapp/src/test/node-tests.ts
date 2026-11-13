@@ -77,6 +77,7 @@ export const NODE_ENVIRONMENT_TESTS: readonly string[] = [
   "src/no-person-names.guard.test.ts",
   "src/screens/admin/adminBackDeclared2368.test.tsx",
   "src/screens/backContract.test.ts",
+  "src/screens/homeGoalRow2950.build.test.ts",
   "src/screens/masterDoors2150.build.test.ts",
   "src/screens/masterLinksResolve.guard.test.ts",
   "src/screens/navNeverHidden.guard.test.ts",
