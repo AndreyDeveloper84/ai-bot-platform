@@ -108,7 +108,7 @@ class TestD1TheAdminSet:
         # Литералами: состав набора утверждён владельцем, константа его не держит.
         assert labels == [
             "📅 Сегодня",
-            "🗒 Заявки от мастеров",
+            "🗒\ufe0f Заявки от мастеров",
             "Проверить готовность",
             "Открыть салон",
             "Расписание",
@@ -123,7 +123,7 @@ class TestD1TheAdminSet:
         from apps.channels.max import staff_menu
 
         assert staff_menu.LABEL_DAY_ADMIN == "📅 Сегодня"
-        assert staff_menu.LABEL_REQUESTS == "🗒 Заявки от мастеров"
+        assert staff_menu.LABEL_REQUESTS == "🗒\ufe0f Заявки от мастеров"
         assert staff_menu.LABEL_DAY_MASTER == "📅 Мой день"
 
 
@@ -135,7 +135,7 @@ class TestD2WithoutAMiniApp:
         assert len(sent) == 1
         assert _labels(sent[0]["buttons"]) == [
             "📅 Сегодня",
-            "🗒 Заявки от мастеров",
+            "🗒\ufe0f Заявки от мастеров",
             "Проверить готовность",
         ]
         assert all(b.get("type") == "callback" for b in sent[0]["buttons"])

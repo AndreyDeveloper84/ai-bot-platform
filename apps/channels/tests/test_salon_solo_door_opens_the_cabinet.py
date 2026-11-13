@@ -193,7 +193,10 @@ class TestNoDoorThatCannotOpen:
 
 
 class TestTheReadyBranchBuildsTheMenuForTheSoloRow:
-    """``READY`` сегодня недостижимо (ключа взяться неоткуда), но ветка есть — и строила меню не по той строке."""
+    """``READY`` достижимо с DRF-2450 (стенд 13.11.2026); ветка строила меню не по той строке.
+
+    Что в этом меню у соло — мастерская витрина (§69), стерегётся в
+    ``test_salon_solo_menu_69.py`` (здесь ``_send_menu`` подменён)."""
 
     def test_menu_uses_the_solo_row_and_the_entry(self, bot_user, said, monkeypatch, salon):
         """Красный до правки: роль читалась по салонной строке (customer), entry=None."""

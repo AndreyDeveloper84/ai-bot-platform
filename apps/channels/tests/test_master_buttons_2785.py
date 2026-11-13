@@ -394,7 +394,9 @@ class TestMasterTaps:
         assert _rows(sent) == [
             [
                 ("Да, отменить", f"cb:staff:cant_ok:{proxy.appointment_id}:1"),
-                ("Нет", "cb:staff:day"),
+                # DRF-1503: «Нет» возвращает в СВОЙ день мастера (`cb:staff:my_day`),
+                # не в «Сегодня» владелицы — у соло-мастера это день салона.
+                ("Нет", "cb:staff:my_day"),
             ]
         ]
 
@@ -458,7 +460,7 @@ class TestMasterDay:
                 ("Да, состоялся", f"cb:staff:mdone:{proxy.appointment_id}:2"),
                 ("Не пришёл", f"cb:staff:mnoshow:{proxy.appointment_id}:2"),
             ],
-            [("Не сейчас", "cb:staff:day")],
+            [("Не сейчас", "cb:staff:my_day")],  # DRF-1503 — см. выше
         ]
         assert stub.calls == []
 

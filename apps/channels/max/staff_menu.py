@@ -81,11 +81,26 @@ CB_REQUESTS = "cb:staff:requests"
 #: администратора — поимённый список того, что мешает записи.
 CB_READINESS = "cb:staff:readiness"
 
+#: §69 (вариант «в», DRF-1503): соло-мастер видит мастерскую витрину.
+#: «Мой день» соло — свой день мастера, а не день салона: у владелицы
+#: ``CB_DAY`` — день салона с «Визит состоялся?», и он остаётся там же, под
+#: «Салоном». Отдельный callback, чтобы смысл ``CB_DAY`` не поменялся ни в
+#: утреннем итоге владельца, ни в «Не сейчас» мастерских действий.
+CB_MY_DAY = "cb:staff:my_day"
+#: «Салон» соло-мастера: владельческое меню одной кнопкой (§69).
+CB_OWNER_MENU = "cb:staff:owner_menu"
+
 #: Labels of the chat buttons above — one place, so the menu and the morning
 #: digest (DRF-2769) cannot drift apart.
 LABEL_DAY_ADMIN = "📅 Сегодня"
 LABEL_DAY_MASTER = "📅 Мой день"
-LABEL_REQUESTS = "🗒 Заявки от мастеров"
+#: U+FE0F после 🗒 (DRF-1503): без него символ рисуется чёрно-белым
+#: текстовым знаком, а не цветным эмодзи, как соседние кнопки. Слова прежние.
+LABEL_REQUESTS = "🗒\ufe0f Заявки от мастеров"
+#: §69 — слово владельца «Салон»; значок — как у карточки «Салон» в Mini App.
+LABEL_OWNER_MENU = "🏢 Салон"
+#: Дверь мастера в Mini App — у мастера и у соло-мастера.
+LABEL_MY_CABINET = "🏠 Мой кабинет"
 #: DRF-2786 — the chat booking; distinct from the Mini App's «＋ Новая запись».
 LABEL_BOOK = "✍️ Записать клиента"
 
@@ -183,10 +198,33 @@ def _miniapp_button(entry, label: str) -> dict[str, str] | None:
 def menu_buttons(role_ctx, entry) -> list[dict[str, str]]:
     """Buttons for this person's roles, most-used first.
 
+    A solo master (§69, variant «в», DRF-1503) gets the MASTER's showcase:
+    «📅 Мой день», «🏢 Салон» (the owner's menu behind one button) and the
+    cabinet door. Everyone else — :func:`owner_menu_buttons`, by role.
+    """
+
+    from apps.identity.services.solo_view import is_solo_master
+
+    if is_solo_master(role_ctx):
+        buttons = [
+            {"label": LABEL_DAY_MASTER, "callback": CB_MY_DAY},
+            {"label": LABEL_OWNER_MENU, "callback": CB_OWNER_MENU},
+        ]
+        app_button = _miniapp_button(entry, LABEL_MY_CABINET)
+        if app_button is not None:
+            buttons.append(app_button)
+        return buttons
+    return owner_menu_buttons(role_ctx, entry)
+
+
+def owner_menu_buttons(role_ctx, entry) -> list[dict[str, str]]:
+    """The menu by role — for a solo master, what «🏢 Салон» opens.
+
     Roles are additive (ADR-0008): an owner who also works as a master gets
     both halves, deduplicated — the day view means "the salon's day" for an
     admin and "my day" for a master, so it appears once, labelled for the
-    stronger role.
+    stronger role. §69 rejected exactly this for a SOLO master; it stays for
+    the owner-master of a salon with a team.
     """
 
     buttons: list[dict[str, str]] = []
@@ -202,7 +240,7 @@ def menu_buttons(role_ctx, entry) -> list[dict[str, str]]:
     elif role_ctx.is_master:
         buttons.append({"label": LABEL_DAY_MASTER, "callback": CB_DAY})
 
-    label = "🏠 Кабинет салона" if is_admin_side else "🏠 Мой кабинет"
+    label = "🏠 Кабинет салона" if is_admin_side else LABEL_MY_CABINET
     app_button = _miniapp_button(entry, label)
     if app_button is not None:
         buttons.append(app_button)
@@ -222,7 +260,22 @@ def menu_attachments(role_ctx, entry) -> list[dict[str, Any]] | None:
 
 
 def menu_header(role_ctx, tenant) -> str:
-    """One line naming the salon and what this person can do here."""
+    """One line naming the salon and what this person can do here.
+
+    A solo master gets the master's line (§69); the owner's line stays behind
+    «🏢 Салон» — :func:`owner_menu_header`.
+    """
+
+    from apps.identity.services.solo_view import is_solo_master
+
+    salon = tenant.name or tenant.slug
+    if is_solo_master(role_ctx):
+        return f"Салон «{salon}». Ваш день и кабинет мастера."
+    return owner_menu_header(role_ctx, tenant)
+
+
+def owner_menu_header(role_ctx, tenant) -> str:
+    """The header by role — for a solo master, above what «🏢 Салон» opens."""
 
     salon = tenant.name or tenant.slug
     if role_ctx.is_owner or role_ctx.is_admin or role_ctx.is_receptionist:

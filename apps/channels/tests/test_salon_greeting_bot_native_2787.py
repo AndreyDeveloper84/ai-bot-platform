@@ -148,7 +148,7 @@ def _buttons(sent) -> list[tuple[str, str, bool]]:
 
 ADMIN_CHAT = [
     ("📅 Сегодня", "cb:staff:day", False),
-    ("🗒 Заявки от мастеров", "cb:staff:requests", False),
+    ("🗒\ufe0f Заявки от мастеров", "cb:staff:requests", False),
     ("✍️ Записать клиента", "cb:staff:bk_new", False),
     ("Проверить готовность", "cb:staff:readiness", False),
 ]

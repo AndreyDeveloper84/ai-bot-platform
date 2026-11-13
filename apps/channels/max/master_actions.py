@@ -34,7 +34,7 @@ from apps.channels.max.staff_menu import (
     CB_ACK_PREFIX,
     CB_CANT_OK_PREFIX,
     CB_CANT_PREFIX,
-    CB_DAY,
+    CB_MY_DAY,
     CB_MDONE_PREFIX,
     CB_MNOSHOW_PREFIX,
 )
@@ -103,7 +103,7 @@ def _settle_rows(appointment_id: str, version: int | None) -> list[list[dict[str
             {"label": staff_actions.LABEL_VISIT_DONE, "callback": f"{CB_MDONE_PREFIX}{ref}"},
             {"label": staff_actions.LABEL_VISIT_NO_SHOW, "callback": f"{CB_MNOSHOW_PREFIX}{ref}"},
         ],
-        [{"label": staff_actions.LABEL_VISIT_LATER, "callback": CB_DAY}],
+        [{"label": staff_actions.LABEL_VISIT_LATER, "callback": CB_MY_DAY}],
     ]
 
 
@@ -112,7 +112,7 @@ def _cancel_rows(appointment_id: str, version: int | None) -> list[list[dict[str
     return [
         [
             {"label": LABEL_CANCEL_YES, "callback": f"{CB_CANT_OK_PREFIX}{ref}"},
-            {"label": LABEL_CANCEL_NO, "callback": CB_DAY},
+            {"label": LABEL_CANCEL_NO, "callback": CB_MY_DAY},
         ]
     ]
 
@@ -158,7 +158,9 @@ def visit_question(*, tenant: Any, appointment_id: str) -> Reply:
 
     proxy = own_booking(tenant.id, appointment_id)
     if proxy is None:
-        return Reply(NOT_FOUND, [[{"label": staff_actions.LABEL_VISIT_LATER, "callback": CB_DAY}]])
+        return Reply(
+            NOT_FOUND, [[{"label": staff_actions.LABEL_VISIT_LATER, "callback": CB_MY_DAY}]]
+        )
     row = _to_rows([proxy], tenant.id)[0]
     line = f"{row.client_name} · {_when(tenant, proxy.start_at)}"
     if row.service_name:

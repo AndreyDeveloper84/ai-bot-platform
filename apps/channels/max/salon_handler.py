@@ -73,7 +73,9 @@ from apps.channels.max.staff_menu import (
     CB_MDONE_PREFIX,
     CB_MNOSHOW_PREFIX,
     CB_MVISIT_PREFIX,
+    CB_MY_DAY,
     CB_NOSHOW_PREFIX,
+    CB_OWNER_MENU,
     CB_REJECT_PREFIX,
     CB_VISIT_PREFIX,
     CB_READINESS,
@@ -81,10 +83,13 @@ from apps.channels.max.staff_menu import (
     OPEN_APP_PAYLOAD,
     menu_attachments,
     menu_header,
+    owner_menu_buttons,
+    owner_menu_header,
 )
 from apps.events.services import emit
 from apps.identity.services.identity_card import WHOAMI_COMMAND, build_card, render_for_person
 from apps.identity.services.role_resolver import resolve_role
+from apps.identity.services.solo_view import is_solo_master
 from apps.identity.services.staff_invites import (
     InviteError,
     MasterAddBlocked,
@@ -914,7 +919,9 @@ def _greet_or_menu(event: CanonicalEvent, role_ctx, tenant, bot_user, entry) -> 
     text, buttons = built
     first = salon_greeting.is_first_entry(bot_user)
     _reply(event, text, attachments=_greeting_attachments(buttons, role_ctx, entry))
-    if first and (role_ctx.is_owner or role_ctx.is_admin):
+    # Соло-мастер приветствуется как мастер (§69), и первое владельческое
+    # приветствие ему не положено — отмечать его нечем.
+    if first and (role_ctx.is_owner or role_ctx.is_admin) and not is_solo_master(role_ctx):
         salon_greeting.mark_greeted(bot_user)
 
 
@@ -1824,9 +1831,9 @@ def _register_solo_provider(
     )
 
     if result.setup_state is SoloSetupState.READY:
-        # Сегодня недостижимо — ключа взяться неоткуда, — но ветка есть,
-        # чтобы в день, когда связывание заработает, человек не получил
-        # текст про ожидание. Меню — по строке СОЛО-тенанта
+        # Достижимо с DRF-2450: связь создаётся в том же ходе (ручной проход
+        # на стенде 13.11.2026 пришёл именно сюда). С DRF-1503 меню здесь —
+        # мастерская витрина соло (§69), а не владельческое. Меню — по строке СОЛО-тенанта
         # (`result.bot_user`), а не по салонной `bot_user`: `resolve_role`
         # читает роли в тенанте своей строки, и салонная строка — customer.
         # До DRF-1756 здесь стояли `resolve_role(bot_user)` и `entry=None`
@@ -1879,6 +1886,30 @@ def _handle_button(event: CanonicalEvent, role_ctx, bot_user, tenant, entry) -> 
     # (IsTenantAdmin) and the admin Mini App (`require_admin_role`).
     can_settle = role_ctx.is_owner or role_ctx.is_admin
 
+    if action == CB_OWNER_MENU:
+        # §69 (вариант «в», DRF-1503): «🏢 Салон» соло-мастера — владельческое
+        # меню одной кнопкой. Меню по роли: у не-соло это то же меню, что и так
+        # стоит под каждым ответом, — чужой эта кнопка ни для кого не станет.
+        _reply(
+            event,
+            owner_menu_header(role_ctx, tenant),
+            attachments=[
+                outbound.make_inline_keyboard_attachment(
+                    owner_menu_buttons(role_ctx, entry), columns=1
+                )
+            ],
+        )
+        return
+    if action == CB_MY_DAY:
+        # Свой день мастера — у того, кто мастер; соло-мастер приходит сюда из
+        # своей витрины (``CB_DAY`` у владелицы — день салона).
+        master = _master_of(bot_user) if role_ctx.is_master else None
+        if master is None:
+            _send_menu(event, role_ctx, tenant, entry)
+            return
+        body = staff_actions.master_day(master)
+        _reply(event, body, attachments=_master_day_attachments(master, body, role_ctx, entry))
+        return
     if action == CB_DAY:
         if is_admin_side:
             _reply(
@@ -2288,7 +2319,7 @@ def _handle_talk(event: CanonicalEvent, role_ctx, bot_user, tenant, entry) -> No
             body, buttons = built
             first = salon_greeting.is_first_entry(bot_user)
             _reply(event, body, attachments=_greeting_attachments(buttons, role_ctx, entry))
-            if first:
+            if first and not is_solo_master(role_ctx):
                 salon_greeting.mark_greeted(bot_user)
             if not hidden:
                 _remember(thread, role="assistant", content=body)

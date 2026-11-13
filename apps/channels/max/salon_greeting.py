@@ -548,6 +548,28 @@ def greeting_master_buttons(entry: Any) -> list[dict[str, str]]:
     return digest_master_buttons(entry)
 
 
+def solo_greeting_buttons(entry: Any) -> list[dict[str, str]]:
+    """Приветствие соло-мастера (§69, «в», DRF-1503): витрина мастера плюс «Салон».
+
+    «📅 Мой день» — свой день (``CB_MY_DAY``, а не ``CB_DAY``: у владелицы тот
+    — день салона), «🏢 Салон» — владельческое меню одной кнопкой, затем экраны
+    Mini App мастера, как у :func:`greeting_master_buttons`.
+    """
+    from apps.channels.max.staff_menu import (
+        CB_MY_DAY,
+        CB_OWNER_MENU,
+        LABEL_DAY_MASTER,
+        LABEL_OWNER_MENU,
+    )
+
+    chat = [
+        {"label": LABEL_DAY_MASTER, "callback": CB_MY_DAY},
+        {"label": LABEL_OWNER_MENU, "callback": CB_OWNER_MENU},
+    ]
+    app = [b for b in master_buttons(entry) if b.get("label") != BUTTON_TODAY]
+    return chat + app
+
+
 def first_buttons(entry: Any) -> list[dict[str, str]]:
     """«Проверить готовность» — callback в чат (DRF-2117), «Открыть салон» — Mini App."""
     from apps.channels.max.staff_menu import CB_READINESS, _miniapp_button
@@ -584,10 +606,17 @@ def build_greeting(
     """(текст, кнопки) по роли — или ``None``, если для роли приветствия нет (ресепшн).
 
     Мастер → мастерское; владелец / администратор → первое или обычное.
+    Соло-мастер (§69, «в», DRF-1503) → мастерское с «Салоном», мимо первого
+    владельческого «Ваша роль — владелец… готов ли салон».
     """
+
+    from apps.identity.services.solo_view import is_solo_master
 
     salon = getattr(tenant, "name", "") or getattr(tenant, "slug", "")
     name = _display_name(bot_user, role_ctx)
+    if is_solo_master(role_ctx):
+        data = gather(tenant, role_ctx, now=now)
+        return render_master(name, salon, data), solo_greeting_buttons(entry)
     is_admin_side = getattr(role_ctx, "is_owner", False) or getattr(role_ctx, "is_admin", False)
     if is_admin_side:
         role_word = admin_role_word(role_ctx)
