@@ -986,16 +986,19 @@ class TestStartupChecks:
         assert "DENY ALL" in line
         assert any(r.levelno >= logging.ERROR for r in caplog.records)
 
-    def test_events_without_tenants_is_deny_all_error(
+    def test_events_without_tenants_is_solo_only_error(
         self, caplog: pytest.LogCaptureFixture
     ) -> None:
+        """§176: an empty tenant list no longer means deny-all — proven solo
+        cabinets still pass the tenant dimension, so the line names that."""
         with override_settings(
             EVENT_INGEST_ALLOWED_TENANTS=frozenset(),
             EVENT_INGEST_ALLOWED_EVENTS=PILOT_EVENTS,
         ):
             messages = self._run(caplog)
         line = next(m for m in messages if "allowlist_half_configured" in m)
-        assert "DENY ALL" in line
+        assert "SOLO ONLY" in line
+        assert "DENY ALL" not in line
 
     def test_fully_configured_reports_active_pilot_scope(
         self, caplog: pytest.LogCaptureFixture

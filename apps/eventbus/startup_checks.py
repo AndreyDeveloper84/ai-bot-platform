@@ -165,13 +165,15 @@ def check_event_ingest_allowlists() -> None:
             "eventbus.ingest.allowlist_half_configured security=medium "
             "EVENT_INGEST_ALLOWED_EVENTS has %d entr(ies) but "
             "EVENT_INGEST_ALLOWED_TENANTS is EMPTY — the effective policy is "
-            "DENY ALL. The event allowlist alone admits nothing.",
+            "SOLO ONLY: no salon is admitted, only proven solo cabinets "
+            "(OPEN_DECISIONS §176). List the pilot salons' tenant ids.",
             len(events),
         )
     else:
         logger.info(
             "eventbus.ingest.allowlist_active verification_mode=pilot_allowlist "
-            "tenants=%d events=%s — Controlled Pilot scope. This bounds WHICH "
+            "tenants=%d events=%s — Controlled Pilot scope, plus every proven "
+            "solo cabinet (OPEN_DECISIONS §176). This bounds WHICH "
             "TENANT-SCOPED events may be ingested. It does NOT prove the "
             "user-tenant relationship (Public MVP requirement), and it does "
             "NOT bound the tenant-null events (%s), which are authorized by "

@@ -48,7 +48,16 @@ OD-T02-1 replaces that with a bounded middle ground. When the canonical
 model is unavailable, an envelope is admitted only if its tenant is in
 ``EVENT_INGEST_ALLOWED_TENANTS``, its event name is in
 ``EVENT_INGEST_ALLOWED_EVENTS``, and the tenant exists in the bot DB.
-Both settings default to empty = deny all. See
+Both settings default to empty = deny all.
+
+A tenant outside the env list is admitted on the tenant dimension when it
+is a PROVEN solo cabinet (owner decision 13.11.2026, OPEN_DECISIONS §176):
+an active bot ``Tenant`` whose slug recomputes from one of its owners'
+identities (:func:`apps.identity.services.solo_onboarding.is_proven_solo_tenant`).
+A solo master registers on their own and gets a fresh tenant the operator
+never listed, so their booking events were rejected and the master was never
+told about a new booking. The ``solo-`` prefix alone admits nothing; the
+event dimension still applies. See
 :mod:`apps.eventbus.ingest_allowlist` for the parsing contract and
 :func:`assert_envelope_tenant_authorized` for the precedence order.
 
@@ -74,6 +83,7 @@ scans handler source code for a call to this exact function name.
 from __future__ import annotations
 
 import logging
+import uuid
 from dataclasses import dataclass
 from typing import Any
 
@@ -239,8 +249,9 @@ class _PilotDecision:
     configured at all (both allowlists empty). The ordinary, safe
     fail-closed resting state.
     ``event_not_allowed`` — event name not in ``EVENT_INGEST_ALLOWED_EVENTS``.
-    ``tenant_not_allowed`` — tenant not in ``EVENT_INGEST_ALLOWED_TENANTS``
-    (also covers a non-canonical / unparseable ``tenant_id``).
+    ``tenant_not_allowed`` — tenant neither in ``EVENT_INGEST_ALLOWED_TENANTS``
+    nor a proven active solo cabinet (also covers a non-canonical /
+    unparseable ``tenant_id``).
     ``tenant_not_found`` — allowlisted, but no active ``Tenant`` row in the
     bot DB (unknown or soft-disabled tenant).
     ``tenant_lookup_error`` — the DB lookup itself failed; fail closed
@@ -251,6 +262,9 @@ class _PilotDecision:
 
     allowed: bool
     reason: str | None = None
+    #: On allow — which door admitted the tenant: ``"allowlist"`` (the env
+    #: list) or ``"solo_proof"`` (a proven solo cabinet, §176). ``None`` on deny.
+    admitted_by: str | None = None
 
 
 def _evaluate_pilot_allowlist(*, event_name: str, tenant_id: str) -> _PilotDecision:
@@ -259,7 +273,9 @@ def _evaluate_pilot_allowlist(*, event_name: str, tenant_id: str) -> _PilotDecis
     Called only when the canonical ``TenantUserRelationship`` is
     unavailable. All four conditions must hold for an allow:
 
-    1. ``tenant_id`` is in ``EVENT_INGEST_ALLOWED_TENANTS``;
+    1. ``tenant_id`` is in ``EVENT_INGEST_ALLOWED_TENANTS`` — OR it is a
+       proven solo cabinet (§176): its slug recomputes from one of its
+       owners' identities;
     2. ``event_name`` is in ``EVENT_INGEST_ALLOWED_EVENTS``;
     3. the tenant genuinely exists (and is active) in the bot DB;
     4. (established by the caller chain) the envelope already passed HMAC
@@ -267,7 +283,9 @@ def _evaluate_pilot_allowlist(*, event_name: str, tenant_id: str) -> _PilotDecis
        parser — this helper runs strictly downstream of both.
 
     Every failure mode returns a deny. There is no branch in this function
-    that can return ``allowed=True`` without all of 1–3 holding.
+    that can return ``allowed=True`` without all of 1–3 holding. The solo
+    door widens condition 1 only: the event dimension and the active-row
+    check apply to it unchanged.
     """
     # (0) Configuration. A malformed value is deny-all, never allow-all —
     # the process normally refuses to boot on bad config (base.py raises
@@ -309,8 +327,14 @@ def _evaluate_pilot_allowlist(*, event_name: str, tenant_id: str) -> _PilotDecis
     # here would authorize an envelope that then explodes in the handler.
     # Let it fall through to a clean ``tenant_not_allowed`` reject instead.
     normalized_tenant = tenant_id.lower() if isinstance(tenant_id, str) else ""
-    if not normalized_tenant or normalized_tenant not in allowed_tenants:
+    if not normalized_tenant:
         return _PilotDecision(allowed=False, reason="tenant_not_allowed")
+    if normalized_tenant not in allowed_tenants:
+        # (2b) The solo door (§176). Not listed by the operator — admitted
+        # only when the DB proves a live solo cabinet. A deny keeps the
+        # ``tenant_not_allowed`` reason, so an unlisted salon reads exactly
+        # as before.
+        return _evaluate_solo_door(tenant_id=tenant_id, normalized_tenant=normalized_tenant)
 
     # (3) Local existence. An allowlist entry is an operator's claim; this
     # is the check that the claim corresponds to a real row. ``Tenant.objects``
@@ -334,7 +358,47 @@ def _evaluate_pilot_allowlist(*, event_name: str, tenant_id: str) -> _PilotDecis
     if not exists:
         return _PilotDecision(allowed=False, reason="tenant_not_found")
 
-    return _PilotDecision(allowed=True)
+    return _PilotDecision(allowed=True, admitted_by="allowlist")
+
+
+def _evaluate_solo_door(*, tenant_id: str, normalized_tenant: str) -> _PilotDecision:
+    """Tenant dimension for a tenant the env list does not name (§176).
+
+    Allow only an ACTIVE bot ``Tenant`` that is a proven solo cabinet: its
+    slug recomputes from one of its owners' ``(channel, channel_user_id)``
+    (:func:`~apps.identity.services.solo_onboarding.is_proven_solo_tenant`).
+    The ``solo-`` prefix proves nothing — any slug can look solo-shaped.
+
+    The wire value must already be a canonical UUID: anything else is
+    ``tenant_not_allowed``, exactly as before this door existed, and never
+    reaches the DB. A DB failure fails CLOSED (``tenant_lookup_error``).
+    """
+    try:
+        canonical = str(uuid.UUID(normalized_tenant))
+    except (ValueError, AttributeError, TypeError):
+        return _PilotDecision(allowed=False, reason="tenant_not_allowed")
+    if canonical != normalized_tenant:
+        return _PilotDecision(allowed=False, reason="tenant_not_allowed")
+
+    try:
+        from apps.identity.services.solo_onboarding import is_proven_solo_tenant
+        from apps.tenancy.models import Tenant
+
+        # Active-only manager: a closed cabinet (account deletion leaves a
+        # tombstone) must not ingest.
+        tenant = Tenant.objects.filter(id=canonical).first()
+        proven = tenant is not None and is_proven_solo_tenant(tenant)
+    except Exception as exc:  # noqa: BLE001 — DB / import failure
+        logger.warning(
+            "eventbus.ingest.tenant_allowlist.solo_lookup_error tenant_id=%s error=%s",
+            _safe_log_value(tenant_id),
+            type(exc).__name__,
+        )
+        return _PilotDecision(allowed=False, reason="tenant_lookup_error")
+
+    if not proven:
+        return _PilotDecision(allowed=False, reason="tenant_not_allowed")
+    return _PilotDecision(allowed=True, admitted_by="solo_proof")
 
 
 def _log_pilot_accepted(
@@ -344,8 +408,13 @@ def _log_pilot_accepted(
     tenant_id: str,
     user_id: str,
     correlation_id: str | None,
+    admitted_by: str | None = None,
 ) -> None:
     """Structured audit line for an event admitted by the pilot allowlist.
+
+    ``admitted_by`` names the door: ``allowlist`` (env list) or
+    ``solo_proof`` (proven solo cabinet, §176), so an operator can list the
+    tenants that entered without being named.
 
     Identifiers only — never the payload. ``event_id``/``correlation_id``
     are the join keys an operator needs to reconcile a bot-side accept with
@@ -361,12 +430,13 @@ def _log_pilot_accepted(
     logger.info(
         "eventbus.ingest.tenant_verify_accepted "
         "verification_mode=pilot_allowlist event_id=%s event_name=%s "
-        "tenant_id=%s user_id=%s correlation_id=%s",
+        "tenant_id=%s user_id=%s correlation_id=%s admitted_by=%s",
         _safe_log_value(event_id),
         _safe_log_value(event_name),
         _safe_log_value(tenant_id),
         _safe_log_value(user_id),
         _safe_log_value(correlation_id),
+        _safe_log_value(admitted_by),
     )
 
 
@@ -651,6 +721,7 @@ def assert_envelope_tenant_authorized(envelope: Any) -> None:
             tenant_id=tenant_id,
             user_id=user_id,
             correlation_id=correlation_id,
+            admitted_by=decision.admitted_by,
         )
         return
 
