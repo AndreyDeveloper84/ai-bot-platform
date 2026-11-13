@@ -559,3 +559,34 @@ class TestWiring:
 
         assert seen.get("called") is True
         assert result == {"checked": []}
+
+
+def test_wire_aliases_cover_consumer_renames() -> None:
+    """Every slug the created-consumer renames is folded by the reconcile.
+
+    A rename added to ``normalize_booking_created_status`` without an alias
+    would bring back the false «статус разошёлся» page for that state.
+    """
+    from apps.booking.mirror_status import WIRE_STATUS_ALIASES
+    from apps.eventbus.consumers.booking import (
+        UnknownBookingStatusError,
+        normalize_booking_created_status,
+    )
+
+    candidates = {
+        "pending",
+        "awaiting_payment",
+        "pending_payment",
+        "confirmed",
+        "tentative",
+        "completed",
+        "cancelled",
+        "no_show",
+    }
+    for raw in sorted(candidates):
+        try:
+            stored = normalize_booking_created_status(raw)
+        except UnknownBookingStatusError:
+            continue
+        if stored != raw:
+            assert WIRE_STATUS_ALIASES.get(raw) == stored, raw

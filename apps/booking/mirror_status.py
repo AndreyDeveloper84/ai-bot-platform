@@ -27,3 +27,12 @@ LIVE_STATUSES: Final[frozenset[str]] = frozenset(
 
 #: The visit will not happen, or already did. Terminal.
 TERMINAL_STATUSES: Final[frozenset[str]] = frozenset({"cancelled", "completed", "no_show"})
+
+#: Ayla wire slug → the spelling the mirror stores for the SAME state. The
+#: ``booking.created`` consumer writes ``awaiting_payment`` as
+#: ``pending_payment`` (``normalize_booking_created_status``); comparing the two
+#: raw reads one state as two. Only renames belong here: ``tentative`` has no
+#: Ayla counterpart (Ayla's pre-payment state is ``pending``), so it is not an
+#: alias. ``test_wire_aliases_cover_consumer_renames`` keeps this in step with
+#: the consumer.
+WIRE_STATUS_ALIASES: Final[dict[str, str]] = {"awaiting_payment": "pending_payment"}

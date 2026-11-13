@@ -75,7 +75,7 @@ from django.db.models import Q
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
-from apps.booking.mirror_status import LIVE_STATUSES, TERMINAL_STATUSES
+from apps.booking.mirror_status import LIVE_STATUSES, TERMINAL_STATUSES, WIRE_STATUS_ALIASES
 from apps.booking.models import RemoteBookingProxy
 from apps.integrations.ayla.salon_client import (
     SalonAPIError,
@@ -117,18 +117,14 @@ def _is_live(status: str) -> bool:
     return status in LIVE_STATUSES or status not in TERMINAL_STATUSES
 
 
-#: Ayla's wire slug for «ожидает оплаты» is ``awaiting_payment``; the
-#: ``booking.created`` consumer stores it as ``pending_payment``
-#: (``normalize_booking_created_status``). One state, two spellings — compared
-#: raw, every prepaid booking read as «статус разошёлся» and paged ops on the
-#: second tick. Only this alias is folded: any other difference is real.
-_STATUS_ALIASES: Mapping[str, str] = {"awaiting_payment": "pending_payment"}
-
-
 def _same_status(a: str, b: str) -> bool:
-    """Equal after folding the known spelling alias, never looser."""
+    """Equal after folding a known wire→mirror rename, never looser.
 
-    return _STATUS_ALIASES.get(a, a) == _STATUS_ALIASES.get(b, b)
+    Compared raw, every prepaid booking read as «статус разошёлся» and paged
+    ops on the second tick. Any difference outside the alias table is real.
+    """
+
+    return WIRE_STATUS_ALIASES.get(a, a) == WIRE_STATUS_ALIASES.get(b, b)
 
 
 @dataclass(frozen=True)
