@@ -29,15 +29,35 @@ pytestmark = pytest.mark.django_db
 IDENTITY = "solo-dialog-1"
 
 
+#: Имя бота в `message.sender` нажатия — так его кладёт MAX (DRF-1503).
+BOT_NAME = "Ayla Бот для мастеров"
+
+
 class _Event:
-    """Фейк события — ровно те поля, которые читает дверь (как в test_salon_solo_door)."""
+    """Фейк события — ровно те поля, которые читает дверь (как в test_salon_solo_door).
+
+    `raw` — В ФОРМЕ MAX, а не удобной (DRF-1503, ручной проход 13.11.2026):
+    нажатие (`cb:…`) — это `message_callback`, у него человек в
+    `callback.user`, а `message` — сообщение БОТА с клавиатурой, и в его
+    `sender` стоит бот. Прежний фейк клал имя человека в `message.sender`
+    и для нажатий — такой формы не бывает, и потому весь набор был зелёным,
+    пока бот предлагал соло-мастеру своё же имя. Текст — `message_created`,
+    человек в `message.sender`.
+    """
 
     def __init__(self, text: str, *, name: str | None = "Ольга"):
         self.text = text
         self.chat_id = "555"
         self.channel = "max"
         self.channel_user_id = IDENTITY
-        self.raw = {"message": {"sender": {"name": name}}} if name else {}
+        if text.startswith("cb:"):
+            person = {"user_id": IDENTITY, "name": name} if name else {"user_id": IDENTITY}
+            self.raw = {
+                "callback": {"callback_id": "cb-1", "payload": text, "user": person},
+                "message": {"sender": {"user_id": 1, "name": BOT_NAME, "is_bot": True}},
+            }
+        else:
+            self.raw = {"message": {"sender": {"user_id": IDENTITY, "name": name}}} if name else {}
 
 
 @pytest.fixture(autouse=True)
