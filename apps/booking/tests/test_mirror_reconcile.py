@@ -188,6 +188,38 @@ class TestComparison:
         assert not report.is_clean()
         assert report.status_mismatch == ((str(row.appointment_id), "confirmed", "cancelled"),)
 
+    def test_awaiting_payment_matches_pending_payment(self, tenant: Tenant) -> None:
+        """Ayla ``awaiting_payment`` and the mirror's ``pending_payment`` are one state."""
+        row = _proxy(tenant, status="pending_payment")
+        client = FakeSalonClient(
+            {
+                NOW.date() + dt.timedelta(days=2): [
+                    _booking(row.appointment_id, status="awaiting_payment")
+                ]
+            }
+        )
+
+        report = _run(tenant, client)
+
+        assert report.is_clean()
+
+    def test_awaiting_payment_vs_confirmed_is_still_divergence(self, tenant: Tenant) -> None:
+        """The alias folds one spelling, not «any live status»."""
+        row = _proxy(tenant, status="confirmed")
+        client = FakeSalonClient(
+            {
+                NOW.date() + dt.timedelta(days=2): [
+                    _booking(row.appointment_id, status="awaiting_payment")
+                ]
+            }
+        )
+
+        report = _run(tenant, client)
+
+        assert report.status_mismatch == (
+            (str(row.appointment_id), "awaiting_payment", "confirmed"),
+        )
+
     def test_moved_start_is_divergence(self, tenant: Tenant) -> None:
         row = _proxy(tenant)
         moved = NOW + dt.timedelta(days=2, hours=3)

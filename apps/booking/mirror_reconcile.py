@@ -117,6 +117,20 @@ def _is_live(status: str) -> bool:
     return status in LIVE_STATUSES or status not in TERMINAL_STATUSES
 
 
+#: Ayla's wire slug for «ожидает оплаты» is ``awaiting_payment``; the
+#: ``booking.created`` consumer stores it as ``pending_payment``
+#: (``normalize_booking_created_status``). One state, two spellings — compared
+#: raw, every prepaid booking read as «статус разошёлся» and paged ops on the
+#: second tick. Only this alias is folded: any other difference is real.
+_STATUS_ALIASES: Mapping[str, str] = {"awaiting_payment": "pending_payment"}
+
+
+def _same_status(a: str, b: str) -> bool:
+    """Equal after folding the known spelling alias, never looser."""
+
+    return _STATUS_ALIASES.get(a, a) == _STATUS_ALIASES.get(b, b)
+
+
 @dataclass(frozen=True)
 class BookingFact:
     """The three facts the comparison needs about one booking."""
@@ -290,7 +304,7 @@ def compare(
             # Liveness disagrees — a missed cancel/confirm event whichever
             # way it points.
             status_mismatch.append((appointment_id, a.status, m.status))
-        elif m_live and m.status != a.status:
+        elif m_live and not _same_status(m.status, a.status):
             # Both live but under different slugs (confirmed vs
             # awaiting_payment) — the day screens still show the visit,
             # yet the mirror is stale and the detector should say so.
