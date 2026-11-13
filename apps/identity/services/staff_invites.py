@@ -667,6 +667,11 @@ def _grant_staff_role(invite: StaffInvite, bot_user: BotUser) -> RedeemResult:
     )
 
 
+#: Роли бота, у которых есть каталожная половина — admin TUR салона в
+#: каталоге (DRF-2085; ``owner`` — решение владельца 13.11.2026).
+_CATALOG_ADMIN_ROLES = frozenset({StaffInvite.Role.ADMIN, StaffInvite.Role.OWNER})
+
+
 def grant_staff_role(
     *,
     tenant_id: Any,
@@ -695,7 +700,8 @@ def grant_staff_role(
     Must run inside ``transaction.atomic`` (the savepoint below needs an
     enclosing transaction to roll back into).
 
-    **DRF-2085 — the catalog half of ``admin``.** For ``role=admin`` the
+    **DRF-2085 — the catalog half of ``admin`` (and ``owner`` since the
+    owner ruling of 13.11.2026).** For ``role=admin``/``owner`` the
     catalog is asked FIRST (``salon_admin_link.ensure_catalog_salon_admin``:
     fresh salon-administrator account + TUR + MAX link, idempotent per
     (tenant, person)) and only then is ``TenantStaff`` written. A refusal
@@ -711,11 +717,18 @@ def grant_staff_role(
 
     Raises:
       OwnerAlreadyExists — the tenant already has an active owner.
-      CatalogAdminLinkRefused — role=admin, the catalog half was refused.
+      CatalogAdminLinkRefused — role=admin/owner, the catalog half was refused.
     """
 
     link_outcome = None
-    if role == StaffInvite.Role.ADMIN and link_catalog:
+    # Решение владельца 13.11.2026 (аудит регистрации салона, п.4, вариант «а»):
+    # каталожная половина — и у ``owner``. Владелец пишет часы и отгулы
+    # мастеров своим MAX-токеном, каталог пускает только admin TUR салона
+    # (``IsTenantAdmin``), а владелец без неё получал 403
+    # ``salon_write_refused`` на первом же сохранении. Дверь та же —
+    # только оператор («Выдать роль» / «Сменить роль»); код приглашения
+    # каталог по-прежнему не зовёт (``link_catalog=False``, ruling п.1).
+    if role in _CATALOG_ADMIN_ROLES and link_catalog:
         from apps.identity.services import salon_admin_link
 
         tenant = Tenant.all_objects.get(pk=tenant_id)
