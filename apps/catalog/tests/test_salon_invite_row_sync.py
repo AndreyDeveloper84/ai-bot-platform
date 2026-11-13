@@ -104,6 +104,18 @@ class TestСинкНаходитСтрокуПриглашения:
         assert result.errors == []
         assert CatalogMaster.all_tenants.filter(tenant=salon).count() == 1
 
+    def test_пустой_пользователь_в_фиде_не_стирает_записанный_связью(self, salon: Tenant) -> None:
+        specialist = str(uuid.uuid4())
+        row = _invite_row(
+            salon, catalog_specialist_id=specialist, ayla_user_id=uuid.UUID(AYLA_USER)
+        )
+
+        result = upsert_specialists(salon, [_dto(specialist, user_id=None)])
+
+        assert result.errors == []
+        row.refresh_from_db()
+        assert str(row.ayla_user_id) == AYLA_USER
+
 
 class TestСвязьЗапоминаетПользователяКаталога:
     def test_пустое_поле_заполняется(self, salon: Tenant) -> None:
@@ -227,3 +239,56 @@ class TestПодметальщикСвязываетПринявшего:
         row.refresh_from_db()
         assert row.catalog_specialist_id is not None
         assert row.ayla_user_id is None
+
+    def test_временный_отказ_повторяется_следующим_тиком(
+        self, salon: Tenant, person: BotUser, httpx_mock: HTTPXMock
+    ) -> None:
+        """Иначе после привязки строка уходила из выборки, и отказ становился вечным."""
+        row = _invite_row(salon, linked_bot_user=person, invite_status=ACCEPTED)
+        httpx_mock.add_response(
+            method="POST",
+            json={
+                "error": {
+                    "code": "SPECIALIST_IDENTITY_LINK_REFUSED",
+                    "message": "x",
+                    "details": {"reason": "rate_limited"},
+                }
+            },
+            status_code=429,
+        )
+        first = link_unlinked_salon_masters()
+        httpx_mock.add_response(
+            method="POST",
+            json={
+                "data": {
+                    "specialist_id": str(uuid.uuid4()),
+                    "ayla_user_id": AYLA_USER,
+                    "status": "created",
+                }
+            },
+            status_code=201,
+        )
+
+        second = link_unlinked_salon_masters()
+
+        assert first["identity_refused"] == 1
+        assert second["identity_linked"] == 1
+        row.refresh_from_db()
+        assert str(row.ayla_user_id) == AYLA_USER
+
+    def test_непредвиденная_ошибка_связи_не_роняет_тик(
+        self, salon: Tenant, person: BotUser, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from apps.identity.services import specialist_identity_link as link_mod
+
+        def _boom(*args: Any, **kwargs: Any) -> Any:
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(link_mod, "bind_master_identity_in_catalog", _boom)
+        _invite_row(salon, linked_bot_user=person, invite_status=ACCEPTED)
+        _invite_row(salon)
+
+        counters = link_unlinked_salon_masters()
+
+        assert counters["linked"] == 2
+        assert counters["identity_refused"] == 1

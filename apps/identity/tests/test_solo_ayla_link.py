@@ -211,4 +211,7 @@ class TestTheWritersOfTheKeyAreCounted:
             "apps/master_api/views.py",
             # Соло-путь: Ayla о таком мастере не знает и не узнает.
             "apps/identity/services/solo_ayla_link.py",
+            # Связь личности мастера салона в каталоге (приём, подметальщик,
+            # link_master_identities) — blank-fill из ответа двери каталога.
+            "apps/catalog/identity.py",
         }, writers

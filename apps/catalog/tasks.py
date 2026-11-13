@@ -754,25 +754,49 @@ def link_unlinked_salon_masters() -> dict[str, int]:
                 previous_contour_reason = None
                 counters["linked"] += 1
 
-                # Мастер принял приглашение, пока каталог лежал: приём
-                # связать личность не смог (не было id каталога), и без связи
-                # кабинет отвечает 403 ``subject_unresolved``, а синк не
-                # находит строку по ``ayla_user_id``. Связь — тут же, тем же
-                # идемпотентным ключом; отказ — в журнал по имени, тик идёт.
-                if master.invite_status == ACCEPTED and master.linked_bot_user_id:
-                    try:
-                        bind_accepted_master(master, actor_label=ACTOR_LINK_SWEEP)
-                    except SpecialistIdentityLinkRefused as exc:
-                        counters["identity_refused"] += 1
-                        logger.warning(
-                            "catalog.link_sweep.identity_link_refused master=%s reason=%s "
-                            "correlation_id=%s — дозвонить: link_master_identities --apply",
-                            master.pk,
-                            exc.reason,
-                            exc.correlation_id,
-                        )
-                    else:
-                        counters["identity_linked"] += 1
+    # Проход 3 — связь личности принявших мастеров. Строка с id каталога, но
+    # без ``ayla_user_id``: приём не смог связать (каталог лежал, не было id
+    # каталога, временный отказ), и без связи кабинет отвечает 403
+    # ``subject_unresolved``. Отдельным проходом, а не хвостом прохода 2:
+    # после привязки строка уходит из ``_unlinked_invited``, и разовая
+    # попытка там превращала временный отказ в постоянный. Здесь строка
+    # берётся каждый тик до срока; ключ идемпотентности тот же, повтор
+    # каталогу безопасен.
+    for tenant in tenants:
+        if stop or budget <= 0:
+            break
+        with tenant_scope(tenant):
+            accepted = list(
+                CatalogMaster.objects.filter(
+                    invite_status=ACCEPTED,
+                    linked_bot_user__isnull=False,
+                    catalog_specialist_id__isnull=False,
+                    ayla_user_id__isnull=True,
+                    archived_at__isnull=True,
+                    invited_at__gte=expired_before,
+                )
+                .select_related("linked_bot_user")
+                .order_by("invited_at")[:budget]
+            )
+            budget -= len(accepted)
+            for master in accepted:
+                try:
+                    bind_accepted_master(master, actor_label=ACTOR_LINK_SWEEP)
+                except SpecialistIdentityLinkRefused as exc:
+                    counters["identity_refused"] += 1
+                    logger.warning(
+                        "catalog.link_sweep.identity_link_refused master=%s reason=%s "
+                        "correlation_id=%s — повтор следующим тиком до срока; вручную: "
+                        "link_master_identities --apply",
+                        master.pk,
+                        exc.reason,
+                        exc.correlation_id,
+                    )
+                except Exception:  # noqa: BLE001 — одна строка не валит тик
+                    counters["identity_refused"] += 1
+                    logger.exception("catalog.link_sweep.identity_link_failed master=%s", master.pk)
+                else:
+                    counters["identity_linked"] += 1
 
     logger.info(
         "catalog.link_sweep.done candidates=%d linked=%d unavailable=%d expired=%d "

@@ -249,6 +249,7 @@ def upsert_specialists(tenant: "Tenant", dtos: list["CatalogSpecialistDTO"]) -> 
                 # оговорок — пустое фото каталога стирает платформенное. Ключа
                 # ``avatar`` нет (``None``, каталог без поля) — поле не трогается.
                 mirror["photo_url"] = dto.avatar_url
+            found_existing = False
             try:
                 with transaction.atomic():
                     # DRF-1507 — сначала канонический ключ, потом ключ склейки.
@@ -308,14 +309,22 @@ def upsert_specialists(tenant: "Tenant", dtos: list["CatalogSpecialistDTO"]) -> 
                         )
                         result.created += 1
                     else:
+                        found_existing = True
                         block_before = sale_block(obj)
-                        for field_name, value in mirror.items():
+                        row_mirror = dict(mirror)
+                        if row_mirror["ayla_user_id"] is None and obj.ayla_user_id is not None:
+                            # Каталог промолчал о пользователе (``user`` пуст),
+                            # а связь личности его уже записала
+                            # (``remember_catalog_user_id``): молчание источника
+                            # не повод стереть ключ, по которому строку находят.
+                            del row_mirror["ayla_user_id"]
+                        for field_name, value in row_mirror.items():
                             setattr(obj, field_name, value)
                         # ``synced_at`` — ``auto_now``, а ``auto_now`` пишется
                         # только если поле названо в ``update_fields``. Без
                         # него «когда платформа последний раз трогала строку»
                         # молча замерло бы на дате создания.
-                        obj.save(update_fields=[*mirror, "synced_at"])
+                        obj.save(update_fields=[*row_mirror, "synced_at"])
                         result.updated += 1
                         _note_sale_block_transition(obj, before=block_before)
             except IntegrityError as exc:
@@ -339,7 +348,10 @@ def upsert_specialists(tenant: "Tenant", dtos: list["CatalogSpecialistDTO"]) -> 
                 # nothing, so a row still invisible in this tenant's scope after
                 # a unique violation means the id is taken outside it.
                 ayla_id = getattr(dto, "ayla_master_id", "?")
-                if CatalogMaster.objects.filter(pk=ayla_id).exists():
+                # Строку нашли и обновляли (в т.ч. строку приглашения с
+                # ``uuid4`` в ``pk``) — конфликт её собственный, а не «id занят
+                # чужим салоном»: причина — текст ошибки, не догадка.
+                if found_existing or CatalogMaster.objects.filter(pk=ayla_id).exists():
                     result.errors.append({"ayla_master_id": ayla_id, "reason": str(exc)})
                     logger.exception(
                         "catalog.upsert.row_failed model=CatalogMaster ayla_master_id=%s",
