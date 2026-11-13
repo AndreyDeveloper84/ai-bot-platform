@@ -353,6 +353,81 @@ def _resolve_bot_user(*, user_id: UUID, tenant: Tenant) -> BotUser | None:
     )
 
 
+def _fill_client_name_from_ayla(*, bot_user: BotUser, appointment_id: UUID) -> None:
+    """Blank-fill ``display_name`` of the booking's client from Ayla.
+
+    ### Why
+
+    A client who books a master of ANOTHER tenant from the global bot gets a
+    fresh per-tenant ``BotUser`` (``apps.orchestrator.handoff``), copied from
+    the global row — which carries no name. The master surface names a client
+    by ``client_name`` → ``display_name`` → «Гость»
+    (``apps.master_api.services.visit_source``), so the master saw «Гость»
+    for a person whose name Ayla knows.
+
+    ### What
+
+    Only when BOTH name fields are blank and the row is linked to an Ayla
+    user: fetch the profile per event-contract §7.4 — the same call and the
+    same two-field closed shape the ``user.profile.updated`` consumer uses
+    (§3.12: ``display_name`` only, never phone or email) — and write
+    ``display_name`` under a conditional ``UPDATE … WHERE`` both names are
+    still blank, so a value written meanwhile is never painted over.
+
+    ### Best-effort
+
+    A name is cosmetic; the booking is not. Any fetch failure is logged with
+    ids only and swallowed: dead-lettering ``booking.created`` over a name
+    would silence the master notification, the reminders and the mirror —
+    exactly what this event exists to deliver. The next booking (or a
+    ``user.profile.updated``) fills it later.
+    """
+    if bot_user.ayla_user_id is None:
+        return
+    if (bot_user.client_name or "").strip() or (bot_user.display_name or "").strip():
+        return
+
+    # No Ayla REST configured (tests, a bare dev box): nothing to ask, and
+    # not a failure worth a warning on every booking.
+    if not getattr(settings, "AYLA_BASE_URL", "") or not getattr(
+        settings, "AYLA_INTERNAL_API_TOKEN", ""
+    ):
+        return
+
+    from apps.integrations.ayla.profile_client import fetch_profile_fields
+    from apps.integrations.ayla.user_proxy import external_user_id_for
+
+    try:
+        profile = fetch_profile_fields(
+            bot_user.ayla_user_id, on_behalf_of=external_user_id_for(bot_user)
+        )
+    except Exception as exc:  # noqa: BLE001 — best-effort, see docstring
+        logger.warning(
+            "eventbus.consumer.booking.created.client_name_fetch_failed "
+            "appointment_id=%s bot_user_id=%s error=%s",
+            appointment_id,
+            bot_user.pk,
+            type(exc).__name__,
+        )
+        return
+
+    name = (profile.display_name or "").strip()[
+        : BotUser._meta.get_field("display_name").max_length
+    ]
+    if not name:
+        return
+    filled = BotUser.all_tenants.filter(pk=bot_user.pk, display_name="", client_name="").update(
+        display_name=name
+    )
+    if filled:
+        bot_user.display_name = name
+        logger.info(
+            "eventbus.consumer.booking.created.client_name_filled appointment_id=%s bot_user_id=%s",
+            appointment_id,
+            bot_user.pk,
+        )
+
+
 def _applied_event_marks(envelope: IngestEnvelope) -> dict[str, Any]:
     """Отметка применённого события — ОДНА на все пути, пишущие зеркало (DRF-2537).
 
@@ -1010,6 +1085,11 @@ def handle_booking_created(envelope: IngestEnvelope) -> None:
     # Resolve channel-side BotUser so we know whether the proxy is
     # linked or orphan before the upsert fires.
     bot_user = _resolve_bot_user(user_id=UUID(envelope.require_user_id()), tenant=tenant)
+
+    # The master sees the client by this row's name — fill it before
+    # anything announces the booking (see the helper).
+    if bot_user is not None:
+        _fill_client_name_from_ayla(bot_user=bot_user, appointment_id=appointment_id)
 
     service_uuid = UUID(data["service_id"]) if data.get("service_id") else None
     specialist_uuid = UUID(data["specialist_id"]) if data.get("specialist_id") else None
