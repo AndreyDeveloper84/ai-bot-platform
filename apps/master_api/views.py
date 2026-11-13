@@ -809,15 +809,17 @@ def _link_identity_in_catalog(master: CatalogMaster, bot_user: BotUser) -> None:
     """Связь личности мастера в каталоге — лучшая попытка, приём не рушит (DRF-2442).
 
     Нет ``catalog_specialist_id`` — связывать не с чем: строка ещё не привязана
-    к каталогу (``apps.catalog.identity``), её дозаводит подметальщик, и уже
-    после этого связь ставит команда ``link_master_identities``. Это отдельная
+    к каталогу (``apps.catalog.identity``), её дозаводит подметальщик и сам же
+    ставит связь (``link_unlinked_salon_masters``); вручную — команда
+    ``link_master_identities``. Это отдельная
     ветвь, а не отказ: у неё своя строка журнала, чтобы «не с чем связывать» не
     читалось как «каталог отказал».
     """
 
     from apps.identity.services.specialist_identity_link import (
+        ACTOR_INVITE_ACCEPT,
         SpecialistIdentityLinkRefused,
-        bind_master_identity_in_catalog,
+        bind_accepted_master,
     )
 
     specialist_id = getattr(master, "catalog_specialist_id", None)
@@ -825,15 +827,13 @@ def _link_identity_in_catalog(master: CatalogMaster, bot_user: BotUser) -> None:
         logger.warning(
             "master_api.onboarding_accept.identity_link_skipped reason=catalog_unlinked "
             "master=%s — строка ещё не привязана к каталогу; связь поставит "
-            "link_master_identities после привязки",
+            "подметальщик link_unlinked_salon_masters после привязки",
             master.id,
         )
         return
     try:
-        outcome = bind_master_identity_in_catalog(
-            specialist_id=specialist_id,
-            bot_user=bot_user,
-        )
+        master.linked_bot_user = bot_user
+        outcome = bind_accepted_master(master, actor_label=ACTOR_INVITE_ACCEPT)
     except SpecialistIdentityLinkRefused as exc:
         logger.warning(
             "master_api.onboarding_accept.identity_link_refused reason=%s master=%s "

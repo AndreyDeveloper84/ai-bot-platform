@@ -654,7 +654,13 @@ def link_unlinked_salon_masters() -> dict[str, int]:
         CatalogIdentityUnavailable,
         ensure_catalog_specialist_identity,
     )
+    from apps.catalog.master_state import ACCEPTED
     from apps.catalog.models import CatalogMaster
+    from apps.identity.services.specialist_identity_link import (
+        ACTOR_LINK_SWEEP,
+        SpecialistIdentityLinkRefused,
+        bind_accepted_master,
+    )
     from apps.tenancy.context import tenant_scope
 
     now = timezone.now()
@@ -663,7 +669,15 @@ def link_unlinked_salon_masters() -> dict[str, int]:
     # Нижняя граница «громкого» окна — те, чей срок истёк с прошлого тика.
     just_expired_after = expired_before - timedelta(hours=1)
 
-    counters = {"candidates": 0, "linked": 0, "unavailable": 0, "expired": 0, "stopped": 0}
+    counters = {
+        "candidates": 0,
+        "linked": 0,
+        "unavailable": 0,
+        "expired": 0,
+        "stopped": 0,
+        "identity_linked": 0,
+        "identity_refused": 0,
+    }
     budget = LINK_SWEEP_BATCH
     previous_contour_reason: str | None = None
     stop = False
@@ -740,12 +754,35 @@ def link_unlinked_salon_masters() -> dict[str, int]:
                 previous_contour_reason = None
                 counters["linked"] += 1
 
+                # Мастер принял приглашение, пока каталог лежал: приём
+                # связать личность не смог (не было id каталога), и без связи
+                # кабинет отвечает 403 ``subject_unresolved``, а синк не
+                # находит строку по ``ayla_user_id``. Связь — тут же, тем же
+                # идемпотентным ключом; отказ — в журнал по имени, тик идёт.
+                if master.invite_status == ACCEPTED and master.linked_bot_user_id:
+                    try:
+                        bind_accepted_master(master, actor_label=ACTOR_LINK_SWEEP)
+                    except SpecialistIdentityLinkRefused as exc:
+                        counters["identity_refused"] += 1
+                        logger.warning(
+                            "catalog.link_sweep.identity_link_refused master=%s reason=%s "
+                            "correlation_id=%s — дозвонить: link_master_identities --apply",
+                            master.pk,
+                            exc.reason,
+                            exc.correlation_id,
+                        )
+                    else:
+                        counters["identity_linked"] += 1
+
     logger.info(
-        "catalog.link_sweep.done candidates=%d linked=%d unavailable=%d expired=%d stopped=%d",
+        "catalog.link_sweep.done candidates=%d linked=%d unavailable=%d expired=%d "
+        "stopped=%d identity_linked=%d identity_refused=%d",
         counters["candidates"],
         counters["linked"],
         counters["unavailable"],
         counters["expired"],
         counters["stopped"],
+        counters["identity_linked"],
+        counters["identity_refused"],
     )
     return counters

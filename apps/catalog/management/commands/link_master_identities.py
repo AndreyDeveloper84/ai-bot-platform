@@ -97,7 +97,7 @@ class Command(BaseCommand):
         from apps.identity.services.specialist_identity_link import (
             ACTOR_BACKFILL,
             SpecialistIdentityLinkRefused,
-            bind_master_identity_in_catalog,
+            bind_accepted_master,
         )
 
         rows = _pending_rows()
@@ -115,11 +115,7 @@ class Command(BaseCommand):
         reasons: Counter[str] = Counter()
         for row in rows:
             try:
-                bind_master_identity_in_catalog(
-                    specialist_id=row.catalog_specialist_id,
-                    bot_user=row.linked_bot_user,
-                    actor_label=ACTOR_BACKFILL,
-                )
+                bind_accepted_master(row, actor_label=ACTOR_BACKFILL)
             except SpecialistIdentityLinkRefused as exc:
                 reasons[exc.reason] += 1
                 continue

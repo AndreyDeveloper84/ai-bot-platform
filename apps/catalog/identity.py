@@ -427,3 +427,41 @@ __all__ = [
     "ensure_catalog_specialist_identity",
     "salon_provisioning_claim",
 ]
+
+
+def remember_catalog_user_id(master: Any, ayla_user_id: Any) -> bool:
+    """Записать мастеру ``ayla_user_id`` после связи личности в каталоге.
+
+    Только в пустое поле: его же пишет синхронизация, и перезапись чужого
+    непустого значения сделала бы связь тихим редактором зеркала. Без этого
+    ключа строка приглашения салона не находилась синком по ``ayla_user_id``
+    (соло пишет его в ``solo_ayla_link``).
+
+    Возвращает ``True``, когда записано. Конфликт с другой строкой того же
+    салона (``uq_catalog_master_tenant_ayla_user_id``) — дубль, который
+    сливает человек, а не связь: в журнал по имени, без записи.
+    """
+
+    from django.db import IntegrityError, transaction
+
+    if not ayla_user_id:
+        return False
+    model = type(master)
+    try:
+        with transaction.atomic():
+            updated = model.all_tenants.filter(pk=master.pk, ayla_user_id__isnull=True).update(
+                ayla_user_id=ayla_user_id
+            )
+    except IntegrityError:
+        logger.error(
+            "catalog.identity.ayla_user_id_conflict master=%s tenant=%s ayla_user_id=%s — "
+            "у салона уже есть строка с этим пользователем каталога; дубль сливается "
+            "отдельным шагом, связь его не трогает",
+            master.pk,
+            getattr(master, "tenant_id", None),
+            ayla_user_id,
+        )
+        return False
+    if updated:
+        master.ayla_user_id = ayla_user_id
+    return bool(updated)

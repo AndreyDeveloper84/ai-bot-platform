@@ -274,6 +274,18 @@ def upsert_specialists(tenant: "Tenant", dtos: list["CatalogSpecialistDTO"]) -> 
                     # Здесь строка ровно одна, и она та, к которой привязан
                     # живой ``BotUser``.
                     obj = CatalogMaster.objects.filter(pk=dto.ayla_master_id).first()
+                    if obj is None:
+                        # Строка приглашения салона: ``uuid4`` в ``id``, а id
+                        # каталога ей записала привязка (``apps.catalog.identity``)
+                        # в ``catalog_specialist_id``. ``ayla_user_id`` у неё
+                        # пуст, пока личность не связана, — поиск только по нему
+                        # строку не находил, синк заводил вторую и падал на
+                        # ``uq_catalog_master_tenant_catalog_specialist_id``
+                        # каждый удар, а мастер так и не продавался. Рёбра
+                        # ищутся тем же ключом (``upsert_master_services``).
+                        obj = CatalogMaster.objects.filter(
+                            catalog_specialist_id=dto.ayla_master_id
+                        ).first()
                     if obj is None and dto.user_id:
                         obj = CatalogMaster.objects.filter(ayla_user_id=dto.user_id).first()
                         if obj is not None:

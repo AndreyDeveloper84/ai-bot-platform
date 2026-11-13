@@ -55,6 +55,9 @@ _IDEMPOTENCY_NAMESPACE = uuid.UUID("9f3b71c4-2442-4c8a-bd11-6e5a0d7c9e42")
 #: Метка вызывающего для аудита каталога: не имя человека, а место в коде.
 ACTOR_INVITE_ACCEPT = "bot:onboarding_accept"
 ACTOR_BACKFILL = "bot:link_master_identities"
+#: Подметальщик ``link_unlinked_salon_masters``: строка получила id каталога
+#: ПОСЛЕ того, как мастер принял приглашение, — связь ставится тут же.
+ACTOR_LINK_SWEEP = "bot:link_sweep"
 #: DRF-2450 (А): соло-мастер связывается сразу после провижининга, в том же ходе.
 ACTOR_SOLO_PROVISIONING = "bot:solo_provisioning"
 
@@ -207,6 +210,32 @@ def bind_master_identity_in_catalog(
         correlation_id=correlation_id,
         idempotency_key=idempotency_key,
     )
+
+
+def bind_accepted_master(
+    master: Any,
+    *,
+    actor_label: str,
+    http_client: Any | None = None,
+) -> SpecialistIdentityLinkOutcome:
+    """Связать личность принявшего мастера салона и запомнить ``ayla_user_id``.
+
+    Нужны ``catalog_specialist_id`` и ``linked_bot_user`` строки. Отказ —
+    :class:`SpecialistIdentityLinkRefused`, как у
+    :func:`bind_master_identity_in_catalog`; ``ayla_user_id`` при отказе не
+    пишется.
+    """
+
+    from apps.catalog.identity import remember_catalog_user_id
+
+    outcome = bind_master_identity_in_catalog(
+        specialist_id=master.catalog_specialist_id,
+        bot_user=master.linked_bot_user,
+        actor_label=actor_label,
+        http_client=http_client,
+    )
+    remember_catalog_user_id(master, outcome.ayla_user_id)
+    return outcome
 
 
 def bind_solo_identity_after_provisioning(link: Any, *, bot_user: Any) -> str | None:
