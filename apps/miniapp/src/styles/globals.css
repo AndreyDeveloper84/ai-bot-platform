@@ -5713,7 +5713,6 @@ a {
 .wellness-dash__goal-card,
 .wellness-dash__today-goals,
 .wellness-dash__plan-item,
-.wellness-dash__plan-empty,
 .wellness-dash__booking-card,
 .wellness-dash__ayla-card,
 .wellness-dash__consent,
@@ -5849,8 +5848,10 @@ a {
 }
 
 /* Цель — строка доски «Моя цель» (решение 12.11, п.2). Кнопка внутри
-   растянута на всю карточку (`::after`): нажимается вся строка, а
-   заголовок блока остаётся вне кнопки. */
+   растянута на строку (`::after` от `.wellness-dash__goal-main`): нажимается
+   вся строка, а заголовок блока остаётся вне кнопки. Подвал с «Составить
+   план» / «Мой план» (вариант Б, 12.11) стоит ВНЕ строки и оверлеем не
+   накрывается — сторож `homeGoalRow2950.build.test.ts`. */
 .wellness-dash__goal-card {
   display: flex;
   flex-wrap: wrap;
@@ -5858,8 +5859,13 @@ a {
   gap: var(--s-3);
   padding: var(--s-3);
 }
-.wellness-dash__goal-card--link {
+.wellness-dash__goal-main {
   position: relative;
+  display: flex;
+  flex: 1 1 100%;
+  align-items: center;
+  gap: var(--s-3);
+  min-width: 0;
 }
 .wellness-dash__goal-text {
   display: flex;
@@ -5889,8 +5895,8 @@ a {
 .wellness-dash__goal-row::after {
   content: "";
   position: absolute;
-  inset: 0;
-  border-radius: var(--r-lg);
+  inset: calc(-1 * var(--s-2));
+  border-radius: var(--r-md);
 }
 .wellness-dash__goal-row:active::after {
   background: color-mix(in srgb, var(--c-text-primary) 6%, transparent);
@@ -5912,6 +5918,21 @@ a {
   color: var(--c-text-secondary);
 }
 .wellness-dash__goal-hint {
+  margin: 0;
+  font-size: var(--font-size-200);
+  color: var(--c-text-secondary);
+}
+/* Подвал строки цели: вход в план, когда блока «План на сегодня» нет. */
+.wellness-dash__goal-plan {
+  display: flex;
+  flex: 1 1 100%;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0 var(--s-2);
+  padding-top: var(--s-2);
+  border-top: 1px solid var(--c-divider);
+}
+.wellness-dash__goal-plan-text {
   margin: 0;
   font-size: var(--font-size-200);
   color: var(--c-text-secondary);
@@ -5954,12 +5975,6 @@ a {
 }
 
 /* «План на сегодня» — строки доски (п.4). */
-.wellness-dash__plan-empty {
-  margin: 0;
-  padding: var(--s-3);
-  font-size: var(--font-size-200);
-  color: var(--c-text-secondary);
-}
 .wellness-dash__plan-list {
   display: flex;
   flex-direction: column;

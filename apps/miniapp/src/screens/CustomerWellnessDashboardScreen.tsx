@@ -27,11 +27,14 @@
  *   Block 1 — одно приветствие `h1` + фраза дня (Tau §3 / §11.9 + §11.10);
  *     под ним карточка «Начнём с малого?» (Д31 а) человеку с пустым днём
  *   Block G — строка цели «Моя цель ›»: «Активная цель», цель, срок и
- *     «Неделя N»; вся строка — экран цели; без цели — «Выбери цель»
+ *     «Неделя N»; вся строка — экран цели; без цели — «Выбери цель». Под
+ *     строкой — «План ещё не составлен» + «Составить план» или «Мой план»
+ *     (уточнение владельца 12.11, вариант Б, §175)
  *   Block 4 — «Шаги на сегодня» карточкой шага: «Ещё N стаканов до нормы»
  *     и «Стакан воды» (норма из анкеты питания, Д31 б, §175 п.3)
- *   Block P — «План на сегодня» из Plan Lite: кнопка плана в шапке блока,
- *     строки с «✓», «+» у воды, «›» у остальных (§175 п.4)
+ *   Block P — «План на сегодня» из Plan Lite — только когда есть строки на
+ *     сегодня: «Продолжить сегодняшний план →» в шапке, строки с «✓», «+» у
+ *     воды, «›» у остальных (§175 п.4, вариант Б)
  *   Block 5 — Ближайшая запись: плитка-значок, услуга, бейдж, мастер и
  *     салон, время, адрес и цена, «Открыть запись»; «Все мои записи» —
  *     справа от заголовка (Д11); нет записи — «Записей нет» + «Записаться»
@@ -889,29 +892,18 @@ export function CustomerWellnessDashboardScreen() {
     waterKnown && waterTargetKnown ? Math.max(0, waterTarget - waterEaten) : 0;
   const showTodayGoals = waterRemaining > 0;
 
-  // ── «План на сегодня»: что стоит в шапке блока (DRF-2950, п.4) ─────────
+  // ── «План на сегодня» (DRF-2950, §175 п.4 и уточнение 12.11, вариант Б) ──
   //
-  // Кнопки плана переехали из карточки цели в шапку блока плана (решение
-  // владельца 12.11) — на место «Смотреть весь план». «Составить план» и
-  // «Мой план» (DRF-2876) — только при цели, как и раньше в её карточке.
-  // «Продолжить сегодняшний план» — при любом плане: раньше при плане без
-  // цели (цели нет, слой цели или сводка не ответили) в шапке блока стояла
-  // «Смотреть весь план» с тем же переходом; теперь её место занимает эта
-  // кнопка (названо в §175). Без кнопки блока нет: план недоступен или ещё
-  // грузится — о плане молчим.
-  //
-  // «Мой план» при сохранённом новом плане — шапка без строк: шаги нового
-  // плана на Главной не дублируются (решение 09.10, вариант «а»). Вопрос
-  // владельцу в DRF-2950 (12.11) — оставить так или вернуть «Мой план» под
-  // строку цели.
-  const planData = planSlice.kind === "ok" ? planSlice.data : null;
-  const planHead: PlanHead | null = planData
-    ? "continue"
-    : planSlice.kind === "ok" && goal
-      ? "compose"
-      : planSlice.kind === "saved" && goal
-        ? "mine"
-        : null;
+  // Блок есть, только когда у него есть строки на сегодня: «пустой шапки с
+  // одной кнопкой на экране не будет» (владелец 12.11). В шапке — «Продолжить
+  // сегодняшний план →», на месте прежней «Смотреть весь план», при любом
+  // плане со строками (в том числе без цели — названо в §175). «Составить
+  // план» и «Мой план» стоят у строки цели (`GoalCard`), как раньше в её
+  // карточке. План недоступен или ещё грузится — о плане молчим.
+  const planData =
+    planSlice.kind === "ok" && planSlice.data && planSlice.data.actions.length > 0
+      ? planSlice.data
+      : null;
 
   // Стакан с карточки шага, добравший норму, снимает карточку вместе с
   // нажатой кнопкой: фокус ушёл бы в никуда, а блок плана поднялся бы под
@@ -1044,11 +1036,17 @@ export function CustomerWellnessDashboardScreen() {
 
         {/* Цель — строка доски «Моя цель» (решение 12.11, п.2): слова прежние,
             нажатие — экран цели. Цель — из `wellness/today.active_goals`
-            (три состояния, DRF-1476). Кнопок плана здесь больше нет — они в
-            шапке блока «План на сегодня» (п.4). */}
+            (три состояния, DRF-1476). Под строкой — «Составить план» / «Мой
+            план» (уточнение 12.11, вариант Б). */}
         {today.kind === "loading" && <GoalSkeleton />}
         {today.kind === "ok" && (
-          <GoalCard goal={goal} goalsKnown={goalsKnown} onGoal={onGoalTap} />
+          <GoalCard
+            goal={goal}
+            goalsKnown={goalsKnown}
+            plan={planSlice}
+            onGoal={onGoalTap}
+            onPlan={onPlanTap}
+          />
         )}
 
         {/* «Шаги на сегодня» — карточка «Твой следующий шаг» доски (решение
@@ -1056,8 +1054,10 @@ export function CustomerWellnessDashboardScreen() {
             «Ещё N стаканов до нормы» с кнопкой стакана. Место — второе, как на
             доске (прежде блок стоял после сводки дня: отклонение PR #1894,
             а не решение владельца; Д31 (б) решал только, что блок остаётся).
-            Виден, только когда норма воды известна и не набрана; на пилоте
-            нормы нет ни у кого — блок появится с ней. */}
+            Виден, только когда норма воды известна и не набрана. Норма есть у
+            тех, кто подтвердил её происхождение (DRF-2257: справочник по
+            полу, подтверждённый человеком, или своё число); у остальных
+            блока нет. */}
         {showTodayGoals && today.kind === "ok" && (
           <section
             className="wellness-dash__today-goals"
@@ -1091,9 +1091,8 @@ export function CustomerWellnessDashboardScreen() {
         )}
 
         {/* «План на сегодня» — строки доски (решение 12.11, п.4). */}
-        {planHead && (
+        {planData && (
           <PlanToday
-            head={planHead}
             plan={planData}
             diaryOff={diaryOff}
             onPlan={onPlanTap}
@@ -1689,9 +1688,6 @@ const PLAN_CADENCE_PERIOD: Record<PlanLiteCadence, string> = {
   per_2_weeks: PLAN_LITE_COPY.twoWeeks,
 };
 
-/** Что стоит в шапке блока «План на сегодня» (DRF-2950, п.4). */
-type PlanHead = "continue" | "compose" | "mine";
-
 function GoalSkeleton() {
   return (
     <div className="wellness-dash__goal-card" aria-hidden="true">
@@ -1716,16 +1712,29 @@ function GoalSkeleton() {
  *
  * Заголовок блока (`h2`) стоит ВНЕ кнопки — заголовок внутри кнопки
  * недопустим, а навигация по заголовкам не должна терять цель. Кнопка
- * растянута на всю карточку (`::after`), поэтому нажимается вся строка.
+ * растянута на строку (`::after` от `.wellness-dash__goal-main`), поэтому
+ * нажимается вся строка — но не подвал под ней.
+ *
+ * Подвал — вход в план, когда блока «План на сегодня» нет (уточнение
+ * владельца 12.11, вариант Б): плана нет — «План ещё не составлен» и
+ * «Составить план» (без стрелки, §172 ответ 39); сохранён новый план —
+ * «Мой план» (DRF-2876, решение 09.10). Условия — те же, что были у этих
+ * кнопок в карточке цели до DRF-2950: только при цели. Подвал стоит ВНЕ
+ * строки-кнопки, соседом: кнопка в кнопке недопустима, а растянутый
+ * `::after` строки его не накрывает.
  */
 function GoalCard({
   goal,
   goalsKnown,
+  plan,
   onGoal,
+  onPlan,
 }: {
   goal: ActiveGoal | undefined;
   goalsKnown: boolean;
+  plan: PlanSlice;
   onGoal: () => void;
+  onPlan: () => void;
 }) {
   if (!goal) {
     // Нет цели / слой цели не ответил — та же строка, чтобы экран не «прыгал»
@@ -1759,48 +1768,57 @@ function GoalCard({
 
   const due = formatGoalDue(goal.target_date);
   const week = goal.week_num ? `Неделя ${goal.week_num}` : "";
+  const noPlan = plan.kind === "ok" && plan.data === null;
+  const savedPlan = plan.kind === "saved";
   return (
-    <section
-      className="wellness-dash__goal-card wellness-dash__goal-card--link"
-      aria-labelledby="goal-header"
-    >
-      <span className="wellness-dash__mark">
-        <PlanMarkIcon kind="step" />
-      </span>
-      <div className="wellness-dash__goal-text">
-        <h2 id="goal-header" className="wellness-dash__goal-eyebrow">
-          Активная цель
-        </h2>
-        {/* Имя — цель словами человека; «Активная цель» — описание. */}
-        <button
-          type="button"
-          className="wellness-dash__goal-row"
-          aria-describedby="goal-header"
-          onClick={onGoal}
-        >
-          <span className="wellness-dash__goal-title">{goal.title}</span>
-          {/* DRF-2173 — срок «До 1 ноября 2026»; без срока его нет. Части —
-              отдельными строками текста, разделитель — украшение. */}
-          {(due || week) && (
-            <span className="wellness-dash__goal-meta">
-              {due && <span>{due}</span>}
-              {due && week ? (
-                // Разделитель — вместе со следующей частью: на узком
-                // экране он не повисает в конце строки.
-                <span className="wellness-dash__sep-part">
-                  <span aria-hidden="true"> · </span>
-                  <span>{week}</span>
-                </span>
-              ) : (
-                week && <span>{week}</span>
-              )}
-            </span>
-          )}
-        </button>
+    <section className="wellness-dash__goal-card" aria-labelledby="goal-header">
+      <div className="wellness-dash__goal-main">
+        <span className="wellness-dash__mark">
+          <PlanMarkIcon kind="step" />
+        </span>
+        <div className="wellness-dash__goal-text">
+          <h2 id="goal-header" className="wellness-dash__goal-eyebrow">
+            Активная цель
+          </h2>
+          {/* Имя — цель словами человека; «Активная цель» — описание. */}
+          <button
+            type="button"
+            className="wellness-dash__goal-row"
+            aria-describedby="goal-header"
+            onClick={onGoal}
+          >
+            <span className="wellness-dash__goal-title">{goal.title}</span>
+            {/* DRF-2173 — срок «До 1 ноября 2026»; без срока его нет. Части —
+                отдельными строками текста, разделитель — украшение. */}
+            {(due || week) && (
+              <span className="wellness-dash__goal-meta">
+                {due && <span>{due}</span>}
+                {due && week ? (
+                  // Разделитель — вместе со следующей частью: на узком
+                  // экране он не повисает в конце строки.
+                  <span className="wellness-dash__sep-part">
+                    <span aria-hidden="true"> · </span>
+                    <span>{week}</span>
+                  </span>
+                ) : (
+                  week && <span>{week}</span>
+                )}
+              </span>
+            )}
+          </button>
+        </div>
+        <span className="wellness-dash__chevron">
+          <RecordIcon name="chevron" />
+        </span>
       </div>
-      <span className="wellness-dash__chevron">
-        <RecordIcon name="chevron" />
-      </span>
+      {(noPlan || savedPlan) && (
+        <div className="wellness-dash__goal-plan">
+          {noPlan && <p className="wellness-dash__goal-plan-text">План ещё не составлен</p>}
+          <button type="button" className="wellness-dash__head-link" onClick={onPlan}>
+            {noPlan ? "Составить план" : PLAN_LITE_COPY.entryFromDashboard}
+          </button>
+        </div>
+      )}
     </section>
   );
 }
@@ -1808,27 +1826,26 @@ function GoalCard({
 /**
  * «План на сегодня» — строки доски (решение владельца 12.11, п.4).
  *
- * * Кнопка плана — в шапке блока: «Продолжить сегодняшний план →» (Д6:
- *   стрелка — украшение) / «Составить план» / «Мой план» (без стрелки, §172
- *   ответ 39). Счёта «N из 3» в шапке нет.
+ * * Блок есть, только когда есть строки (вариант Б, уточнение 12.11). В
+ *   шапке — «Продолжить сегодняшний план →» (Д6: стрелка — украшение).
+ *   Счёта «N из 3» в шапке нет. «Составить план» / «Мой план» — у строки
+ *   цели.
  * * Строка: значок действия в круге, подпись, период и «N из M». Сделано не
  *   меньше нужного — круг с галочкой («✓» у всех действий, как раньше).
- * * Вода — «+» справа: то же действие, что «Стакан воды». Полосы нет:
- *   на доске она — литры против нормы, а здесь счёт плана; нормы воды на
- *   пилоте нет ни у кого, и §82 запрещает шкалу без ориентира. Экран «План»
- *   её тоже не рисует.
+ * * Вода — «+» справа: то же действие, что «Стакан воды». Полосы нет
+ *   (владелец 12.11): «N из M» считает записи воды по плану, а полоса на
+ *   доске — литры против нормы; полоса смешала бы две разные меры. Экран
+ *   «План» её тоже не рисует.
  * * Остальные строки — целиком кнопка на экран плана, шеврон справа.
  */
 function PlanToday({
-  head,
   plan,
   diaryOff,
   onPlan,
   onWater,
   onAdjust,
 }: {
-  head: PlanHead;
-  plan: PlanLite | null;
+  plan: PlanLite;
   diaryOff: boolean;
   onPlan: () => void;
   onWater: () => void;
@@ -1841,99 +1858,84 @@ function PlanToday({
           План на сегодня
         </h2>
         <button type="button" className="wellness-dash__head-link" onClick={onPlan}>
-          {head === "continue" ? (
-            <>
-              Продолжить сегодняшний план
-              <span aria-hidden="true"> →</span>
-            </>
-          ) : head === "compose" ? (
-            "Составить план"
-          ) : (
-            // DRF-2876 — сохранён новый план: вход в него; подпись — та же,
-            // что у раздела.
-            PLAN_LITE_COPY.entryFromDashboard
-          )}
+          Продолжить сегодняшний план
+          <span aria-hidden="true"> →</span>
         </button>
       </div>
-      {head === "compose" && <p className="wellness-dash__plan-empty">План ещё не составлен</p>}
-      {plan && (
-        <ul className="wellness-dash__plan-list">
-          {plan.actions.map((a) => {
-            const label = PLAN_ACTION_LABELS[a.action_type];
-            const done = a.done_count >= a.target_count;
-            const text = (
-              <span className="wellness-dash__plan-text">
-                <span className="wellness-dash__plan-label">{label}</span>
-                <span className="wellness-dash__plan-period">
-                  {PLAN_CADENCE_PERIOD[a.cadence]}
-                  {done ? (
-                    // «✓» словом — для скринридера; глазу его говорит круг.
-                    <span className="visually-hidden">, выполнено</span>
-                  ) : (
-                    <span className="wellness-dash__sep-part">
-                      <span aria-hidden="true"> · </span>
-                      <span className="wellness-dash__plan-count">
-                        {PLAN_LITE_COPY.ofTotal(a.done_count, a.target_count)}
-                      </span>
+      <ul className="wellness-dash__plan-list">
+        {plan.actions.map((a) => {
+          const label = PLAN_ACTION_LABELS[a.action_type];
+          const done = a.done_count >= a.target_count;
+          const text = (
+            <span className="wellness-dash__plan-text">
+              <span className="wellness-dash__plan-label">{label}</span>
+              <span className="wellness-dash__plan-period">
+                {PLAN_CADENCE_PERIOD[a.cadence]}
+                {done ? (
+                  // «✓» словом — для скринридера; глазу его говорит круг.
+                  <span className="visually-hidden">, выполнено</span>
+                ) : (
+                  <span className="wellness-dash__sep-part">
+                    <span aria-hidden="true"> · </span>
+                    <span className="wellness-dash__plan-count">
+                      {PLAN_LITE_COPY.ofTotal(a.done_count, a.target_count)}
                     </span>
-                  )}
-                </span>
+                  </span>
+                )}
               </span>
-            );
-            const mark = done ? (
-              <span className="wellness-dash__mark wellness-dash__mark--done">
-                <RecordIcon name="check" size={22} />
-              </span>
-            ) : (
-              <PlanMark kind={ACTION_MARKS[a.action_type]} />
-            );
-            if (a.action_type === "log_water" && !diaryOff) {
-              return (
-                <li key={a.action_type} className="wellness-dash__plan-item">
-                  {mark}
-                  {text}
-                  {/* Повторяемое действие: «+» остаётся и после нормы. */}
-                  <button
-                    type="button"
-                    className="wellness-dash__plan-add"
-                    aria-label="Добавить стакан воды"
-                    onClick={onWater}
-                  >
-                    <RecordIcon name="plus" size={22} />
-                  </button>
-                </li>
-              );
-            }
+            </span>
+          );
+          const mark = done ? (
+            <span className="wellness-dash__mark wellness-dash__mark--done">
+              <RecordIcon name="check" size={22} />
+            </span>
+          ) : (
+            <PlanMark kind={ACTION_MARKS[a.action_type]} />
+          );
+          if (a.action_type === "log_water" && !diaryOff) {
             return (
-              <li key={a.action_type}>
+              <li key={a.action_type} className="wellness-dash__plan-item">
+                {mark}
+                {text}
+                {/* Повторяемое действие: «+» остаётся и после нормы. */}
                 <button
                   type="button"
-                  className="wellness-dash__plan-item wellness-dash__plan-item--go"
-                  onClick={onPlan}
+                  className="wellness-dash__plan-add"
+                  aria-label="Добавить стакан воды"
+                  onClick={onWater}
                 >
-                  {mark}
-                  {text}
-                  <span className="wellness-dash__chevron">
-                    <RecordIcon name="chevron" />
-                  </span>
+                  <RecordIcon name="plus" size={22} />
                 </button>
               </li>
             );
-          })}
-        </ul>
-      )}
+          }
+          return (
+            <li key={a.action_type}>
+              <button
+                type="button"
+                className="wellness-dash__plan-item wellness-dash__plan-item--go"
+                onClick={onPlan}
+              >
+                {mark}
+                {text}
+                <span className="wellness-dash__chevron">
+                  <RecordIcon name="chevron" />
+                </span>
+              </button>
+            </li>
+          );
+        })}
+      </ul>
       {/* Attention-состояние по фризу 25.08 п.2 — человеческим языком. Кнопка
           ведёт в разговор с Ayla внутри Mini App (DRF-2950, решение владельца
           12.11, п.10); что именно поправить, человек пишет сам — контекст в
           разговор не передаётся. */}
-      {plan && (
-        <div className="wellness-dash__plan-attention" role="note">
-          <p className="wellness-dash__plan-attention-text">Сегодня не получается по плану?</p>
-          <RecordButton variant="soft" icon="ayla" onClick={onAdjust}>
-            Скорректировать с Ayla
-          </RecordButton>
-        </div>
-      )}
+      <div className="wellness-dash__plan-attention" role="note">
+        <p className="wellness-dash__plan-attention-text">Сегодня не получается по плану?</p>
+        <RecordButton variant="soft" icon="ayla" onClick={onAdjust}>
+          Скорректировать с Ayla
+        </RecordButton>
+      </div>
     </section>
   );
 }

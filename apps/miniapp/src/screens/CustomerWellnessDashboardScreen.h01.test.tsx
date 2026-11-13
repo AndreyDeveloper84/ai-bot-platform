@@ -195,9 +195,26 @@ describe("H01 · нет цели", () => {
     const cta = await screen.findByRole("button", { name: "Выбери цель" });
     expect(screen.queryByRole("button", { name: "Продолжить сегодняшний план" })).toBeNull();
     expect(screen.queryByRole("heading", { name: "План на сегодня" })).toBeNull();
+    // Подвал плана — только при цели, как прежние кнопки в карточке цели.
+    expect(screen.queryByRole("button", { name: "Составить план" })).toBeNull();
+    expect(screen.queryByText("План ещё не составлен")).toBeNull();
 
     fireEvent.click(cta);
     expect(screen.getByTestId("location")).toHaveTextContent("/customer/goal-select");
+  });
+
+  it.each([
+    ["цели нет, сохранён новый план", { ...TODAY_WITH_GOAL, active_goals: [] }, { savedPlan: { plan_id: "p-2", steps: [] } }],
+    ["цель не удалось загрузить, плана нет", { ...TODAY_WITH_GOAL, active_goals: undefined }, {}],
+  ])("%s — подвала плана нет", async (_case, today, extra) => {
+    serve({ today, ...extra });
+    renderHome();
+
+    // Присутствие: строка цели отрисована.
+    expect(await screen.findByText("Цель")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Составить план" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Мой план" })).toBeNull();
+    expect(screen.queryByText("План ещё не составлен")).toBeNull();
   });
 });
 
@@ -206,23 +223,27 @@ describe("H01 · нет цели", () => {
 // ---------------------------------------------------------------------------
 
 describe("H01 · цель без плана", () => {
-  // Решение 12.11, п.4 (DRF-2950): кнопки плана — в шапке блока «План на
-  // сегодня»; «План ещё не составлен» переехала туда же из карточки цели.
-  it("строка цели — метка и название; «План ещё не составлен» и «Составить план» — в блоке плана → /customer/plan", async () => {
+  // Уточнение владельца 12.11, вариант Б (§175): блока «План на сегодня»
+  // без строк нет; «План ещё не составлен» и «Составить план» — у строки
+  // цели, как раньше в её карточке.
+  it("строка цели — метка и название; под ней «План ещё не составлен» и «Составить план» → /customer/plan; блока плана нет", async () => {
     serve();
     renderHome();
 
     const card = (await screen.findByText("Активная цель")).closest("section") as HTMLElement;
     expect(within(card).getByText("Подтянуть фигуру")).toBeInTheDocument();
-    expect(within(card).queryByText("План ещё не составлен")).toBeNull();
-    expect(within(card).queryByRole("button", { name: "Составить план" })).toBeNull();
-
-    const plan = screen.getByRole("heading", { name: "План на сегодня" }).closest("section") as HTMLElement;
-    expect(within(plan).getByText("План ещё не составлен")).toBeInTheDocument();
-    expect(within(plan).queryByRole("list")).toBeNull();
+    expect(within(card).getByText("План ещё не составлен")).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "План на сегодня" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Продолжить сегодняшний план" })).toBeNull();
 
-    fireEvent.click(within(plan).getByRole("button", { name: "Составить план" }));
+    const compose = within(card).getByRole("button", { name: "Составить план" });
+    // Кнопка — соседка строки цели, не внутри неё (кнопка в кнопке
+    // недопустима) и не под её растянутым слоем: подвал вне обёртки строки.
+    expect(compose.parentElement?.closest("button")).toBeNull();
+    expect(compose.closest(".wellness-dash__goal-main")).toBeNull();
+    expect(card.querySelector(".wellness-dash__goal-main")).not.toBeNull(); // присутствие обёртки
+
+    fireEvent.click(compose);
     expect(screen.getByTestId("location")).toHaveTextContent("/customer/plan");
   });
 
@@ -800,22 +821,24 @@ const SAVED_PLAN = {
 };
 
 describe("H01 · сохранён новый план (решение владельца 09.10, вариант «а»)", () => {
-  // Решение 12.11, п.4: «Мой план» — в шапке блока «План на сегодня». Строк
-  // и счёта прежнего плана нет (09.10, вариант «а»): блок — одна шапка.
-  // Вопрос владельцу (DRF-2950, 12.11): оставить так или вернуть «Мой план»
-  // под строку цели.
-  it("шапка блока плана с «Мой план»; строк и счёта прежнего плана нет, хотя он есть", async () => {
+  // Уточнение владельца 12.11, вариант Б (§175): при сохранённом новом
+  // плане блока «План на сегодня» нет, «Мой план» — под строкой цели
+  // отдельной кнопкой. Строк и счёта прежнего плана нет (09.10, вариант «а»).
+  it("блока «План на сегодня» нет; «Мой план» — под строкой цели; строк и счёта прежнего плана нет, хотя он есть", async () => {
     serve({ plan: PLAN, savedPlan: SAVED_PLAN });
     renderHome();
 
     const mine = await screen.findByRole("button", { name: "Мой план" });
-    const block = screen.getByRole("heading", { name: "План на сегодня" }).closest("section") as HTMLElement;
-    expect(block).toContainElement(mine);
+    const card = screen.getByText("Активная цель").closest("section") as HTMLElement;
+    expect(card).toContainElement(mine);
+    expect(mine.parentElement?.closest("button")).toBeNull();
+    expect(mine.closest(".wellness-dash__goal-main")).toBeNull();
     // Положительный контроль: строка цели отрисована, счётчик недель на месте.
     expect(screen.getByText("Неделя 2")).toBeInTheDocument();
-    expect(within(block).queryByRole("list")).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "План на сегодня" })).not.toBeInTheDocument();
     expect(screen.queryByText("4 из 7")).not.toBeInTheDocument();
     expect(screen.queryByText(/выполнено/i)).not.toBeInTheDocument();
+    expect(screen.queryByText("План ещё не составлен")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Продолжить сегодняшний план" })).not.toBeInTheDocument();
   });
 
