@@ -2390,15 +2390,47 @@ def _send_menu(event: CanonicalEvent, role_ctx, tenant, entry) -> None:
 def _sender_name(event: CanonicalEvent) -> str:
     """The person's channel-side name, from where MAX actually puts it.
 
-    ``message.sender.name`` — not a top-level ``display_name``, which MAX
-    never sends. Getting this wrong is silent: the BotUser is created
-    nameless and the opportunistic blank-fill never fires again, so the
-    salon sees an unnamed staff member forever.
+    MAX puts the person in a different place for each kind of event
+    (``apps/channels/max/parser.py``), and never in a top-level
+    ``display_name``:
+
+    * ``message_callback`` (a button tap) — ``callback.user``. The
+      ``message`` of such an event is the BOT's message that carried the
+      keyboard, so its ``sender`` is the bot. Reading it there named every
+      solo master after the bot: «Оставить «Ayla Бот для мастеров»» after
+      «Я работаю сам», the master «Ayla Бот для мастеров» in the cabinet and
+      the salon «Студия Ayla» (ручной проход на стенде 13.11.2026, DRF-1503). So a tap NEVER
+      falls back to ``message.sender``;
+    * ``bot_started`` (a deeplink, e.g. ``inv_<код>``) — the top-level
+      ``user``; there is no ``message`` at all;
+    * ``message_created`` — ``message.sender``.
+
+    ``name`` first, else ``first_name`` + ``last_name``. Getting this
+    wrong is silent: the BotUser is created with a wrong or empty name and
+    the opportunistic blank-fill never fires again, so the salon sees an
+    unnamed staff member forever.
     """
 
     raw = event.raw if isinstance(event.raw, dict) else {}
-    sender = (raw.get("message") or {}).get("sender") or {}
-    return (sender.get("name") or "").strip()
+    if "callback" in raw:
+        # Нажатие — по КЛЮЧУ, не по форме значения: даже искажённый
+        # ``callback`` не должен откатить чтение в ``message.sender`` (бот).
+        callback = raw.get("callback")
+        person = callback.get("user") if isinstance(callback, dict) else None
+    elif isinstance(raw.get("user"), dict):
+        person = raw.get("user")
+    else:
+        person = (raw.get("message") or {}).get("sender")
+    if not isinstance(person, dict):
+        return ""
+    name = str(person.get("name") or "").strip()
+    if name:
+        return name
+    parts = (
+        str(person.get("first_name") or "").strip(),
+        str(person.get("last_name") or "").strip(),
+    )
+    return " ".join(part for part in parts if part)
 
 
 def _bot_slug_for(tenant) -> str:
