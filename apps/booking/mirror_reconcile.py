@@ -75,7 +75,7 @@ from django.db.models import Q
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
-from apps.booking.mirror_status import LIVE_STATUSES, TERMINAL_STATUSES
+from apps.booking.mirror_status import LIVE_STATUSES, TERMINAL_STATUSES, WIRE_STATUS_ALIASES
 from apps.booking.models import RemoteBookingProxy
 from apps.integrations.ayla.salon_client import (
     SalonAPIError,
@@ -115,6 +115,16 @@ def _is_live(status: str) -> bool:
     """
 
     return status in LIVE_STATUSES or status not in TERMINAL_STATUSES
+
+
+def _same_status(a: str, b: str) -> bool:
+    """Equal after folding a known wire→mirror rename, never looser.
+
+    Compared raw, every prepaid booking read as «статус разошёлся» and paged
+    ops on the second tick. Any difference outside the alias table is real.
+    """
+
+    return WIRE_STATUS_ALIASES.get(a, a) == WIRE_STATUS_ALIASES.get(b, b)
 
 
 @dataclass(frozen=True)
@@ -290,7 +300,7 @@ def compare(
             # Liveness disagrees — a missed cancel/confirm event whichever
             # way it points.
             status_mismatch.append((appointment_id, a.status, m.status))
-        elif m_live and m.status != a.status:
+        elif m_live and not _same_status(m.status, a.status):
             # Both live but under different slugs (confirmed vs
             # awaiting_payment) — the day screens still show the visit,
             # yet the mirror is stale and the detector should say so.
