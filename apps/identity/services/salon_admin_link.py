@@ -14,6 +14,11 @@ OWNER RULING 18.09 (вариант А, комментарий в DRF-2085). Ро
 **Решение владельца 13.11.2026:** то же — при ``role=owner`` (владелец пишет
 часы и отгулы мастеров, каталог пускает только admin TUR). В каталоге у
 владельца та же роль ``salon_admin``: другой роли ruling не разрешает.
+Отличие от admin — отказ каталога у владельца НЕ откатывает роль в боте:
+до решения владелец получал её без каталога, и человек, чья MAX-личность
+уже связана с другой учёткой (владелец-мастер), не должен терять роль
+владельца из-за правила «одна личность — одна учётка администратора».
+Отказ — в аудит и оператору текстом; роль выдана.
 
 **Ввод кода приглашения каталог НЕ зовёт** (``link_catalog=False``):
 ruling п.1 — operator-only capability, не пользовательский способ
@@ -349,29 +354,38 @@ def recording_refusals() -> Iterator[None]:
     откатившейся транзакции, откатилась бы вместе с ней, и отказ не оставил
     бы следа в боте (пункт 10 ruling'а — аудит в обеих системах).
     """
+    try:
+        yield
+    except CatalogAdminLinkRefused as exc:
+        audit_refused(exc)
+        raise
+
+
+def audit_refused(exc: CatalogAdminLinkRefused, *, role: str | None = None) -> None:
+    """Строка аудита отказа каталога (``STAFF_SALON_ADMIN_LINK_REFUSED``).
+
+    ``role`` — роль бота, которую выдавали, когда она не совпадает с ролью
+    исключения (владелец: каталог отвечает за ``salon_admin``).
+    """
     from apps.audit.services import write_audit
     from apps.events.vocabulary import STAFF_SALON_ADMIN_LINK_REFUSED
     from apps.tenancy.context import tenant_scope
 
-    try:
-        yield
-    except CatalogAdminLinkRefused as exc:
-        with tenant_scope(exc.tenant):
-            write_audit(
-                STAFF_SALON_ADMIN_LINK_REFUSED,
-                target="identity.BotUser",
-                target_id=exc.bot_user.pk,
-                payload={
-                    "surface": exc.actor_label.split(":", 1)[0],
-                    "actor_label": exc.actor_label,
-                    "role": exc.role,
-                    "tenant_id": str(exc.tenant.id),
-                    "person_id": str(exc.bot_user.pk),
-                    "reason": exc.reason,
-                    "correlation_id": exc.correlation_id,
-                },
-            )
-        raise
+    with tenant_scope(exc.tenant):
+        write_audit(
+            STAFF_SALON_ADMIN_LINK_REFUSED,
+            target="identity.BotUser",
+            target_id=exc.bot_user.pk,
+            payload={
+                "surface": exc.actor_label.split(":", 1)[0],
+                "actor_label": exc.actor_label,
+                "role": role or exc.role,
+                "tenant_id": str(exc.tenant.id),
+                "person_id": str(exc.bot_user.pk),
+                "reason": exc.reason,
+                "correlation_id": exc.correlation_id,
+            },
+        )
 
 
 __all__ = [
@@ -379,6 +393,7 @@ __all__ = [
     "CatalogAdminLinkOutcome",
     "CatalogAdminLinkRefused",
     "audit_linked",
+    "audit_refused",
     "ensure_catalog_salon_admin",
     "ensure_catalog_salon_receptionist",
     "idempotency_key_for",

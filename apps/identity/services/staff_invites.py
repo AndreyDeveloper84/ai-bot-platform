@@ -208,6 +208,9 @@ class RedeemResult:
     already_had_role: bool
     catalog_master_id: str | None = None
     bot_user: BotUser | None = None
+    #: Владелец (§176): каталог отказал в половине, роль в боте выдана.
+    #: Отказ — объект исключения, чтобы дверь показала причину и «что сделать».
+    catalog_link_refusal: Any = None
     tenant: "Tenant | None" = None
 
 
@@ -721,6 +724,20 @@ def grant_staff_role(
     """
 
     link_outcome = None
+    link_refusal = None
+    if role == StaffInvite.Role.OWNER and link_catalog:
+        # До каталога: второй владелец отказывается ЗДЕСЬ, а не unique-индексом
+        # после — иначе каталог успел бы завести ему учётку salon_admin, а
+        # откат бота её не снимает (права в каталоге без роли в боте).
+        # Индекс остаётся сторожем гонки.
+        if (
+            TenantStaff.all_tenants.filter(
+                tenant_id=tenant_id, role=StaffInvite.Role.OWNER, deactivated_at__isnull=True
+            )
+            .exclude(bot_user=bot_user)
+            .exists()
+        ):
+            raise OwnerAlreadyExists("tenant already has an active owner")
     # Решение владельца 13.11.2026 (аудит регистрации салона, п.4, вариант «а»):
     # каталожная половина — и у ``owner``. Владелец пишет часы и отгулы
     # мастеров своим MAX-токеном, каталог пускает только admin TUR салона
@@ -732,10 +749,25 @@ def grant_staff_role(
         from apps.identity.services import salon_admin_link
 
         tenant = Tenant.all_objects.get(pk=tenant_id)
-        link_outcome = salon_admin_link.ensure_catalog_salon_admin(
-            tenant=tenant, bot_user=bot_user, actor_label=actor_label
-        )
-        if link_outcome.created:
+        try:
+            link_outcome = salon_admin_link.ensure_catalog_salon_admin(
+                tenant=tenant, bot_user=bot_user, actor_label=actor_label
+            )
+        except salon_admin_link.CatalogAdminLinkRefused as exc:
+            if role != StaffInvite.Role.OWNER:
+                raise
+            # Владелец: роль в боте выдаётся и без половины, как до §176;
+            # отказ — в аудит этой же транзакцией и оператору в ответе.
+            link_refusal = exc
+            salon_admin_link.audit_refused(exc, role=role)
+            logger.warning(
+                "identity.staff_invite.owner_catalog_half_refused tenant=%s reason=%s "
+                "correlation_id=%s",
+                tenant_id,
+                exc.reason,
+                exc.correlation_id,
+            )
+        if link_outcome is not None and link_outcome.created:
             salon_admin_link.audit_linked(
                 link_outcome, tenant=tenant, bot_user=bot_user, actor_label=actor_label
             )
@@ -747,7 +779,12 @@ def grant_staff_role(
         deactivated_at__isnull=True,
     ).first()
     if existing is not None:
-        return RedeemResult(role=role, tenant_id=str(tenant_id), already_had_role=True)
+        return RedeemResult(
+            role=role,
+            tenant_id=str(tenant_id),
+            already_had_role=True,
+            catalog_link_refusal=link_refusal,
+        )
 
     try:
         # Savepoint: an IntegrityError poisons the enclosing transaction,
@@ -783,7 +820,12 @@ def grant_staff_role(
         )
         return RedeemResult(role=role, tenant_id=str(tenant_id), already_had_role=True)
 
-    return RedeemResult(role=role, tenant_id=str(tenant_id), already_had_role=False)
+    return RedeemResult(
+        role=role,
+        tenant_id=str(tenant_id),
+        already_had_role=False,
+        catalog_link_refusal=link_refusal,
+    )
 
 
 def _link_master(invite: StaffInvite, bot_user: BotUser) -> RedeemResult:

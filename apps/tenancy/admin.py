@@ -965,6 +965,17 @@ class TenantStaffAdmin(_ReadOnlyStaffAdmin):
                     # выдана; оператору причина и «что сделать».
                     self.message_user(request, exc.operator_text(), messages.ERROR)
                 else:
+                    refusal = getattr(result, "catalog_link_refusal", None)
+                    if refusal is not None:
+                        # §176: владельцу роль в боте выдана, каталог половину
+                        # не завёл — оператору причина и «что сделать».
+                        self.message_user(
+                            request,
+                            f"Роль owner в боте выдана, но права администратора в "
+                            f"каталоге не заведены: {refusal.reason} — {refusal.hint} "
+                            f"(correlation_id {refusal.correlation_id}).",
+                            messages.WARNING,
+                        )
                     if result.already_had_role:
                         self.message_user(
                             request, self.ROLE_WORDS["already_had_role"], messages.WARNING

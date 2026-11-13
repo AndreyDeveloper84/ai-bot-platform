@@ -5,6 +5,8 @@
 (``IsTenantAdmin``) — владелец получал 403 ``salon_write_refused``. Решение
 (вариант «а»): каталожную половину заводит оператор и для ``owner``, той же
 дверью, что для ``admin`` (DRF-2085); код приглашения каталог не зовёт.
+Отказ каталога роль владельца в боте не отнимает; второй владелец отказывается
+до вызова каталога.
 """
 
 from __future__ import annotations
@@ -15,11 +17,15 @@ import pytest
 from pytest_httpx import HTTPXMock
 
 from apps.audit.models import AuditLog
-from apps.events.vocabulary import STAFF_SALON_ADMIN_LINKED
+from apps.events.vocabulary import STAFF_SALON_ADMIN_LINK_REFUSED, STAFF_SALON_ADMIN_LINKED
 from apps.identity.models import BotUser
-from apps.identity.services.salon_admin_link import CatalogAdminLinkRefused, idempotency_key_for
+from apps.identity.services.salon_admin_link import idempotency_key_for
 from apps.identity.services.specialist_onboarding import OnboardingActor
-from apps.identity.services.staff_invites import issue_staff_invite, redeem_staff_invite
+from apps.identity.services.staff_invites import (
+    OwnerAlreadyExists,
+    issue_staff_invite,
+    redeem_staff_invite,
+)
 from apps.identity.services.staff_roles import grant_role_by_operator
 from apps.tenancy.models import StaffInvite, Tenant, TenantStaff
 
@@ -126,7 +132,12 @@ def test_existing_owner_gets_the_half_by_a_repeat_grant(
     assert len(_linked(person)) == 1
 
 
-def test_a_catalog_refusal_writes_no_owner_row(httpx_mock: HTTPXMock, tenant, person) -> None:
+def test_a_catalog_refusal_still_grants_the_owner_role_and_says_why(
+    httpx_mock: HTTPXMock, tenant, person
+) -> None:
+    """Владелец-мастер: личность уже связана с учёткой специалиста, каталог
+    отказывает по правилу «одна личность — одна учётка администратора».
+    До §176 роль выдавалась без каталога — отказ половины её не отнимает."""
     httpx_mock.add_response(
         method="POST",
         url=_url(tenant),
@@ -140,7 +151,29 @@ def test_a_catalog_refusal_writes_no_owner_row(httpx_mock: HTTPXMock, tenant, pe
         },
     )
 
-    with pytest.raises(CatalogAdminLinkRefused):
+    result = grant_role_by_operator(tenant=tenant, bot_user=person, role="owner", actor=_actor())
+
+    assert _owners(tenant, person) == 1
+    assert result.catalog_link_refusal is not None
+    assert result.catalog_link_refusal.reason == "identity_already_bound"
+    (refused,) = AuditLog.all_tenants.filter(
+        action=STAFF_SALON_ADMIN_LINK_REFUSED, target_id=person.pk
+    )
+    assert refused.payload["role"] == "owner"
+    assert refused.payload["reason"] == "identity_already_bound"
+
+
+@pytest.mark.httpx_mock(assert_all_responses_were_requested=False)
+def test_a_second_owner_is_refused_before_the_catalog_is_asked(
+    httpx_mock: HTTPXMock, tenant, person
+) -> None:
+    """Иначе каталог завёл бы второму человеку salon_admin, а откат бота её не снял бы."""
+    httpx_mock.add_response(method="POST", url=_url(tenant), json=_ok(tenant), status_code=201)
+    first = BotUser.all_tenants.create(tenant=tenant, channel="max", channel_user_id="7700202")
+    TenantStaff.all_tenants.create(tenant=tenant, bot_user=first, role="owner")
+
+    with pytest.raises(OwnerAlreadyExists):
         grant_role_by_operator(tenant=tenant, bot_user=person, role="owner", actor=_actor())
 
+    assert httpx_mock.get_requests() == []  # каталог не спрошен
     assert _owners(tenant, person) == 0
