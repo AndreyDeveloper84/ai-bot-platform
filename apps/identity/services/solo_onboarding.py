@@ -307,7 +307,7 @@ def slug_proven_by(slug: str, identities: Iterable[tuple[str, str]]) -> bool:
     return any(is_own_solo_slug(slug, channel, cuid) for channel, cuid in identities)
 
 
-def owner_identities(tenant_id: object) -> set[tuple[str, str]]:
+def owner_identities(tenant_id: UUID | str) -> set[tuple[str, str]]:
     """``(channel, channel_user_id)`` of EVERY owner row of the tenant.
 
     Active and deactivated alike: the question is the cabinet's origin, not
